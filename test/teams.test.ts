@@ -295,6 +295,57 @@ describe("shapes seen live", () => {
   });
 });
 
+describe("new chats", () => {
+  const me = `8:orgid:${OID}`;
+  const people = [
+    { name: "Novak, Jana (QA)", email: "jana.novak@example.com", mri: null },
+    { name: "김민준(KIM MIN JUN)", email: "minjun.kim@example.com", mri: "8:orgid:11111111-2222-4333-8444-555555555555" },
+    { name: "Kim, Bo", email: "bo@x.com", mri: "8:orgid:b0" },
+    { name: "Kim, Bora", email: "bora@x.com", mri: "8:orgid:b1" },
+  ];
+
+  it("picks one person by email, by the only result, or by an exact full name", () => {
+    expect(teams.pickPerson("BO@x.com", people, me).mri).toBe("8:orgid:b0");
+    expect(teams.pickPerson("김민준", [people[1]], me).mri).toBe(people[1].mri);
+    expect(teams.pickPerson("Bo Kim", people.slice(2), me).mri).toBe("8:orgid:b0"); // "Kim, Bo" ~ "Bo Kim"
+    // The part in parentheses is a name too (seen live: several Kims come back for this query).
+    expect(teams.pickPerson("KIM MIN JUN", people, me).mri).toBe(people[1].mri);
+    expect(teams.pickPerson("min jun kim", people, me).mri).toBe(people[1].mri);
+  });
+
+  it("refuses ambiguous names, nobody, and people without a Teams id", () => {
+    expect(() => teams.pickPerson("Kim", people.slice(1), me)).toThrow(/matches 3 people/);
+    expect(() => teams.pickPerson("nobody@x.com", people, me)).toThrow(/Nobody found/);
+    expect(() => teams.pickPerson("Jana Novak", [people[0]], me)).toThrow(/no Teams account/);
+    expect(() => teams.pickPerson("me", [{ name: "Me", email: "m@x.com", mri: me }], me)).toThrow(/Nobody found/);
+  });
+
+  it("derives the 1:1 chat id from both object ids, sorted (as Teams does)", () => {
+    expect(teams.oneOnOneId(me, "8:orgid:11111111-2222-4333-8444-555555555555")).toBe(
+      `19:11111111-2222-4333-8444-555555555555_${OID}@unq.gbl.spaces`,
+    );
+    expect(teams.oneOnOneId(me, "28:bot")).toBeNull();
+  });
+
+  it("reuses an existing chat with exactly those people", () => {
+    const chats = [
+      { id: "1on1", kind: "oneOnOne", title: "Bo", members: [me, "8:orgid:b0"] },
+      { id: "group", kind: "group", title: "Plan", members: ["8:orgid:b1", me, "8:orgid:b0"] },
+      { id: "meet", kind: "meeting", title: "M", members: [me, "8:orgid:b0", "8:orgid:b1"] },
+    ];
+    expect(teams.findExistingChat(chats, ["8:orgid:b0"], me)?.id).toBe("1on1");
+    expect(teams.findExistingChat(chats, ["8:orgid:b0", "8:orgid:b1"], me)?.id).toBe("group");
+    expect(teams.findExistingChat(chats, ["8:orgid:b0", "8:orgid:b1"], me, "Other")).toBeNull();
+    expect(teams.findExistingChat(chats, ["8:orgid:b1"], me)).toBeNull();
+  });
+
+  it("reads the new chat's id from the Location header or the body", () => {
+    expect(teams.threadIdFrom("https://x/api/chatsvc/kr/v1/threads/19%3Aabc%40thread.v2", null)).toBe("19:abc@thread.v2");
+    expect(teams.threadIdFrom(null, { id: "19:def@thread.v2" })).toBe("19:def@thread.v2");
+    expect(teams.threadIdFrom(null, {})).toBeNull();
+  });
+});
+
 describe("versions", () => {
   const read = (f: string) => JSON.parse(readFileSync(f, "utf8"));
 

@@ -484,3 +484,79 @@ export function clientMessageId() {
   while (s.length < 19) s += Math.floor(Math.random() * 10);
   return s;
 }
+
+// ------------------------------------------------------------ new chats
+
+/** Letters and digits of a name as a sorted set of words: "Novak, Jana" ~ "Jana Novak". */
+const nameWords = (s) =>
+  String(s ?? "")
+    .toLowerCase()
+    .split(/[^\p{L}\p{N}]+/u)
+    .filter(Boolean)
+    .sort()
+    .join(" ");
+
+/** A display name's forms: whole, without "(…)", and each "(…)" part ("김민준(KIM MIN JUN)", "Novak, Jana (QA)"). */
+const nameForms = (name) => {
+  const s = String(name ?? "");
+  const inner = [...s.matchAll(/\(([^)]*)\)/g)].map((m) => m[1]);
+  return [s, s.replace(/\([^)]*\)/g, " "), ...inner].map(nameWords).filter(Boolean);
+};
+
+export const sameName = (name, query) => nameForms(name).includes(nameWords(query));
+
+/**
+ * The one person a name or address means, from people search results. An email matches
+ * exactly; a name wins when it is the only result or the only exact full-name match.
+ * People without a Teams id (MRI) can't be added to a chat.
+ */
+export function pickPerson(query, people, meMri) {
+  const q = String(query).trim();
+  const found = people.filter((p) => p.mri !== meMri);
+  const isEmail = /^[^\s@]+@[^\s@]+$/.test(q);
+  let matches = isEmail
+    ? found.filter((p) => p.email?.toLowerCase() === q.toLowerCase())
+    : found.length === 1
+      ? found
+      : found.filter((p) => sameName(p.name, q));
+  if (!matches.length && !isEmail && found.length > 1) {
+    const list = found.slice(0, 8).map((p) => `${p.name} <${p.email ?? "?"}>`);
+    throw new Error(`"${q}" matches ${found.length} people; give a full name or an email address:\n${list.join("\n")}`);
+  }
+  if (!matches.length) throw new Error(`Nobody found for "${q}". Use find_people to look them up.`);
+  if (matches.length > 1) {
+    throw new Error(`"${q}" matches ${matches.length} people; give an email address:\n${matches.map((p) => `${p.name} <${p.email ?? "?"}>`).join("\n")}`);
+  }
+  const p = matches[0];
+  if (!p.mri) {
+    throw new Error(`${p.name} <${p.email ?? "?"}> has no Teams account that can be reached from yours (e.g. outside your organization), so no chat can be started with them.`);
+  }
+  return p;
+}
+
+/** The id Teams gives the 1:1 chat between two users: both object ids, sorted. */
+export function oneOnOneId(mriA, mriB) {
+  const [a, b] = [oidOf(mriA), oidOf(mriB)];
+  if (!a || !b) return null;
+  return `19:${[a, b].sort().join("_")}@unq.gbl.spaces`;
+}
+
+/** An existing chat with exactly these people (and me): the 1:1 for one person, else an untitled-or-matching group. */
+export function findExistingChat(chats, memberMris, meMri, title) {
+  const want = [...new Set([...memberMris, meMri])].sort().join("|");
+  return (
+    chats.find((c) => {
+      if (c.kind === "meeting" || c.kind === "channel") return false;
+      if (memberMris.length === 1 ? c.kind !== "oneOnOne" : c.kind === "oneOnOne") return false;
+      if (memberMris.length > 1 && title && (c.title ?? "").toLowerCase() !== title.toLowerCase()) return false;
+      return [...new Set(c.members)].sort().join("|") === want;
+    }) ?? null
+  );
+}
+
+/** The new thread's id from chatsvc's answer to creating it (Location header or body). */
+export function threadIdFrom(location, json) {
+  const fromLocation = /\/threads\/([^/?]+)/.exec(location ?? "")?.[1];
+  const id = fromLocation ? decodeURIComponent(fromLocation) : (json?.id ?? json?.threadId ?? null);
+  return id && /^19:/.test(id) ? id : null;
+}

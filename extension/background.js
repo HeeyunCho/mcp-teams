@@ -157,7 +157,7 @@ async function pageFetch(url, method, headers, body, timeoutMs) {
       body: body == null ? undefined : JSON.stringify(body),
       signal: AbortSignal.timeout(timeoutMs),
     });
-    return { status: res.status, text: await res.text() };
+    return { status: res.status, text: await res.text(), location: res.headers.get("location") };
   } catch (err) {
     return { status: 0, text: "", error: err?.name === "TimeoutError" ? "timeout" : String(err?.message ?? err) };
   }
@@ -187,7 +187,7 @@ async function runInTab(tab, url, method, headers, body) {
  * One request to a Teams service. `path` is relative to the service's base URL (or a
  * full URL on it). Returns the parsed JSON (null for an empty answer).
  */
-async function api(service, path, { method = "GET", body, raw = false } = {}) {
+async function api(service, path, { method = "GET", body, raw = false, withLocation = false } = {}) {
   let cap = await getCapture(service);
   let tab = await findTeamsTab(cap ? new URL(cap.base).origin : null);
   if (!cap) {
@@ -208,6 +208,15 @@ async function api(service, path, { method = "GET", body, raw = false } = {}) {
   if (res.status >= 400) {
     const start = res.text.replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim().slice(0, 200);
     throw new Error(`Teams HTTP ${res.status} (${service})${start ? `: ${start}` : ""}`);
+  }
+  if (withLocation) {
+    let json = null;
+    try {
+      json = res.text ? JSON.parse(res.text) : null;
+    } catch {
+      // The location is what matters here.
+    }
+    return { json, location: res.location ?? null };
   }
   if (!res.text) return null;
   try {
@@ -284,6 +293,45 @@ function describe(id, { teams: ts, chats }) {
   const chat = chats.find((c) => c.id === id);
   if (chat) return { id, kind: chat.kind, title: chat.title };
   return { id, kind: /@thread\.(tacv2|skype)$/.test(id) ? "channel" : null, title: null };
+}
+
+/** People search as in Teams' people picker (substrate suggestions). */
+async function searchPeople(query, limit) {
+  const body = {
+    EntityRequests: [{ Query: { QueryString: query, DisplayQueryString: query }, EntityType: "People", Size: limit, Fields: ["Id", "MRI", "DisplayName", "EmailAddresses", "PeopleType", "PeopleSubtype", "UserPrincipalName", "GivenName", "Surname", "JobTitle", "Department", "CompanyName", "OfficeLocation", "ExternalDirectoryObjectId"] }],
+    cvid: crypto.randomUUID(),
+    logicalId: crypto.randomUUID(),
+    AppName: "Microsoft Teams",
+    Scenario: { Name: "peoplepicker.newChat" },
+  };
+  return teams.parseSuggestions(await api("substrate", "/search/api/v1/suggestions?scenario=peoplepicker.newChat", { method: "POST", body }));
+}
+
+/** Each name or address as the one person it means (see teams.pickPerson). */
+async function resolvePeople(queries, me) {
+  const people = [];
+  for (const q of queries) {
+    const query = String(q).trim();
+    if (/^8:orgid:/i.test(query)) {
+      await lookupNames([query]);
+      people.push({ mri: query, name: names.get(query) ?? query, email: null });
+      continue;
+    }
+    let found = await searchPeople(query, 10);
+    // People search can miss a full name it would find by one of its words (seen with
+    // "KIM MIN JUN" for "김민준(KIM MIN JUN)"): then search each word, keeping exact names.
+    const words = query.split(/\s+/).filter((w) => w.length > 1);
+    if (!found.length && words.length > 1) {
+      for (const w of words) {
+        found = (await searchPeople(w, 25)).filter((p) => teams.sameName(p.name, query));
+        if (found.length) break;
+      }
+    }
+    people.push(teams.pickPerson(query, found, me));
+  }
+  const unique = people.filter((p, i) => people.findIndex((x) => x.mri === p.mri) === i);
+  if (unique.some((p) => p.mri === me)) throw new Error("You don't need to add yourself; you are always in the chat.");
+  return unique;
 }
 
 const MESSAGES_VIEW = "msnp24Equivalent|supportsMessageProperties";
@@ -385,14 +433,7 @@ const handlers = {
   },
 
   async findPeople({ query, limit = 10 }) {
-    const body = {
-      EntityRequests: [{ Query: { QueryString: query, DisplayQueryString: query }, EntityType: "People", Size: limit, Fields: ["Id", "MRI", "DisplayName", "EmailAddresses", "PeopleType", "PeopleSubtype", "UserPrincipalName", "GivenName", "Surname", "JobTitle", "Department", "CompanyName", "OfficeLocation", "ExternalDirectoryObjectId"] }],
-      cvid: crypto.randomUUID(),
-      logicalId: crypto.randomUUID(),
-      AppName: "Microsoft Teams",
-      Scenario: { Name: "peoplepicker.newChat" },
-    };
-    const people = teams.parseSuggestions(await api("substrate", "/search/api/v1/suggestions?scenario=peoplepicker.newChat", { method: "POST", body }));
+    const people = await searchPeople(query, limit);
     return { count: people.length, people };
   },
 
@@ -413,8 +454,21 @@ const handlers = {
     return { reloading: true, version: VERSION };
   },
 
-  async requestSend({ conversation, text, threadId, subject }) {
+  async requestSend({ conversation, to, title, text, threadId, subject }) {
     if (!String(text ?? "").trim()) throw new Error("The message is empty.");
+    if (to?.length) {
+      if (conversation) throw new Error("Give either a conversation or people (to), not both.");
+      if (threadId || subject) throw new Error("reply_to and subject are for channels; a new chat takes people and an optional title.");
+      const me = await myMri();
+      if (!me) throw new Error("Teams hasn't shown who is signed in yet. Reload the Teams tab and try again.");
+      const people = await resolvePeople(to, me);
+      if (title && people.length < 2) throw new Error("A title is only for group chats (two or more people besides you).");
+      const existing = teams.findExistingChat((await teamsAndChats(true)).chats, people.map((p) => p.mri), me, title);
+      const request = existing
+        ? { conversation: { id: existing.id, kind: existing.kind, title: existing.title }, people, text: String(text), existingChat: true }
+        : { conversation: null, newChat: { members: people.map((p) => p.mri), title: title ?? null }, people, text: String(text) };
+      return askUserToConfirm(request);
+    }
     const conv = await resolve(conversation);
     if (threadId && conv.kind !== "channel") throw new Error("reply_to is only for channel posts; in a chat, just send the message.");
     if (subject && (conv.kind !== "channel" || threadId)) throw new Error("A subject is only for a new channel post.");
@@ -428,7 +482,36 @@ const handlers = {
   },
 };
 
-async function sendMessage({ conversation, text, threadId, subject }) {
+/**
+ * Creates a chat with these members and me (called only after the user clicked Send).
+ * A 1:1 chat that already exists on Teams' side comes back as that chat.
+ */
+async function createChat({ members, title }) {
+  const me = await myMri();
+  const oneOnOne = members.length === 1;
+  const body = {
+    members: [me, ...members].map((id) => ({ id, role: "Admin" })),
+    properties: {
+      threadType: "chat",
+      chatFilesIndexId: "2",
+      ...(oneOnOne ? { fixedRoster: "true", uniquerosterthread: "true" } : {}),
+      ...(title ? { topic: title } : {}),
+    },
+  };
+  const { json, location } = await api("chatsvc", "/v1/threads", { method: "POST", body, withLocation: true });
+  const id = teams.threadIdFrom(location, json) ?? (oneOnOne ? teams.oneOnOneId(me, members[0]) : null);
+  if (!id) throw new Error("Teams created no chat (its answer had no chat id).");
+  listCache = null; // the chat list changed
+  return id;
+}
+
+async function sendMessage({ conversation, newChat, people, text, threadId, subject }) {
+  if (newChat) {
+    const id = await createChat(newChat);
+    const title = newChat.title ?? people.map((p) => p.name).join(", ");
+    const r = await sendMessage({ conversation: { id, title }, text });
+    return { ...r, newChat: true, conversationId: id };
+  }
   const target = threadId ? `${conversation.id};messageid=${threadId}` : conversation.id;
   const me = await myMri();
   if (me) await lookupNames([me]);

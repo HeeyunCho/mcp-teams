@@ -117,6 +117,15 @@ describe("MCP server end to end", () => {
     expect((await call("find_people", { query: "bo" })).data.people[0].email).toBe("bo@x.com");
   });
 
+  it("starts a chat with people, and needs exactly one of conversation or to", async () => {
+    await call("send_message", { to: ["Bo Kim", "ana@x.com"], title: "Plan", text: "Hi" });
+    expect(calls.at(-1)).toEqual({ method: "requestSend", params: { to: ["Bo Kim", "ana@x.com"], title: "Plan", text: "Hi" } });
+    const before = calls.length;
+    expect((await call("send_message", { text: "Hi" })).isError).toBe(true);
+    expect((await call("send_message", { conversation: "Bo Kim", to: ["Bo Kim"], text: "Hi" })).isError).toBe(true);
+    expect(calls.length).toBe(before);
+  });
+
   it("only requests a send; the extension asks the user", async () => {
     const { data } = await call("send_message", { conversation: "Bo Kim", text: "Hi" });
     expect(calls.at(-1)).toEqual({ method: "requestSend", params: { conversation: "Bo Kim", text: "Hi" } });

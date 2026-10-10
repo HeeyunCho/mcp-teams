@@ -21,13 +21,15 @@ AI app ────stdio(MCP)──► mcp-teams server ──ws://127.0.0.1:473
 | `read_messages` | The latest messages of a chat or channel, oldest first: sender, time, text, shared files, reactions. In channels, replies are nested under their post; `reply_to` reads one post's thread; `before` pages further back. |
 | `search_messages` | Searches all chats and channels with Microsoft Search, like the search box in Teams |
 | `find_people` | Looks people up by name or email: name, email, job title, department, office |
-| `send_message` | Asks to post in a chat or channel, or to reply to a channel post. **You must click Send.** |
+| `send_message` | Asks to post in a chat or channel, to reply to a channel post, or to start a chat with people (`to`: one person for a 1:1 chat, several for a group chat, with an optional `title`). **You must click Send.** |
+
+People in `to` are given by name or email and looked up like Teams' people picker; each must mean exactly one person in your organization, otherwise the matches are listed. If a chat with exactly those people already exists (for a group with a `title`, also that title), the message goes there instead of starting another one.
 
 A conversation can be given as an id (`19:…`), as `Team/Channel`, as a chat title, or as a person's name for your 1:1 chat with them. A name must match exactly one conversation; otherwise the matches are listed.
 
 ### Sending always needs your click
 
-The AI can only **request** a send. The extension then opens its own window showing where the message goes, the post it replies to and the message itself. The message is posted only if you click **Send** there. Closing the window, clicking *Don't send*, or waiting 5 minutes all mean nothing is posted.
+The AI can only **request** a send. The extension then opens its own window showing where the message goes (for a new chat: who will be in it, and its title), the post it replies to and the message itself. The message is posted, and a new chat created, only if you click **Send** there. Closing the window, clicking *Don't send*, or waiting 5 minutes all mean nothing is posted.
 
 ## Setup
 
@@ -74,7 +76,7 @@ Every AI session starts its own mcp-teams server, and they share the one extensi
 ## Limitations
 
 - It relies on Teams' internal web APIs, which Microsoft doesn't document and can change. All request shapes live in `extension/background.js` and the parsing in `extension/teams.js`.
-- It can only post in existing chats and channels. It can't start a new chat, edit or delete messages, or mention people.
+- It can't edit or delete messages, mention people, or add people to an existing chat. New chats are only with people in your organization (or ones Teams can reach from it).
 - Files shared in Teams live in SharePoint/OneDrive. `read_messages` returns their links; use mcp-onedrive to download them.
 
 ## Development

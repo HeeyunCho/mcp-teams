@@ -192,16 +192,26 @@ export function registerTools(server: McpServer, bridge: ExtensionBridge, config
     {
       title: "Send a message (needs your click)",
       description:
-        "Asks to post a message in an existing chat or channel, or to reply to a channel post. The extension shows a confirmation window with the message and where it goes; it is posted only if the user clicks Send there. Returns whether it was sent. Plain text; line breaks are kept and links become clickable.",
+        "Asks to post a message in an existing chat or channel (conversation), to reply to a channel post, or to start a chat with people (to): one person for a 1:1 chat, several for a group chat. If a chat with exactly those people already exists, the message goes there. The extension shows a confirmation window with the message, where it goes and who is in a new chat; nothing is posted, and no chat is created, unless the user clicks Send there. Returns whether it was sent. Plain text; line breaks are kept and links become clickable.",
       inputSchema: {
-        conversation,
+        conversation: conversation.optional(),
+        to: z
+          .array(z.string().trim().min(1))
+          .min(1)
+          .max(250)
+          .optional()
+          .describe(
+            "Instead of conversation: the people to chat with, by name or email (e.g. ['김민준', 'ana@example.com']). Each must match exactly one person in your organization, otherwise the matches are listed.",
+          ),
+        title: z.string().trim().min(1).max(255).optional().describe("With to (two or more people): a title for the new group chat"),
         text: z.string().min(1).max(28_000).describe("The message"),
         reply_to: z.string().optional().describe("Channel only: the id of the post to reply to (from read_messages). Without it, a new post is started."),
         subject: z.string().optional().describe("Channel only: a subject for a new post"),
       },
     },
-    safe(async ({ conversation, text: message, reply_to, subject }) =>
-      text(await bridge.call("requestSend", { conversation, text: message, threadId: reply_to, subject }, SEND_TIMEOUT_MS)),
-    ),
+    safe(async ({ conversation, to, title, text: message, reply_to, subject }) => {
+      if (!conversation === !to) throw new Error("Give either conversation (an existing chat or channel) or to (people to start a chat with).");
+      return text(await bridge.call("requestSend", { conversation, to, title, text: message, threadId: reply_to, subject }, SEND_TIMEOUT_MS));
+    }),
   );
 }
