@@ -22,13 +22,18 @@ concurrency:
 
 jobs:
   bump:
-    # Pushes made with GITHUB_TOKEN do not trigger workflows, so the bump commit cannot loop.
+    # The release commit is pushed with a deploy key, which starts this workflow again;
+    # this condition skips that run.
     if: "!startsWith(github.event.head_commit.message, 'chore(release):')"
     runs-on: ubuntu-latest
     steps:
+      # main only takes pull requests (repository ruleset "Protect main"). The release
+      # commit and tag are pushed with a deploy key, the ruleset's only bypass: a personal
+      # repository's ruleset can't exempt GitHub Actions itself.
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          ssh-key: ${{ secrets.RELEASE_DEPLOY_KEY }}
 
       - uses: actions/setup-node@v4
         with:
