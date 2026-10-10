@@ -560,3 +560,276 @@ export function threadIdFrom(location, json) {
   const id = fromLocation ? decodeURIComponent(fromLocation) : (json?.id ?? json?.threadId ?? null);
   return id && /^19:/.test(id) ? id : null;
 }
+
+// ------------------------------------------------------------ traffic log (diagnostic)
+
+/** Hosts the Teams web app calls besides its own origin; observed for the api_traffic log only. */
+export const TRAFFIC_URLS = [
+  "https://*.cloud.microsoft/*",
+  "https://*.microsoft.com/*",
+  "https://*.office.com/*",
+  "https://*.office.net/*",
+  "https://*.sharepoint.com/*",
+  "https://*.svc.ms/*",
+  "https://*.skype.com/*",
+];
+
+const TEAMS_ORIGIN = /^https:\/\/(teams\.cloud\.microsoft|teams\.microsoft\.com)$/i;
+
+/** Whether a request comes from the Teams web app (its page or its workers). */
+export const isTeamsOrigin = (origin) => TEAMS_ORIGIN.test(origin ?? "");
+
+/** How a request authenticates, without revealing any secret. */
+export function authScheme(headers) {
+  const get = (n) => headers.find((h) => h.name.toLowerCase() === n)?.value;
+  const auth = get("authorization");
+  if (auth) return auth.split(/[ =]/)[0].toLowerCase();
+  if (get("authentication")) return "authentication:" + get("authentication").split("=")[0].toLowerCase();
+  if (get("x-skypetoken")) return "x-skypetoken";
+  if (get("cookie")) return "cookie";
+  return "none";
+}
+
+/** Describes one outgoing request for the traffic log: names only, never header or query values, which can carry tokens. */
+export function summarizeRequest(details) {
+  const url = new URL(details.url);
+  const headers = details.requestHeaders ?? [];
+  const path = url.pathname.slice(0, 300);
+  return {
+    key: `${details.method} ${url.host}${path}`,
+    method: details.method,
+    host: url.host,
+    path,
+    queryParams: [...new Set(url.searchParams.keys())].sort(),
+    headerNames: [...new Set(headers.map((h) => h.name.toLowerCase()))].sort(),
+    auth: authScheme(headers),
+    type: details.type,
+  };
+}
+
+export const MAX_TRAFFIC = 400;
+
+/** Adds a request to the log (deduplicated by method + URL path), newest last. */
+export function recordTraffic(list, entry, at = Date.now()) {
+  const old = list.find((e) => e.key === entry.key);
+  const rest = list.filter((e) => e.key !== entry.key);
+  return [...rest, { ...old, ...entry, count: (old?.count ?? 0) + 1, lastAt: at }].slice(-MAX_TRAFFIC);
+}
+
+/** Records the response status for the request with this key. */
+export function recordStatus(list, key, status) {
+  return list.map((e) => (e.key === key ? { ...e, status } : e));
+}
+
+/** Newest first, optionally only entries whose host or path contains `filter`. */
+export function filterTraffic(list, { filter, limit = 100 } = {}) {
+  const needle = filter?.toLowerCase();
+  return list
+    .filter((e) => !needle || `${e.host}${e.path}`.toLowerCase().includes(needle))
+    .reverse()
+    .slice(0, limit)
+    .map(({ key, ...e }) => ({ ...e, lastAt: new Date(e.lastAt).toISOString() }));
+}
+
+// ------------------------------------------------------------ meetings
+
+/** The tenant most of the user's non-meeting chats live in: their own organization's. */
+export function homeTenant(csaJson) {
+  const count = new Map();
+  for (const c of csaJson?.chats ?? []) {
+    if (c.chatType === "meeting" || !c.tenantId) continue;
+    count.set(c.tenantId, (count.get(c.tenantId) ?? 0) + 1);
+  }
+  return [...count].sort((a, b) => b[1] - a[1])[0]?.[0] ?? null;
+}
+
+/**
+ * Meeting chats from csa with their scheduled meeting. Another organization's meeting
+ * chats (`external`) can usually no longer be read once the meeting is over.
+ */
+export function parseCsaMeetings(csaJson) {
+  const home = homeTenant(csaJson);
+  return (csaJson?.chats ?? [])
+    .filter((c) => c.chatType === "meeting" && !c.isConversationDeleted)
+    .map((c) => {
+      const mi = c.meetingInformation ?? {};
+      return {
+        id: c.id,
+        title: mi.subject || c.title || null,
+        start: mi.startTime ?? null,
+        end: mi.endTime ?? null,
+        recurring: mi.eventRecurrencePattern ? true : undefined,
+        cancelled: mi.isCancelled || undefined,
+        organizer: mi.organizerId ? `8:orgid:${mi.organizerId}` : null,
+        hasTranscript: c.meetingObjectsConfig?.configurations?.transcriptConfig?.hasTranscript || undefined,
+        external: home && c.tenantId && c.tenantId !== home ? true : undefined,
+        joinUrl: mi.meetingJoinUrl ?? null,
+        lastActivity: lastMessageOf(c.lastMessage)?.time ?? c.lastJoinAt ?? null,
+        lastJoinAt: c.lastJoinAt ?? null,
+      };
+    });
+}
+
+const tag = (xml, name) => {
+  const m = new RegExp(`<${name}>([\\s\\S]*?)</${name}>`).exec(xml);
+  return m ? decodeEntities(m[1]).trim() : null;
+};
+const attr = (xml, element, name) => {
+  const m = new RegExp(`<${element}\\b[^>]*?\\b${name}="([^"]*)"`).exec(xml);
+  return m ? decodeEntities(m[1]) : null;
+};
+
+/** "07/21/2026 07:00:00" or "10/06/2026 07:00:00 +00:00" (UTC) as ISO time. */
+export function callTime(s) {
+  const m = /^(\d{2})\/(\d{2})\/(\d{4}) (\d{2}):(\d{2}):(\d{2})/.exec(String(s ?? "").trim());
+  return m ? `${m[3]}-${m[1]}-${m[2]}T${m[4]}:${m[5]}:${m[6]}Z` : null;
+}
+
+/** An Event/Call message: who took part and for how long, and which meeting occurrence. */
+export function parseCallEvent(m) {
+  const c = m.content ?? "";
+  const type = tag(c, "callEventType") ?? (/<ended\s*\/>/.test(c) ? "callEnded" : null);
+  const parts = [...c.matchAll(/<part\b[^>]*identity="([^"]*)"[^>]*>([\s\S]*?)<\/part>/g)].map(([, identity, body]) => ({
+    mri: decodeEntities(identity),
+    name: tag(body, "displayName") || null,
+    seconds: tag(body, "duration") ? Number(tag(body, "duration")) : null,
+  }));
+  const instance = /<instanceDetails>([\s\S]*?)<\/instanceDetails>/.exec(c)?.[1] ?? "";
+  return {
+    callId: tag(c, "callId") ?? m.properties?.skypeguid ?? null,
+    type,
+    at: m.originalarrivaltime ?? m.composetime ?? null,
+    callStart: callTime(tag(c, "conversationStartTime")),
+    subject: tag(instance, "subject") ?? null,
+    scheduledStart: callTime(tag(instance, "startTime")),
+    scheduledEnd: callTime(tag(instance, "endTime")),
+    organizerUpn: tag(c, "organizerUpn"),
+    participants: parts,
+  };
+}
+
+/** "1:10:47.42" as seconds. */
+const hms = (s) => {
+  const p = String(s ?? "").split(":").map(Number);
+  return p.length === 3 && p.every(Number.isFinite) ? Math.round(p[0] * 3600 + p[1] * 60 + p[2]) : null;
+};
+
+/** A finished recording or transcript (RichText/Media_CallRecording) and where its files are. */
+export function parseRecording(m) {
+  const c = m.content ?? "";
+  const status = attr(c, "RecordingStatus", "status");
+  if (status !== "Success") return null; // progress notes while the call runs
+  const item = (type) => {
+    const r = new RegExp(`<item\\b[^>]*type="${type}"[^>]*>`).exec(c)?.[0];
+    return r ? attr(r, "item", "uri") || null : null;
+  };
+  const contentTypes = attr(c, "RecordingContent", "contentTypes") ?? "";
+  return {
+    callId: /<Id type="callId" value="([^"]*)"/.exec(c)?.[1] ?? null,
+    at: m.originalarrivaltime ?? null,
+    title: tag(c, "Title"),
+    started: attr(c, "RecordingContent", "timestamp"),
+    seconds: hms(attr(c, "RecordingContent", "duration")),
+    video: /Recording/.test(contentTypes) ? item("onedriveForBusinessVideo") : null,
+    transcriptUrl: item("onedriveForBusinessTranscript"),
+  };
+}
+
+/** "2026-10-06T08:06:54.0570000Z" as "2026-10-06T08:06:54Z". */
+const isoSeconds = (t) => (t ? String(t).replace(/\.\d+Z$/, "Z") : null);
+
+/**
+ * The calls of a meeting chat, oldest first: when, who took part, and
+ * the recording and transcript made in it.
+ */
+export function meetingSessions(rawMessages) {
+  const byCall = new Map();
+  const get = (id) => {
+    if (!byCall.has(id)) byCall.set(id, { callId: id, participants: [], recordings: [] });
+    return byCall.get(id);
+  };
+  for (const m of rawMessages) {
+    if (m.messagetype === "Event/Call") {
+      const e = parseCallEvent(m);
+      if (!e.callId) continue;
+      const s = get(e.callId);
+      s.subject ??= e.subject;
+      s.scheduledStart ??= e.scheduledStart;
+      s.scheduledEnd ??= e.scheduledEnd;
+      if (e.callStart) s.start = e.callStart;
+      if (e.type === "callStarted" && !s.start) s.start = isoSeconds(e.at);
+      if (e.type === "callEnded") {
+        s.end = isoSeconds(e.at);
+        s.participants = e.participants;
+      }
+    } else if (m.messagetype === "RichText/Media_CallRecording") {
+      const r = parseRecording(m);
+      if (r?.callId) get(r.callId).recordings.push(r);
+    }
+  }
+  return [...byCall.values()]
+    .map((s) => ({
+      callId: s.callId,
+      subject: s.subject ?? s.recordings[0]?.title ?? null,
+      start: s.start ?? null,
+      end: s.end ?? null,
+      minutes: s.start && s.end ? Math.round((Date.parse(s.end) - Date.parse(s.start)) / 60_000) : null,
+      ...(s.scheduledStart ? { scheduled: { start: s.scheduledStart, end: s.scheduledEnd } } : {}),
+      // Teams reports the call's length for every participant, so only who joined is known.
+      attendees: s.participants.map((p) => p.name ?? p.mri),
+      recording: s.recordings.find((r) => r.video)?.video ?? null,
+      transcript: s.recordings.some((r) => r.transcriptUrl),
+      transcriptUrl: s.recordings.find((r) => r.transcriptUrl)?.transcriptUrl ?? null,
+    }))
+    .sort((a, b) => (a.start ?? "").localeCompare(b.start ?? ""));
+}
+
+/** "00:01:06.5193352" as "00:01:06". */
+const offset = (s) => String(s ?? "").split(".")[0] || "00:00:00";
+const seconds = (s) => hms(offset(s)) ?? 0;
+
+/**
+ * A Teams transcript (Stream transcript.json) as lines "[hh:mm:ss] Speaker: text", with
+ * consecutive entries of one speaker joined. `fromSeconds` skips what was said before.
+ */
+export function transcriptLines(json, { fromSeconds = 0 } = {}) {
+  const lines = [];
+  let last = null;
+  for (const e of json?.entries ?? []) {
+    const text = String(e.text ?? "").trim();
+    if (!text || seconds(e.startOffset) < fromSeconds) continue;
+    const who = e.speakerDisplayName || "Unknown";
+    if (last && last.who === who) {
+      last.text += ` ${text}`;
+      continue;
+    }
+    last = { at: offset(e.startOffset), who, text };
+    lines.push(last);
+  }
+  return lines.map((l) => `[${l.at}] ${l.who}: ${l.text}`);
+}
+
+/** Speakers of a transcript with how long each spoke, most first. */
+export function transcriptSpeakers(json) {
+  const total = new Map();
+  for (const e of json?.entries ?? []) {
+    const who = e.speakerDisplayName || "Unknown";
+    total.set(who, (total.get(who) ?? 0) + Math.max(0, seconds(e.endOffset) - seconds(e.startOffset)));
+  }
+  return [...total].sort((a, b) => b[1] - a[1]).map(([name, s]) => ({ name, minutes: Math.round(s / 6) / 10 }));
+}
+
+/**
+ * Lines of a transcript that contain all words of `query` (case-insensitive), each with
+ * the line before it for context, as "[hh:mm:ss] Speaker: text".
+ */
+export function searchTranscript(json, query) {
+  const lines = transcriptLines(json);
+  const hits = [];
+  lines.forEach((line, i) => {
+    const said = line.replace(/^\[[\d:]+\] [^:]*: /, "");
+    if (!matchesWords(said, query)) return;
+    hits.push(i > 0 ? { before: lines[i - 1], line } : { line });
+  });
+  return hits;
+}
