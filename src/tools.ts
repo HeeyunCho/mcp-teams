@@ -96,6 +96,21 @@ export function registerTools(server: McpServer, bridge: ExtensionBridge, config
   );
 
   server.registerTool(
+    "api_traffic",
+    {
+      title: "Show the Teams web app's API calls (diagnostic)",
+      description:
+        "Lists the API endpoints the open Teams tab has called since the browser started: method, host, path, status, which headers were sent (names only, never values) and the auth scheme. Used to find out which API Teams uses for a feature: click through it in Teams first.",
+      inputSchema: {
+        filter: z.string().optional().describe("Only requests whose host or path contains this text"),
+        limit: z.number().int().min(1).max(400).default(100),
+        clear: z.boolean().default(false).describe("Clear the recorded traffic after returning it"),
+      },
+    },
+    safe(async (args) => text(await bridge.call("apiTraffic", args))),
+  );
+
+  server.registerTool(
     "list_teams",
     {
       title: "List teams and channels",
@@ -156,6 +171,73 @@ export function registerTools(server: McpServer, bridge: ExtensionBridge, config
       );
       return text({ ...r, messages: capText(r.messages, max_length) });
     }),
+  );
+
+  const meeting = z
+    .string()
+    .trim()
+    .min(1)
+    .describe("Which meeting: its chat id from list_meetings (19:meeting_…) or its title. A title must match exactly one meeting chat.");
+
+  server.registerTool(
+    "list_meetings",
+    {
+      title: "List Teams meetings",
+      description:
+        "Lists your Teams meetings (each scheduled meeting or recurring series has a meeting chat), most recent activity first: subject, scheduled time (for a series, its first occurrence), organizer, whether a transcript exists, and whether another organization hosted it (`external`: its chat and recordings are usually no longer readable afterwards). Use get_meeting for the calls held and who attended, read_transcript for what was said, read_messages for the meeting chat.",
+      inputSchema: {
+        query: z.string().optional().describe("Only meetings whose subject or organizer contains these words"),
+        transcript_only: z.boolean().default(false).describe("Only meetings with a transcript"),
+        limit: z.number().int().min(1).max(200).default(20),
+      },
+    },
+    safe(async ({ query, transcript_only, limit }) => text(await bridge.call("listMeetings", { query, transcriptOnly: transcript_only, limit }, READ_TIMEOUT_MS))),
+  );
+
+  server.registerTool(
+    "get_meeting",
+    {
+      title: "Get a meeting's calls and attendance",
+      description:
+        "One meeting with the calls held in it, newest first (a recurring meeting has one per occurrence): when it started and ended, who joined, the recording's link, and whether there is a transcript.",
+      inputSchema: {
+        meeting,
+        limit: z.number().int().min(1).max(100).default(10).describe("Most recent calls to return"),
+      },
+    },
+    safe(async (args) => text(await bridge.call("getMeeting", args, READ_TIMEOUT_MS))),
+  );
+
+  server.registerTool(
+    "read_transcript",
+    {
+      title: "Read a meeting transcript",
+      description:
+        "What was said in a meeting, from its Teams transcript: lines '[hh:mm:ss] Speaker: text', plus how long each speaker talked. Reads the latest call with a transcript unless `session` names another. Long transcripts are cut at max_length; pass the returned continueFrom as `from` to read on. Transcripts are stored in the organizer's OneDrive, so this may open OneDrive in a background tab.",
+      inputSchema: {
+        meeting,
+        session: z.string().optional().describe("Which call: its callId from get_meeting, or its start date/time prefix (e.g. '2026-10-06')"),
+        from: z.string().regex(/^\d{1,2}(:\d{1,2}){0,2}$/).optional().describe("Start at this point of the meeting, 'hh:mm:ss' or 'mm:ss'"),
+        max_length: z.number().int().min(1000).max(200_000).default(40_000).describe("Most characters of transcript to return"),
+      },
+    },
+    safe(async ({ meeting, session, from, max_length }) => text(await bridge.call("readTranscript", { meeting, session, from, maxLength: max_length }, READ_TIMEOUT_MS))),
+  );
+
+  server.registerTool(
+    "search_transcripts",
+    {
+      title: "Search meeting transcripts",
+      description:
+        "Finds what was said in meetings: the transcript lines containing all words of the query, each with the line before it, from the most recent meetings with a transcript (or one meeting). Then read_transcript with `from` reads around a match.",
+      inputSchema: {
+        query: z.string().trim().min(1).describe("Words that must all appear in a line (case-insensitive)"),
+        meeting: meeting.optional(),
+        meetings: z.number().int().min(1).max(50).default(10).describe("How many of the most recent meetings with a transcript to search"),
+        limit: z.number().int().min(1).max(200).default(30).describe("Most matching lines to return"),
+      },
+    },
+    safe(async (args) => text(await bridge.call("searchTranscripts", args, 300_000))),
   );
 
   server.registerTool(

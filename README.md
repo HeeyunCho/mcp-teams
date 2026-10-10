@@ -21,11 +21,35 @@ AI app ────stdio(MCP)──► mcp-teams server ──ws://127.0.0.1:473
 | `read_messages` | The latest messages of a chat or channel, oldest first: sender, time, text, shared files, reactions. In channels, replies are nested under their post; `reply_to` reads one post's thread; `before` pages further back. |
 | `search_messages` | Searches all chats and channels with Microsoft Search, like the search box in Teams |
 | `find_people` | Looks people up by name or email: name, email, job title, department, office |
+| `list_meetings` | Your meetings (each has a meeting chat), most recent first: subject, scheduled time, organizer, whether there is a transcript, and whether another organization hosted it |
+| `get_meeting` | The calls held in a meeting (one per occurrence of a recurring one): start, end, who joined, the recording's link, whether there is a transcript |
+| `read_transcript` | What was said: `[hh:mm:ss] Speaker: text` lines and each speaker's talk time. Long transcripts continue with `from`. |
+| `search_transcripts` | Finds lines in the transcripts of your recent meetings that contain all the words of a query, each with the line before it |
+| `api_traffic` | Diagnostic: the endpoints the Teams tab has called (method, host, path, status, header **names**, auth scheme). Header and query **values** are never recorded. |
 | `send_message` | Asks to post in a chat or channel, to reply to a channel post, or to start a chat with people (`to`: one person for a 1:1 chat, several for a group chat, with an optional `title`). **You must click Send.** |
 
 People in `to` are given by name or email and looked up like Teams' people picker; each must mean exactly one person in your organization, otherwise the matches are listed. If a chat with exactly those people already exists (for a group with a `title`, also that title), the message goes there instead of starting another one.
 
 A conversation can be given as an id (`19:…`), as `Team/Channel`, as a chat title, or as a person's name for your 1:1 chat with them. A name must match exactly one conversation; otherwise the matches are listed.
+
+### Meetings and transcripts
+
+Meeting data comes from the meeting chat. Teams posts an event there for each call, saying who joined and when, and a message for each recording and transcript. Transcripts are stored in the organizer's OneDrive, so `read_transcript` reads them with your SharePoint sign-in in a SharePoint tab. If none is open, it opens your OneDrive in a pinned background tab. You can read the transcripts of meetings you were invited to, as in Teams. There is one only when someone turned on transcription in the meeting.
+
+Teams reports the call's length, not each person's time in it, so attendance lists who joined. Meeting chats of another organization's meetings (`external: true`) usually can't be read once you've left, which is how Teams works too.
+
+### Compared with Microsoft's Microsoft 365 connector for Claude
+
+| | mcp-teams | Microsoft 365 connector |
+|---|---|---|
+| Setup | Your browser session; no admin involvement | A Microsoft Entra Global Administrator must consent for the tenant; write tools need an admin to turn them on |
+| Read chats, channels, search | Yes | Yes |
+| Send, reply, start 1:1 and group chats | Yes, after you click Send in a confirmation window | Yes, if an admin allows it ("Ask" per send) |
+| Meeting transcripts | Read with speakers and timestamps, page through long ones, search across meetings | Read |
+| Attendance | Who joined each call, from the meeting chat | Yes, from Teams attendance reports |
+| AI meeting recap | No | Yes, with a Copilot or Teams Premium license |
+| Works when Conditional Access blocks cloud apps | Yes: requests come from your browser | No, if the policy blocks Anthropic's servers |
+| AI apps | Claude Code, Claude Desktop, Cursor, VS Code, Windsurf, Gemini CLI, Codex | Claude only |
 
 ### Sending always needs your click
 
@@ -71,6 +95,7 @@ Every AI session starts its own mcp-teams server, and they share the one extensi
 
 - The bridge listens only on `127.0.0.1`. Web pages can't connect to it, because only extension origins are accepted. This extension is recognized by its fixed id; other extensions and local programs need the token in `~/.mcp-teams/config.json`.
 - Messages can contain prompt injection. The send-confirmation window is the safeguard, so read it before clicking Send.
+- The extension may observe requests to Microsoft hosts (`*.microsoft.com`, `*.office.com`, `*.sharepoint.com` and similar), but it only records requests made by the Teams tab, and only names, for `api_traffic`. It runs requests only in Teams tabs, and in SharePoint tabs to read transcripts.
 - If you also give an AI direct control of your browser or desktop, it could click the confirmation button itself. Don't combine the two if you rely on the confirmation step.
 
 ## Limitations

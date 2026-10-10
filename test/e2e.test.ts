@@ -30,6 +30,8 @@ const fakeExtension: Record<string, (p: any) => unknown> = {
   },
   searchMessages: (p) => ({ query: p.query, total: 1, results: [{ conversationId: "19:a@unq.gbl.spaces", text: "budget" }] }),
   findPeople: () => ({ count: 1, people: [{ name: "Bo Kim", email: "bo@x.com" }] }),
+  listMeetings: (p) => ({ total: 1, meetings: [{ id: "19:meeting_x@thread.v2", title: "Sync", transcriptOnly: p.transcriptOnly }] }),
+  readTranscript: (p) => ({ meeting: "Sync", transcript: "[00:00:01] Bo Kim: hi", params: p }),
   requestSend: () => ({ sent: false, reason: "The user declined; nothing was sent." }),
 };
 
@@ -75,13 +77,18 @@ describe("MCP server end to end", () => {
   it("exposes the expected tools", async () => {
     const { tools } = await client.listTools();
     expect(tools.map((t) => t.name).sort()).toEqual([
+      "api_traffic",
       "find_people",
+      "get_meeting",
       "get_version",
       "list_chats",
+      "list_meetings",
       "list_teams",
       "read_messages",
+      "read_transcript",
       "reload_extension",
       "search_messages",
+      "search_transcripts",
       "send_message",
     ]);
   });
@@ -130,5 +137,12 @@ describe("MCP server end to end", () => {
     const { data } = await call("send_message", { conversation: "Bo Kim", text: "Hi" });
     expect(calls.at(-1)).toEqual({ method: "requestSend", params: { conversation: "Bo Kim", text: "Hi" } });
     expect(data).toEqual({ sent: false, reason: "The user declined; nothing was sent." });
+  });
+
+  it("lists meetings and reads transcripts with the extension's parameter names", async () => {
+    expect((await call("list_meetings", { transcript_only: true })).data.meetings[0].transcriptOnly).toBe(true);
+    const { data } = await call("read_transcript", { meeting: "Sync", from: "10:00", max_length: 5000 });
+    expect(data.params).toEqual({ meeting: "Sync", from: "10:00", maxLength: 5000 });
+    expect((await call("read_transcript", { meeting: "Sync", from: "ten" })).isError).toBe(true);
   });
 });

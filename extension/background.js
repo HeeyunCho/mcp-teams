@@ -45,6 +45,48 @@ chrome.webRequest.onBeforeSendHeaders.addListener(
   ["requestHeaders", "extraHeaders"],
 );
 
+/**
+ * Which endpoints Teams uses for meetings, recaps and files is not documented, so we log
+ * the calls the Teams tab makes (method, host, path, header *names*, auth scheme) for the
+ * api_traffic tool. Kept in chrome.storage.session, so a browser restart clears it.
+ */
+const TRAFFIC_KEY = "traffic";
+let traffic = null;
+let trafficSave = null;
+let trafficQueue = Promise.resolve();
+
+/** Applies fn to the log one update at a time, so events that land together don't overwrite each other. */
+function updateTraffic(fn) {
+  trafficQueue = trafficQueue
+    .then(async () => {
+      traffic ??= (await chrome.storage.session.get(TRAFFIC_KEY))[TRAFFIC_KEY] ?? [];
+      traffic = fn(traffic);
+      clearTimeout(trafficSave);
+      trafficSave = setTimeout(() => chrome.storage.session.set({ [TRAFFIC_KEY]: traffic }), 500);
+    })
+    .catch(() => {});
+  return trafficQueue;
+}
+
+const trafficFilter = { urls: teams.TRAFFIC_URLS, types: ["xmlhttprequest", "other", "media"] };
+
+chrome.webRequest.onBeforeSendHeaders.addListener(
+  (details) => {
+    if (!teams.isTeamsOrigin(details.initiator)) return;
+    const entry = teams.summarizeRequest(details);
+    updateTraffic((list) => teams.recordTraffic(list, entry));
+  },
+  trafficFilter,
+  ["requestHeaders", "extraHeaders"],
+);
+
+chrome.webRequest.onCompleted.addListener((details) => {
+  if (!teams.isTeamsOrigin(details.initiator)) return;
+  const url = new URL(details.url);
+  const key = `${details.method} ${url.host}${url.pathname.slice(0, 300)}`;
+  updateTraffic((list) => teams.recordStatus(list, key, details.statusCode));
+}, trafficFilter);
+
 async function getCapture(service) {
   const key = `capture:${service}`;
   return (await chrome.storage.session.get(key))[key] ?? null;
@@ -241,8 +283,10 @@ let listCache = null; // { at, data: { teams, chats } }
 async function teamsAndChats(fresh = false) {
   if (!fresh && listCache && Date.now() - listCache.at < LIST_CACHE_MS) return listCache.data;
   const json = await api("csa", "/api/v1/teams/users/me?isPrefetch=false&enableMembershipSummary=true&enableRC2Fetch=false");
-  const data = { teams: teams.parseTeams(json), chats: teams.parseCsaChats(json) };
+  const data = { teams: teams.parseTeams(json), chats: teams.parseCsaChats(json), meetings: teams.parseCsaMeetings(json) };
   await nameChats(data.chats);
+  await lookupNames(data.meetings.map((m) => m.organizer));
+  for (const m of data.meetings) m.organizerName = names.get(m.organizer) ?? null;
   listCache = { at: Date.now(), data };
   return data;
 }
@@ -332,6 +376,91 @@ async function resolvePeople(queries, me) {
   const unique = people.filter((p, i) => people.findIndex((x) => x.mri === p.mri) === i);
   if (unique.some((p) => p.mri === me)) throw new Error("You don't need to add yourself; you are always in the chat.");
   return unique;
+}
+
+// ------------------------------------------------------------ SharePoint (meeting recordings and transcripts)
+
+const SHAREPOINT_URL = /^https:\/\/[a-z0-9-]+\.sharepoint\.com\//i;
+const spTabs = new Map(); // origin -> id of the tab this extension opened there
+const spOpening = new Map(); // origin -> Promise of that tab, so parallel calls open one
+
+/**
+ * A tab on a SharePoint origin, for requests with its cookies: transcripts live in the
+ * organizer's OneDrive, which doesn't answer the Teams page across origins. Opens the
+ * origin in a pinned background tab when none is open.
+ */
+async function sharepointTab(origin) {
+  const open = (await chrome.tabs.query({ url: `${origin}/*` })).filter((t) => !t.discarded);
+  const ready = open.find((t) => t.status === "complete") ?? open[0];
+  if (ready) return ready;
+  if (!spOpening.has(origin)) {
+    const p = (async () => {
+      let tab = spTabs.has(origin) ? await chrome.tabs.get(spTabs.get(origin)).catch(() => null) : null;
+      if (!tab) {
+        const url = `${origin}/`;
+        tab = await chrome.tabs
+          .create({ url, active: false, pinned: true })
+          .catch(async () => (await chrome.windows.create({ url, focused: false })).tabs[0]);
+        spTabs.set(origin, tab.id);
+      }
+      // Single sign-on goes through login.microsoftonline.com and comes back.
+      for (const end = Date.now() + OPEN_TAB_WAIT_MS; Date.now() < end; await sleep(500)) {
+        const t = await chrome.tabs.get(tab.id).catch(() => null);
+        if (!t) throw new Error("The SharePoint tab that was opened was closed. Try again.");
+        if (t.status === "complete" && t.url?.startsWith(`${origin}/`)) return t;
+      }
+      throw new Error(`OneDrive (${origin}) was opened in a background tab but isn't signed in yet. Sign in there, then try again.`);
+    })().finally(() => spOpening.delete(origin));
+    spOpening.set(origin, p);
+  }
+  return spOpening.get(origin);
+}
+
+/** A GET on SharePoint with the browser's own SharePoint session. */
+async function sharepointGet(url) {
+  if (!SHAREPOINT_URL.test(url)) throw new Error("Not a SharePoint URL");
+  return runInTab(await sharepointTab(new URL(url).origin), url, "GET", {}, null);
+}
+
+const transcripts = new Map(); // transcript URL -> parsed transcript; a finished transcript doesn't change
+const TRANSCRIPTS_MAX = 50;
+
+/** A call's transcript (Stream transcript.json) from the organizer's OneDrive. */
+async function transcriptOf(info, session) {
+  const cached = transcripts.get(session.transcriptUrl);
+  if (cached) return cached;
+  const url = session.transcriptUrl + (session.transcriptUrl.includes("?") ? "&" : "?") + "format=json";
+  const res = await sharepointGet(url);
+  if (res.status === 403 || res.status === 404) {
+    throw new Error(`The transcript of "${info.title}" (${session.start}) is no longer available to you (HTTP ${res.status}): the organizer may have deleted it or not shared it.`);
+  }
+  if (res.status >= 400) throw new Error(`OneDrive HTTP ${res.status} while reading the transcript.`);
+  const json = JSON.parse(res.text);
+  if (transcripts.size >= TRANSCRIPTS_MAX) transcripts.delete(transcripts.keys().next().value);
+  transcripts.set(session.transcriptUrl, json);
+  return json;
+}
+
+/** A meeting chat by id, title or subject. */
+async function resolveMeeting(meeting) {
+  const conv = await resolve(meeting);
+  const info = (await teamsAndChats()).meetings.find((m) => m.id === conv.id);
+  if (!info) throw new Error(`"${conv.title ?? conv.id}" is not a meeting chat. list_meetings lists them.`);
+  return info;
+}
+
+/** The calls held in a meeting chat (see teams.meetingSessions). */
+async function sessionsOf(info) {
+  let raw;
+  try {
+    raw = await fetchMessages(info.id, { limit: 2000, includeSystem: true });
+  } catch (err) {
+    if (/HTTP 403/.test(err.message) && info.external) {
+      throw new Error(`"${info.title}" was organized by another organization, and Teams no longer lets you read its meeting chat.`);
+    }
+    throw err;
+  }
+  return teams.meetingSessions(raw);
 }
 
 const MESSAGES_VIEW = "msnp24Equivalent|supportsMessageProperties";
@@ -437,11 +566,119 @@ const handlers = {
     return { count: people.length, people };
   },
 
+  async listMeetings({ query, limit = 20, transcriptOnly = false }) {
+    let meetings = (await teamsAndChats(true)).meetings;
+    if (query) meetings = meetings.filter((m) => teams.matchesWords(m.title, query) || teams.matchesWords(m.organizerName, query));
+    if (transcriptOnly) meetings = meetings.filter((m) => m.hasTranscript);
+    meetings = [...meetings].sort((a, b) => (b.lastActivity ?? "").localeCompare(a.lastActivity ?? ""));
+    return {
+      total: meetings.length,
+      meetings: meetings.slice(0, limit).map(({ organizer, organizerName, joinUrl, lastJoinAt, ...m }) => ({ ...m, organizer: organizerName ?? organizer })),
+    };
+  },
+
+  async getMeeting({ meeting, limit = 10 }) {
+    const info = await resolveMeeting(meeting);
+    const sessions = await sessionsOf(info);
+    const { organizer, organizerName, lastJoinAt, ...rest } = info;
+    return {
+      meeting: { ...rest, organizer: organizerName ?? organizer },
+      sessionCount: sessions.length,
+      sessions: sessions.slice(-limit).reverse().map(({ transcriptUrl, ...s }) => s),
+    };
+  },
+
+  async readTranscript({ meeting, session, from, maxLength = 40_000 }) {
+    const info = await resolveMeeting(meeting);
+    const all = await sessionsOf(info);
+    const withTranscript = all.filter((s) => s.transcriptUrl);
+    if (!withTranscript.length) {
+      throw new Error(`"${info.title}" has no transcript${all.length ? ` in its ${all.length} recorded call(s)` : ""}. Teams keeps one only when transcription was turned on in the meeting.`);
+    }
+    let s = withTranscript.at(-1);
+    if (session) {
+      const key = String(session).trim();
+      const matches = withTranscript.filter((x) => x.callId === key || (x.start ?? "").startsWith(key));
+      if (!matches.length) {
+        throw new Error(`No transcript for "${key}". Calls with a transcript: ${withTranscript.map((x) => `${x.start} (${x.callId})`).join(", ")}`);
+      }
+      s = matches.at(-1);
+    }
+    const json = await transcriptOf(info, s);
+    const fromSeconds = from ? (String(from).split(":").reduce((a, x) => a * 60 + Number(x), 0) || 0) : 0;
+    const lines = teams.transcriptLines(json, { fromSeconds });
+    let text = "";
+    let shown = 0;
+    for (const l of lines) {
+      if (text.length + l.length + 1 > maxLength && shown) break;
+      text += (shown ? "\n" : "") + l;
+      shown++;
+    }
+    const next = lines[shown]?.match(/^\[([\d:]+)\]/)?.[1] ?? null;
+    return {
+      meeting: info.title,
+      session: { callId: s.callId, start: s.start, end: s.end, minutes: s.minutes },
+      speakers: teams.transcriptSpeakers(json),
+      language: json.entries?.find((e) => e.spokenLanguageTag)?.spokenLanguageTag ?? null,
+      otherSessionsWithTranscript: withTranscript.filter((x) => x !== s).map((x) => x.start),
+      ...(next ? { truncated: true, continueFrom: next } : {}),
+      transcript: text,
+    };
+  },
+
+  async searchTranscripts({ query, meeting, limit = 30, meetings: maxMeetings = 10 }) {
+    let list = meeting ? [await resolveMeeting(meeting)] : (await teamsAndChats(true)).meetings.filter((m) => m.hasTranscript);
+    list = [...list].sort((a, b) => (b.lastActivity ?? "").localeCompare(a.lastActivity ?? "")).slice(0, maxMeetings);
+    const results = [];
+    const skipped = [];
+    let total = 0;
+    let shown = 0;
+    for (const info of list) {
+      let sessions;
+      try {
+        sessions = (await sessionsOf(info)).filter((s) => s.transcriptUrl);
+      } catch (err) {
+        skipped.push({ meeting: info.title, reason: err.message });
+        continue;
+      }
+      for (const s of sessions.reverse()) {
+        let json;
+        try {
+          json = await transcriptOf(info, s);
+        } catch (err) {
+          skipped.push({ meeting: info.title, session: s.start, reason: err.message });
+          continue;
+        }
+        const hits = teams.searchTranscript(json, query);
+        total += hits.length;
+        if (hits.length && shown < limit) {
+          const matches = hits.slice(0, limit - shown);
+          shown += matches.length;
+          results.push({ meeting: info.title, id: info.id, session: s.start, callId: s.callId, matches });
+        }
+      }
+    }
+    return { query, meetingsSearched: list.length, matches: total, results, ...(skipped.length ? { skipped } : {}) };
+  },
+
   /** Read-only diagnostics for development: a GET on a service, never its headers. */
-  async probe({ service, path }) {
+  async probe({ service, path, url }) {
+    if (url) {
+      const res = await sharepointGet(url);
+      return { status: res.status, text: res.text.slice(0, 20_000_000) };
+    }
     if (!["chatsvc", "csa", "mt", "substrate"].includes(service)) throw new Error("Unknown service");
     const res = await api(service, path, { raw: true });
     return { status: res.status, text: res.text.slice(0, 20_000_000) };
+  },
+
+  async apiTraffic({ filter, limit = 100, clear = false }) {
+    let list;
+    await updateTraffic((l) => {
+      list = l;
+      return clear ? [] : l;
+    });
+    return { recorded: list.length, requests: teams.filterTraffic(list, { filter, limit }) };
   },
 
   /**

@@ -3,7 +3,7 @@
   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAvoz9Wexl4ZqY9YtEyBZsu/Qi5Ft5EjNUNB8b30wgt3AR8TjXI5UumcPQFBIm7ZfvBsjgrh6tBJlygsgFbZ5cB1EiI+WSz/2Wcqwz4eowKMXXPvGuDGrO+2O2zbSpTG19/MwTljI+g0TLfn8Vkoqd8z9MskKk+vCZjjV0Jk8QjVEdHypgM7H8zTuUM06SO12IIZMdeE3IURzf35zbjlfPPkJiDWoo3wB9nxAvLd57xrQhPUB/lGtCJk9mS3SY+/VwOlG5kJ9WS/RCHXcs5Qs7huIlKIatmFz7YiducvTR3DKBbjqbMTyqHzXkmkUmJRqzsYtgtKcz0C0cjFOt6uNdhwIDAQAB",
   "name": "mcp-teams bridge",
   "version": "0.1.1",
-  "description": "Lets AI assistants (via the mcp-teams MCP server) read and search Microsoft Teams chats and channels and, with your explicit confirmation, post messages.",
+  "description": "Lets AI assistants (via the mcp-teams MCP server) read and search Microsoft Teams chats, channels and meeting transcripts and, with your explicit confirmation, post messages.",
   "minimum_chrome_version": "116",
   "icons": {
     "16": "icons/icon-16.png",
@@ -15,12 +15,25 @@
     "service_worker": "background.js",
     "type": "module"
   },
-  "permissions": ["storage", "scripting", "tabs", "webRequest", "alarms"],
+  "permissions": [
+    "storage",
+    "scripting",
+    "tabs",
+    "webRequest",
+    "alarms"
+  ],
   "host_permissions": [
     "https://teams.cloud.microsoft/*",
     "https://teams.microsoft.com/*",
     "https://*.ng.msg.teams.microsoft.com/*",
-    "https://substrate.office.com/*"
+    "https://substrate.office.com/*",
+    "https://*.cloud.microsoft/*",
+    "https://*.microsoft.com/*",
+    "https://*.office.com/*",
+    "https://*.office.net/*",
+    "https://*.sharepoint.com/*",
+    "https://*.svc.ms/*",
+    "https://*.skype.com/*"
   ],
   "action": {
     "default_title": "mcp-teams",
