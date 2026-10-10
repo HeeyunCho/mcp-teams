@@ -1,10 +1,11 @@
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync, existsSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, statSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import WebSocket from "ws";
-import { ExtensionBridge, isNewer } from "../src/bridge.js";
-import { EXTENSION_ID, EXTENSION_ORIGIN, extensionIdFromKey, installedVersion, syncExtension } from "../src/extension.js";
+import { ExtensionBridge, isNewer, proof } from "../src/bridge.js";
+import { EXTENSION_ID, EXTENSION_ORIGIN, extensionIdFromKey, installedVersion, syncExtension, writePairing } from "../src/extension.js";
+import { pairingProof } from "../extension/teams.js";
 
 const PORT = 47597;
 
@@ -15,7 +16,32 @@ describe("extension id", () => {
   });
 });
 
-describe("bridge without pairing", () => {
+/**
+ * A fake extension that answers the server's challenge like the real one: with a proof
+ * from `secret` (null: says hello without one, like 0.2.0 and older). Requests go to `onRequest`.
+ */
+function extension(
+  origin: string,
+  secret: string | null,
+  { instance, browser = "Chrome", onRequest }: { instance?: string; browser?: string; onRequest?: (ws: WebSocket, msg: any) => void } = {},
+) {
+  const ws = new WebSocket(`ws://127.0.0.1:${PORT}`, { origin });
+  const nonce = "n-" + Math.random();
+  const welcome = new Promise<any>((resolve) => {
+    ws.on("message", async (raw) => {
+      const msg = JSON.parse(raw.toString());
+      if (msg.type === "challenge") {
+        const p = secret ? await pairingProof(secret, "client", msg.nonce) : undefined;
+        ws.send(JSON.stringify({ type: "hello", ...(secret ? { proof: p, nonce } : { token: null }), version: "0.15.0", browser, instance }));
+      } else if (msg.type === "welcome") resolve(msg);
+      else if (msg.type === "request") onRequest?.(ws, msg);
+    });
+    ws.on("close", () => resolve(null));
+  });
+  return { ws, nonce, welcome };
+}
+
+describe("pairing", () => {
   let bridge: ExtensionBridge | undefined;
   afterEach(async () => bridge?.close());
 
@@ -23,9 +49,10 @@ describe("bridge without pairing", () => {
   const hello = (origin: string, token: string | null, whileOpen: () => void = () => {}) =>
     new Promise<{ welcomed: boolean; code?: number }>((resolve) => {
       const ws = new WebSocket(`ws://127.0.0.1:${PORT}`, { origin });
-      ws.on("open", () => ws.send(JSON.stringify({ type: "hello", token, version: "0.15.0", browser: "Chrome" })));
       ws.on("message", (raw) => {
-        if (JSON.parse(raw.toString()).type !== "welcome") return;
+        const type = JSON.parse(raw.toString()).type;
+        if (type === "challenge") ws.send(JSON.stringify({ type: "hello", token, version: "0.15.0", browser: "Chrome" }));
+        if (type !== "welcome") return;
         whileOpen();
         resolve({ welcomed: true });
         ws.close();
@@ -33,12 +60,43 @@ describe("bridge without pairing", () => {
       ws.on("close", (code) => resolve({ welcomed: false, code }));
     });
 
-  it("accepts our extension's fixed id without a token, and records where it connected from", async () => {
+  it("computes the same proof in the extension as in the server", async () => {
+    expect(await pairingProof("secret", "client", "abc")).toBe(proof("secret", "client", "abc"));
+    expect(await pairingProof("sécret", "server", "x/y+z")).toBe(proof("sécret", "server", "x/y+z"));
+  });
+
+  it("accepts our extension when it proves the token, proves itself back, and records where it connected from", async () => {
     bridge = new ExtensionBridge(PORT, "secret", "0.15.0");
     await bridge.start();
-    let seen: unknown;
-    expect(await hello(EXTENSION_ORIGIN, null, () => (seen = bridge!.extension))).toEqual({ welcomed: true });
-    expect(seen).toMatchObject({ version: "0.15.0", origin: EXTENSION_ORIGIN });
+    const ext = extension(EXTENSION_ORIGIN, "secret");
+    const welcome = await ext.welcome;
+    expect(welcome.proof).toBe(proof("secret", "server", ext.nonce));
+    expect(bridge.extension).toMatchObject({ version: "0.15.0", origin: EXTENSION_ORIGIN });
+    ext.ws.close();
+  });
+
+  it("turns away anything with our extension's origin but a wrong proof", async () => {
+    bridge = new ExtensionBridge(PORT, "secret", "0.15.0");
+    await bridge.start();
+    const ext = extension(EXTENSION_ORIGIN, "guess");
+    expect(await ext.welcome).toBeNull();
+    expect(bridge.connected).toBe(false);
+  });
+
+  it("only asks our extension of 0.2.0 or older (no token, no proof) to reload, once, and sends it no calls", async () => {
+    bridge = new ExtensionBridge(PORT, "secret", "0.15.0");
+    await bridge.start();
+    const got: string[] = [];
+    const old = extension(EXTENSION_ORIGIN, null, { onRequest: (_, msg) => got.push(msg.method) });
+    const code = await new Promise((r) => old.ws.on("close", r));
+    expect(code).toBe(4426);
+    expect(got).toEqual(["reload"]);
+    expect(bridge.connected).toBe(false);
+    await expect(bridge.call("listChats")).rejects.toThrow(/not connected/);
+    const again: string[] = [];
+    const second = extension(EXTENSION_ORIGIN, null, { onRequest: (_, msg) => again.push(msg.method) });
+    await new Promise((r) => second.ws.on("close", r));
+    expect(again).toEqual([]);
   });
 
   it("still needs the token from any other extension", async () => {
@@ -56,18 +114,13 @@ describe("two copies of the extension", () => {
   it("keeps our extension connected and turns an older copy away", async () => {
     bridge = new ExtensionBridge(PORT, "secret", "0.15.0");
     await bridge.start();
-    const connect = (origin: string, token: string | null) => {
-      const ws = new WebSocket(`ws://127.0.0.1:${PORT}`, { origin });
-      ws.on("open", () => ws.send(JSON.stringify({ type: "hello", token, version: "x", browser: "Chrome" })));
-      return ws;
-    };
-    const ours = connect(EXTENSION_ORIGIN, null);
-    await new Promise((r) => ours.on("message", r));
-    const old = connect("chrome-extension://eppconghijagecilnpngjgafbnphfhpd", "secret");
-    expect(await new Promise((r) => old.on("close", r))).toBe(4409);
+    const ours = extension(EXTENSION_ORIGIN, "secret");
+    await ours.welcome;
+    const old = extension("chrome-extension://eppconghijagecilnpngjgafbnphfhpd", "secret");
+    expect(await new Promise((r) => old.ws.on("close", r))).toBe(4409);
     expect(bridge.connected).toBe(true);
     expect(bridge.extension?.origin).toBe(EXTENSION_ORIGIN);
-    ours.close();
+    ours.ws.close();
   });
 });
 
@@ -78,14 +131,14 @@ describe("several browsers at once", () => {
   /** A fake extension: answers status with `signedIn`, records the methods it gets. */
   const browser = (name: string, instance: string, signedIn: boolean) => {
     const got: string[] = [];
-    const ws = new WebSocket(`ws://127.0.0.1:${PORT}`, { origin: EXTENSION_ORIGIN });
-    ws.on("open", () => ws.send(JSON.stringify({ type: "hello", token: null, version: "0.15.0", browser: name, instance })));
-    ws.on("message", (raw) => {
-      const msg = JSON.parse(raw.toString());
-      if (msg.type !== "request") return;
-      got.push(msg.method);
-      const result = msg.method === "status" ? { teamsTabs: 1, sessions: [{ sessionCaptured: signedIn }] } : { from: name };
-      ws.send(JSON.stringify({ type: "response", id: msg.id, ok: true, result }));
+    const { ws } = extension(EXTENSION_ORIGIN, "secret", {
+      browser: name,
+      instance,
+      onRequest: (ws, msg) => {
+        got.push(msg.method);
+        const result = msg.method === "status" ? { teamsTabs: 1, sessions: [{ sessionCaptured: signedIn }] } : { from: name };
+        ws.send(JSON.stringify({ type: "response", id: msg.id, ok: true, result }));
+      },
     });
     return { ws, got };
   };
@@ -141,10 +194,10 @@ describe("robustness", () => {
   });
   const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
   /** A fake extension of ours that never answers requests. */
-  const silent = (instance: string) => {
-    const ws = new WebSocket(`ws://127.0.0.1:${PORT}`, { origin: EXTENSION_ORIGIN });
-    ws.on("open", () => ws.send(JSON.stringify({ type: "hello", token: null, version: "x", browser: "Chrome", instance })));
-    return new Promise<WebSocket>((r) => ws.on("message", () => r(ws)));
+  const silent = async (instance: string) => {
+    const ext = extension(EXTENSION_ORIGIN, "secret", { instance });
+    await ext.welcome;
+    return ext.ws;
   };
 
   it("compares versions", () => {
@@ -199,6 +252,28 @@ describe("robustness", () => {
     expect(old.hubVersion).toBe("0.15.1");
   });
 
+  it("a server doesn't join a program on the port that can't prove the token, and never sends it the token", async () => {
+    const { WebSocketServer } = await import("ws");
+    const seen: any[] = [];
+    const rogue = new WebSocketServer({ host: "127.0.0.1", port: PORT });
+    rogue.on("connection", (ws) => {
+      ws.send(JSON.stringify({ type: "challenge", nonce: "c" }));
+      ws.on("message", (raw) => {
+        seen.push(JSON.parse(raw.toString()));
+        ws.send(JSON.stringify({ type: "peer-welcome", serverVersion: "9.9.9", proof: "forged", extension: null }));
+      });
+    });
+    await new Promise((r) => rogue.once("listening", r));
+    const server = new ExtensionBridge(PORT, "secret", "0.15.0");
+    bridges.push(server);
+    await server.start();
+    expect(server.role).toBe("none");
+    expect(server.listenError).toMatch(/0\.2\.0 or older|another program/);
+    expect(JSON.stringify(seen)).not.toContain("secret");
+    await server.close();
+    await new Promise((r) => rogue.close(r));
+  });
+
   it("a hub doesn't step down for a peer of the same or an older version", async () => {
     const hub = new ExtensionBridge(PORT, "secret", "0.15.0");
     bridges.push(hub);
@@ -210,6 +285,20 @@ describe("robustness", () => {
     await older.start();
     await sleep(2_500);
     expect([hub.role, same.role, older.role]).toEqual(["hub", "peer", "peer"]);
+  });
+});
+
+describe("writePairing", () => {
+  it("writes the token for the extension, readable by this user only, and syncExtension keeps it", () => {
+    const from = mkdtempSync(join(tmpdir(), "mcp-teams-ext-"));
+    const to = mkdtempSync(join(tmpdir(), "mcp-teams-ext-"));
+    writeFileSync(join(from, "manifest.json"), JSON.stringify({ version: "1.0.0" }));
+    expect(writePairing("tok", to)).toBe(true);
+    expect(writePairing("tok", to)).toBe(false);
+    expect(JSON.parse(readFileSync(join(to, "pairing.json"), "utf8"))).toEqual({ token: "tok" });
+    if (process.platform !== "win32") expect(statSync(join(to, "pairing.json")).mode & 0o777).toBe(0o600);
+    syncExtension(from, to);
+    expect(existsSync(join(to, "pairing.json"))).toBe(true);
   });
 });
 

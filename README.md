@@ -80,7 +80,7 @@ Teams on the web talks to several services, each with its own sign-in token: cha
 
 ## Several sessions at once
 
-Every AI session starts its own mcp-teams server, and they share the one extension connection. The first server owns the bridge port (`role: "hub"` in `get_version`), and later ones forward their calls through it (`role: "peer"`). When the hub's session ends, a peer takes over within a second. A newer server takes over from an older one.
+Every AI session starts its own mcp-teams server, and they share the one extension connection. The first server owns the bridge port (`role: "hub"` in `get_version`), and later ones forward their calls through it (`role: "peer"`). When the hub's session ends, a peer takes over within a second. A newer server takes over from an older one. Servers of 0.2.0 and older can't do the newer handshake: after updating from them, restart AI sessions that are still open (in Claude Code: `/mcp`).
 
 ## Configuration
 
@@ -88,12 +88,14 @@ Every AI session starts its own mcp-teams server, and they share the one extensi
 
 | Key | Env override | Default |
 |---|---|---|
-| `token` | — | random, generated once; used by peers |
+| `token` | — | random, generated once; the server, its peers and the extension prove to each other that they know it |
 | `port` | `TEAMS_MCP_PORT` | `47393` (also set it in the extension popup) |
 
 ## Security notes
 
-- The bridge listens only on `127.0.0.1`. Web pages can't connect to it, because only extension origins are accepted. This extension is recognized by its fixed id; other extensions and local programs need the token in `~/.mcp-teams/config.json`.
+- The bridge listens only on `127.0.0.1`. Web pages can't connect to it, because only extension origins are accepted.
+- The server and the extension prove to each other that they know the pairing token in `~/.mcp-teams/config.json`, without sending it. Setup copies it into the installed extension folder as `pairing.json`; both files can be read only by your user. So a program that takes the port while no AI app runs gets nothing from the extension, and a program posing as the extension gets no calls.
+- Teams' tokens are only ever sent to the service they were captured from.
 - Messages can contain prompt injection. The send-confirmation window is the safeguard, so read it before clicking Send.
 - The extension may observe requests to Microsoft hosts (`*.microsoft.com`, `*.office.com`, `*.sharepoint.com` and similar), but it only records requests made by the Teams tab, and only names, for `api_traffic`. It runs requests only in Teams tabs, and in SharePoint tabs to read transcripts.
 - If you also give an AI direct control of your browser or desktop, it could click the confirmation button itself. Don't combine the two if you rely on the confirmation step.

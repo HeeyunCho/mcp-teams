@@ -53,9 +53,9 @@ beforeAll(async () => {
   );
   ext = new WebSocket(`ws://127.0.0.1:${PORT}`, { origin: "chrome-extension://fake" });
   await new Promise<void>((resolve) => {
-    ext.on("open", () => ext.send(JSON.stringify({ type: "hello", token: "tok", version: VERSION, browser: "Chrome" })));
     ext.on("message", async (raw) => {
       const msg = JSON.parse(raw.toString());
+      if (msg.type === "challenge") ext.send(JSON.stringify({ type: "hello", token: "tok", version: VERSION, browser: "Chrome" }));
       if (msg.type === "welcome") resolve();
       if (msg.type !== "request") return;
       calls.push({ method: msg.method, params: msg.params });

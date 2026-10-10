@@ -236,7 +236,7 @@ async function api(service, path, { method = "GET", body, raw = false, withLocat
     cap = await refreshSession(service, tab, { quickWaitMs: service === "substrate" ? 2_000 : 4_000 });
     if (!cap) throw new Error(SERVICE_HELP[service]);
   }
-  const urlFor = (c) => (/^https:/.test(path) ? teams.rebase(path, c.base) : `${c.base}${path}`);
+  const urlFor = (c) => teams.serviceUrl(path, c.base);
   let res = await runInTab(tab, urlFor(cap), method, cap.headers, body);
   if (res.status === 401) {
     // Rejected before running (expired token), so trying once more is safe. A 403 is a
@@ -870,9 +870,24 @@ function reconnectNow() {
 }
 
 /**
- * Connects to the local MCP server. No pairing is needed: the server trusts this
- * extension's fixed id (manifest "key"). A token saved under Advanced is sent too, for a
- * copy of the extension loaded under another id.
+ * The pairing token: one saved under Advanced, else the one setup wrote into this
+ * folder (pairing.json, only in the installed copy). Null when there is none.
+ */
+async function pairingToken(saved) {
+  if (saved) return saved;
+  try {
+    const res = await fetch(chrome.runtime.getURL("pairing.json"), { cache: "no-store" });
+    return res.ok ? ((await res.json()).token ?? null) : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Connects to the local MCP server. Both sides prove they know the pairing token without
+ * sending it (see src/bridge.ts): the extension answers the server's challenge, and acts
+ * on requests only after the server answered its own nonce. Any other program that holds
+ * the port gets nothing.
  */
 async function connect() {
   if (starting || (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING))) return;
@@ -895,8 +910,17 @@ async function connect() {
   state = "connecting";
   const socket = new WebSocket(`ws://127.0.0.1:${port || DEFAULT_PORT}`);
   ws = socket;
-  socket.onopen = () =>
-    socket.send(JSON.stringify({ type: "hello", token: token || null, version: VERSION, browser: browserName(), instance }));
+  const nonce = crypto.randomUUID();
+  let secret = null;
+  let challenged = false;
+  let authed = false;
+  let opened = false;
+  socket.onopen = () => (opened = true);
+  const refuse = (error) => {
+    state = "unauthorized";
+    lastError = error;
+    socket.close();
+  };
   socket.onmessage = async (ev) => {
     let msg;
     try {
@@ -905,10 +929,22 @@ async function connect() {
       return;
     }
     if (!msg || typeof msg !== "object") return;
-    if (msg.type === "welcome") {
-      state = "connected";
-      lastError = null;
-      retryMs = RETRY_MIN_MS;
+    if (!authed) {
+      if (msg.type === "challenge" && !challenged && typeof msg.nonce === "string") {
+        challenged = true;
+        secret = await pairingToken(token);
+        if (!secret) return refuse("This copy of the extension has no pairing file. Run `npx mcp-teams setup` and load the extension from the folder it shows.");
+        const proof = await teams.pairingProof(secret, "client", msg.nonce);
+        socket.send(JSON.stringify({ type: "hello", proof, nonce, version: VERSION, browser: browserName(), instance }));
+      } else if (msg.type === "welcome") {
+        if (!secret || msg.proof !== (await teams.pairingProof(secret, "server", nonce))) {
+          return refuse(`The program on port ${port || DEFAULT_PORT} could not prove it is your mcp-teams server, so the extension doesn't answer it.`);
+        }
+        authed = true;
+        state = "connected";
+        lastError = null;
+        retryMs = RETRY_MIN_MS;
+      }
       return;
     }
     if (msg.type !== "request") return;
@@ -929,7 +965,12 @@ async function connect() {
     clearTimeout(retryTimer);
     retryTimer = setTimeout(connect, retryMs);
     retryMs = Math.min(retryMs * 2, RETRY_MAX_MS);
-    if (ev.code === 4401) {
+    if (state === "unauthorized" && !authed && lastError) {
+      // refuse() said why.
+    } else if (opened && !challenged) {
+      state = "unauthorized";
+      lastError = "The mcp-teams server is older than this extension (0.2.0 or before). Restart your AI app, in Claude Code with /mcp.";
+    } else if (ev.code === 4401) {
       state = "unauthorized";
       lastError = "The MCP server refused this extension. Run `npx mcp-teams setup` and load the extension from the folder it shows.";
     } else {
