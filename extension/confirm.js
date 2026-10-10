@@ -22,8 +22,15 @@ async function load() {
   const r = res.request;
   const dl = el("dl");
   const add = (k, v) => v && dl.append(el("dt", k), el("dd", v));
-  add(KIND[r.conversation.kind] ?? "To", r.conversation.title ?? r.conversation.id);
-  if (r.conversation.title) add("Id", r.conversation.id);
+  const who = (r.people ?? []).map((p) => (p.email ? `${p.name} <${p.email}>` : p.name)).join("\n");
+  if (r.newChat) {
+    add(r.people.length > 1 ? "New group chat" : "New chat", who);
+    add("Title", r.newChat.title);
+  } else {
+    add(KIND[r.conversation.kind] ?? "To", r.conversation.title ?? r.conversation.id);
+    if (r.existingChat) add("With", who);
+    if (r.conversation.title) add("Id", r.conversation.id);
+  }
   add("Subject", r.subject);
   main.append(dl);
   if (r.replyingTo) {

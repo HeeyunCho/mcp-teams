@@ -295,6 +295,183 @@ describe("shapes seen live", () => {
   });
 });
 
+describe("new chats", () => {
+  const me = `8:orgid:${OID}`;
+  const people = [
+    { name: "Novak, Jana (QA)", email: "jana.novak@example.com", mri: null },
+    { name: "김민준(KIM MIN JUN)", email: "minjun.kim@example.com", mri: "8:orgid:11111111-2222-4333-8444-555555555555" },
+    { name: "Kim, Bo", email: "bo@x.com", mri: "8:orgid:b0" },
+    { name: "Kim, Bora", email: "bora@x.com", mri: "8:orgid:b1" },
+  ];
+
+  it("picks one person by email, by the only result, or by an exact full name", () => {
+    expect(teams.pickPerson("BO@x.com", people, me).mri).toBe("8:orgid:b0");
+    expect(teams.pickPerson("김민준", [people[1]], me).mri).toBe(people[1].mri);
+    expect(teams.pickPerson("Bo Kim", people.slice(2), me).mri).toBe("8:orgid:b0"); // "Kim, Bo" ~ "Bo Kim"
+    // The part in parentheses is a name too (seen live: several Kims come back for this query).
+    expect(teams.pickPerson("KIM MIN JUN", people, me).mri).toBe(people[1].mri);
+    expect(teams.pickPerson("min jun kim", people, me).mri).toBe(people[1].mri);
+  });
+
+  it("refuses ambiguous names, nobody, and people without a Teams id", () => {
+    expect(() => teams.pickPerson("Kim", people.slice(1), me)).toThrow(/matches 3 people/);
+    expect(() => teams.pickPerson("nobody@x.com", people, me)).toThrow(/Nobody found/);
+    expect(() => teams.pickPerson("Jana Novak", [people[0]], me)).toThrow(/no Teams account/);
+    expect(() => teams.pickPerson("me", [{ name: "Me", email: "m@x.com", mri: me }], me)).toThrow(/Nobody found/);
+  });
+
+  it("derives the 1:1 chat id from both object ids, sorted (as Teams does)", () => {
+    expect(teams.oneOnOneId(me, "8:orgid:11111111-2222-4333-8444-555555555555")).toBe(
+      `19:11111111-2222-4333-8444-555555555555_${OID}@unq.gbl.spaces`,
+    );
+    expect(teams.oneOnOneId(me, "28:bot")).toBeNull();
+  });
+
+  it("reuses an existing chat with exactly those people", () => {
+    const chats = [
+      { id: "1on1", kind: "oneOnOne", title: "Bo", members: [me, "8:orgid:b0"] },
+      { id: "group", kind: "group", title: "Plan", members: ["8:orgid:b1", me, "8:orgid:b0"] },
+      { id: "meet", kind: "meeting", title: "M", members: [me, "8:orgid:b0", "8:orgid:b1"] },
+    ];
+    expect(teams.findExistingChat(chats, ["8:orgid:b0"], me)?.id).toBe("1on1");
+    expect(teams.findExistingChat(chats, ["8:orgid:b0", "8:orgid:b1"], me)?.id).toBe("group");
+    expect(teams.findExistingChat(chats, ["8:orgid:b0", "8:orgid:b1"], me, "Other")).toBeNull();
+    expect(teams.findExistingChat(chats, ["8:orgid:b1"], me)).toBeNull();
+  });
+
+  it("reads the new chat's id from the Location header or the body", () => {
+    expect(teams.threadIdFrom("https://x/api/chatsvc/kr/v1/threads/19%3Aabc%40thread.v2", null)).toBe("19:abc@thread.v2");
+    expect(teams.threadIdFrom(null, { id: "19:def@thread.v2" })).toBe("19:def@thread.v2");
+    expect(teams.threadIdFrom(null, {})).toBeNull();
+  });
+});
+
+describe("meetings", () => {
+  const me = "8:orgid:00000000-0000-0000-0000-00000000000a";
+  const csa = {
+    chats: [
+      { id: "19:a@unq.gbl.spaces", chatType: "chat", tenantId: "home" },
+      { id: "19:b@thread.v2", chatType: "chat", tenantId: "home" },
+      {
+        id: "19:meeting_A@thread.v2",
+        chatType: "meeting",
+        tenantId: "home",
+        title: "Sync",
+        lastJoinAt: "2026-10-01T07:00:00Z",
+        meetingInformation: { subject: "Weekly sync", startTime: "2026-07-21T07:00:00Z", endTime: "2026-07-21T08:00:00Z", organizerId: "0000000a", eventRecurrencePattern: { patternType: 2 }, meetingJoinUrl: "https://teams.microsoft.com/l/meetup-join/x" },
+        meetingObjectsConfig: { configurations: { transcriptConfig: { hasTranscript: true } } },
+        lastMessage: { imDisplayName: "Bo", originalArrivalTime: "2026-10-06T08:01:51.238Z", content: "<p>bye</p>", messageType: "RichText/Html" },
+      },
+      { id: "19:meeting_B@thread.v2", chatType: "meeting", tenantId: "other", title: "Customer review" },
+      { id: "19:meeting_C@thread.v2", chatType: "meeting", tenantId: "home", isConversationDeleted: true },
+    ],
+  };
+
+  it("lists meeting chats with their meeting, marking another organization's", () => {
+    expect(teams.homeTenant(csa)).toBe("home");
+    const [a, b, ...rest] = teams.parseCsaMeetings(csa);
+    expect(rest).toEqual([]);
+    expect(a).toMatchObject({ id: "19:meeting_A@thread.v2", title: "Weekly sync", start: "2026-07-21T07:00:00Z", recurring: true, hasTranscript: true, organizer: "8:orgid:0000000a", lastActivity: "2026-10-06T08:01:51.238Z" });
+    expect(a.external).toBeUndefined();
+    expect(b).toMatchObject({ title: "Customer review", external: true, start: null });
+  });
+
+  const started = {
+    messagetype: "Event/Call",
+    originalarrivaltime: "2026-10-06T06:55:10.8630000Z",
+    properties: { skypeguid: "call-1" },
+    content:
+      '<partlist alt =""></partlist><meetingDetails><meetingDetails><organizerUpn>bo@x.com</organizerUpn><startTime>07/21/2026 07:00:00</startTime><instanceDetails><startTime>10/06/2026 07:00:00 +00:00</startTime><endTime>10/06/2026 08:00:00 +00:00</endTime><subject>Weekly sync</subject></instanceDetails></meetingDetails></meetingDetails><callEventType>callStarted</callEventType>\n<conversationStartTime>10/06/2026 06:54:39</conversationStartTime>\n<callId>call-1</callId>',
+  };
+  const ended = {
+    messagetype: "Event/Call",
+    originalarrivaltime: "2026-10-06T08:06:54.0570000Z",
+    properties: { skypeguid: "call-1" },
+    content:
+      `<ended/><partlist alt="" count="2"><part identity="${me}"><name>${me}</name><displayName>Heeyun Cho</displayName><duration>4335</duration></part><part identity="8:orgid:b"><name>8:orgid:b</name><displayName>Bo &amp; Co</displayName><duration>4335</duration></part></partlist><callEventType>callEnded</callEventType><callId>call-1</callId>`,
+  };
+  const recording = {
+    messagetype: "RichText/Media_CallRecording",
+    originalarrivaltime: "2026-10-06T08:10:00Z",
+    content:
+      '<URIObject type="Video.2/CallRecording.1"><RecordingStatus status="Success" code="200" /><Title>Weekly sync</Title><Identifiers><Id type="callId" value="call-1" /></Identifiers><RecordingContent contentTypes="Recording+Transcript" timestamp="2026-10-06T06:55:37Z" duration="1:10:47.42"><item type="amsTranscript" uri="https://kr-prod.asyncgw.teams.microsoft.com/v1/objects/0-x/views/transcript" /><item type="onedriveForBusinessVideo" uri="https://x-my.sharepoint.com/:v:/p/bo/abc" /><item type="onedriveForBusinessTranscript" uri="https://x-my.sharepoint.com/personal/bo/_api/v2.1/drives/d/items/i/versions/current/media/transcripts/t/content?a=1&amp;b=2" /></RecordingContent></URIObject>',
+  };
+  const inProgress = { ...recording, content: recording.content.replace('status="Success"', 'status="ChunkFinished"') };
+
+  it("reads calls: when, who joined, recording and transcript", () => {
+    expect(teams.callTime("10/06/2026 07:00:00 +00:00")).toBe("2026-10-06T07:00:00Z");
+    expect(teams.parseRecording(inProgress)).toBeNull();
+    expect(teams.parseRecording(recording)).toMatchObject({ callId: "call-1", seconds: 4247, video: "https://x-my.sharepoint.com/:v:/p/bo/abc" });
+    const sessions = teams.meetingSessions([ended, recording, inProgress, started, { messagetype: "RichText/Html", content: "hi" }]);
+    expect(sessions).toEqual([
+      {
+        callId: "call-1",
+        subject: "Weekly sync",
+        start: "2026-10-06T06:54:39Z",
+        end: "2026-10-06T08:06:54Z",
+        minutes: 72,
+        scheduled: { start: "2026-10-06T07:00:00Z", end: "2026-10-06T08:00:00Z" },
+        attendees: ["Heeyun Cho", "Bo & Co"],
+        recording: "https://x-my.sharepoint.com/:v:/p/bo/abc",
+        transcript: true,
+        transcriptUrl: "https://x-my.sharepoint.com/personal/bo/_api/v2.1/drives/d/items/i/versions/current/media/transcripts/t/content?a=1&b=2",
+      },
+    ]);
+  });
+
+  const transcript = {
+    entries: [
+      { text: "Hello", speakerDisplayName: "Bo", startOffset: "00:00:01.5", endOffset: "00:00:03.5" },
+      { text: "everyone.", speakerDisplayName: "Bo", startOffset: "00:00:04.0", endOffset: "00:00:05.0" },
+      { text: " ", speakerDisplayName: "Ana", startOffset: "00:00:05.0", endOffset: "00:00:05.1" },
+      { text: "The sample ships Monday.", speakerDisplayName: "Ana", startOffset: "00:01:00.0", endOffset: "00:02:00.0" },
+      { text: "Which SAMPLE?", startOffset: "00:02:01.0", endOffset: "00:02:03.0" },
+    ],
+  };
+
+  it("renders a transcript by speaker turn, from a point, and searches it", () => {
+    expect(teams.transcriptLines(transcript)).toEqual([
+      "[00:00:01] Bo: Hello everyone.",
+      "[00:01:00] Ana: The sample ships Monday.",
+      "[00:02:01] Unknown: Which SAMPLE?",
+    ]);
+    expect(teams.transcriptLines(transcript, { fromSeconds: 60 })[0]).toBe("[00:01:00] Ana: The sample ships Monday.");
+    expect(teams.transcriptSpeakers(transcript)).toEqual([
+      { name: "Ana", minutes: 1 },
+      { name: "Bo", minutes: 0.1 },
+      { name: "Unknown", minutes: 0 },
+    ]);
+    expect(teams.searchTranscript(transcript, "sample")).toEqual([
+      { before: "[00:00:01] Bo: Hello everyone.", line: "[00:01:00] Ana: The sample ships Monday." },
+      { before: "[00:01:00] Ana: The sample ships Monday.", line: "[00:02:01] Unknown: Which SAMPLE?" },
+    ]);
+    // A speaker's name doesn't count as what they said.
+    expect(teams.searchTranscript(transcript, "ana")).toEqual([]);
+  });
+});
+
+describe("traffic log", () => {
+  it("records names, never values", () => {
+    const entry = teams.summarizeRequest({
+      url: "https://x-my.sharepoint.com/personal/a/_api/v2.1/items?format=json&tempauth=SECRET",
+      method: "GET",
+      type: "xmlhttprequest",
+      requestHeaders: [{ name: "Authorization", value: "Bearer SECRET" }],
+    });
+    expect(JSON.stringify(entry)).not.toContain("SECRET");
+    expect(entry).toMatchObject({ host: "x-my.sharepoint.com", queryParams: ["format", "tempauth"], headerNames: ["authorization"], auth: "bearer" });
+    expect(teams.authScheme([{ name: "authentication", value: "skypetoken=SECRET" }])).toBe("authentication:skypetoken");
+    let list = teams.recordTraffic([], entry, 1000);
+    list = teams.recordTraffic(list, entry, 2000);
+    list = teams.recordStatus(list, entry.key, 200);
+    expect(list).toHaveLength(1);
+    expect(teams.filterTraffic(list, { filter: "_api" })[0]).toMatchObject({ count: 2, status: 200, lastAt: "1970-01-01T00:00:02.000Z" });
+    expect(teams.filterTraffic(list, { filter: "teams" })).toEqual([]);
+    expect(teams.isTeamsOrigin("https://teams.cloud.microsoft")).toBe(true);
+    expect(teams.isTeamsOrigin("https://evil.com")).toBe(false);
+  });
+});
+
 describe("versions", () => {
   const read = (f: string) => JSON.parse(readFileSync(f, "utf8"));
 
