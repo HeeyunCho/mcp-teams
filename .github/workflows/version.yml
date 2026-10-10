@@ -11,6 +11,8 @@ on:
     branches: [main]
     paths-ignore:
       - "**.md"
+  # Run by hand to publish the version on main when its publish failed.
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -24,7 +26,7 @@ jobs:
   bump:
     # The release commit is pushed with a deploy key, which starts this workflow again;
     # this condition skips that run.
-    if: "!startsWith(github.event.head_commit.message, 'chore(release):')"
+    if: "github.event_name == 'workflow_dispatch' || !startsWith(github.event.head_commit.message, 'chore(release):')"
     runs-on: ubuntu-latest
     steps:
       # main only takes pull requests (repository ruleset "Protect main"). The release
@@ -46,6 +48,7 @@ jobs:
       - run: npm test
 
       - name: Bump version
+        if: github.event_name == 'push'
         id: bump
         env:
           BEFORE: ${{ github.event.before }}
@@ -60,6 +63,7 @@ jobs:
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
       - name: Commit and tag
+        if: github.event_name == 'push'
         env:
           VERSION: ${{ steps.bump.outputs.version }}
         run: |
@@ -74,4 +78,10 @@ jobs:
 
       # Tests ran above; prepublishOnly would run them again.
       - name: Publish to npm
-        run: npm publish --access public --ignore-scripts
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          if npm view "mcp-teams@$VERSION" version >/dev/null 2>&1; then
+            echo "mcp-teams@$VERSION is already on npm"
+          else
+            npm publish --access public --ignore-scripts
+          fi
