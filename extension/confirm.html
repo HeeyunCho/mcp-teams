@@ -1,0 +1,32 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Confirm posting to Teams</title>
+  <style>
+    body { font: 14px system-ui, sans-serif; margin: 0; color: #1b1b1b; background: #fafafa; }
+    header { background: #b3261e; color: #fff; padding: 12px 16px; font-weight: 600; }
+    main { padding: 12px 16px 90px; }
+    dl { display: grid; grid-template-columns: 90px 1fr; gap: 6px 10px; margin: 0 0 12px; }
+    dt { font-weight: 600; color: #555; }
+    dd { margin: 0; word-break: break-word; }
+    pre { white-space: pre-wrap; word-break: break-word; background: #fff; border: 1px solid #ddd; padding: 10px; max-height: 340px; overflow: auto; font: 13px/1.45 system-ui, sans-serif; }
+    .quote { color: #555; border-left: 3px solid #bbb; padding-left: 8px; margin: 0 0 12px; white-space: pre-wrap; max-height: 120px; overflow: auto; }
+    footer { position: fixed; bottom: 0; left: 0; right: 0; background: #fff; border-top: 1px solid #ddd; padding: 12px 16px; display: flex; gap: 10px; justify-content: flex-end; }
+    button { font: inherit; padding: 8px 18px; border-radius: 4px; border: 1px solid #888; background: #fff; cursor: pointer; }
+    #send { background: #5b4dd6; color: #fff; border-color: #5b4dd6; font-weight: 600; }
+    button:disabled { opacity: .5; cursor: default; }
+    .err { color: #b3261e; }
+  </style>
+</head>
+<body>
+  <header>An AI assistant wants to post this message in Teams. Check it before sending.</header>
+  <main id="main">Loading…</main>
+  <footer>
+    <span id="status" class="err" style="margin-right:auto"></span>
+    <button id="cancel">Don't send</button>
+    <button id="send" disabled>Send</button>
+  </footer>
+  <script src="confirm.js"></script>
+</body>
+</html>

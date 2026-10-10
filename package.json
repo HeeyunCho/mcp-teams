@@ -1,0 +1,46 @@
+{
+  "name": "mcp-teams",
+  "version": "0.1.0",
+  "description": "MCP server that lets AI assistants work with Microsoft Teams (web) through a Chrome/Edge extension bridge",
+  "keywords": ["mcp", "model-context-protocol", "teams", "microsoft-teams", "microsoft-365", "chat", "claude", "chrome-extension"],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/HeeyunCho/mcp-teams.git"
+  },
+  "homepage": "https://github.com/HeeyunCho/mcp-teams#readme",
+  "bugs": "https://github.com/HeeyunCho/mcp-teams/issues",
+  "type": "module",
+  "bin": {
+    "mcp-teams": "dist/index.js"
+  },
+  "main": "dist/index.js",
+  "files": [
+    "dist",
+    "extension"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/index.js",
+    "token": "node dist/index.js token",
+    "test": "tsc -p tsconfig.json && vitest run --fileParallelism=false",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "probe": "node scripts/probe.mjs",
+    "update": "node scripts/update.mjs",
+    "prepublishOnly": "npm test"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.1",
+    "ws": "^8.22.0",
+    "zod": "^4.6.5"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.4",
+    "@types/ws": "^8.18.2",
+    "typescript": "^7.0.2",
+    "vitest": "^5.0.3"
+  }
+}

@@ -1,0 +1,59 @@
+# Bumps the version on every change merged into main, then commits and tags it.
+# The bump level comes from the pushed commit messages (see scripts/bump-version.mjs).
+name: Version bump
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - "**.md"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: version-bump
+  cancel-in-progress: false
+
+jobs:
+  bump:
+    # Pushes made with GITHUB_TOKEN do not trigger workflows, so the bump commit cannot loop.
+    if: "!startsWith(github.event.head_commit.message, 'chore(release):')"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - run: npm ci
+
+      - run: npm test
+
+      - name: Bump version
+        id: bump
+        env:
+          BEFORE: ${{ github.event.before }}
+        run: |
+          if [ -z "$BEFORE" ] || [ "$BEFORE" = "0000000000000000000000000000000000000000" ] || ! git cat-file -e "$BEFORE^{commit}" 2>/dev/null; then
+            # The first push has no parent commit to compare with.
+            if git cat-file -e "HEAD~1^{commit}" 2>/dev/null; then RANGE="HEAD~1..HEAD"; else RANGE="HEAD"; fi
+          else
+            RANGE="$BEFORE..HEAD"
+          fi
+          VERSION=$(git log --format=%B%x00 "$RANGE" | node scripts/bump-version.mjs)
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Commit and tag
+        env:
+          VERSION: ${{ steps.bump.outputs.version }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -am "chore(release): v$VERSION"
+          git tag "v$VERSION"
+          git push origin HEAD:main "v$VERSION"

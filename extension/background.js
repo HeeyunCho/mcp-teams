@@ -1,0 +1,635 @@
+// Service worker: connects to the local MCP server over WebSocket and runs Teams
+// requests inside an open Teams tab, with the session Teams itself uses.
+
+import * as teams from "./teams.js";
+
+const VERSION = chrome.runtime.getManifest().version;
+const DEFAULT_PORT = 47393;
+const CONFIRM_TIMEOUT_MS = 5 * 60_000;
+// One Teams request; below the server's own timeout.
+const REQUEST_TIMEOUT_MS = 60_000;
+
+const TEAMS_URLS = ["https://teams.cloud.microsoft/*", "https://teams.microsoft.com/*"];
+const DEFAULT_TEAMS_URL = "https://teams.cloud.microsoft/";
+
+let ws = null;
+let state = "disconnected"; // disconnected | connecting | connected | unauthorized
+let lastError = null;
+
+// ------------------------------------------------------------ session capture
+
+/**
+ * Teams authenticates each service (chat, teams list, people, search) with its own
+ * token, sent in headers. We observe them on Teams' own requests, including those of
+ * its workers, and replay them. They live in chrome.storage.session (memory only).
+ */
+chrome.webRequest.onBeforeSendHeaders.addListener(
+  (details) => {
+    const svc = teams.serviceOf(details.url);
+    if (!svc) return;
+    const headers = teams.pickHeaders(details.requestHeaders);
+    if (!headers) return;
+    const capture = { base: svc.base, region: svc.region ?? null, headers, at: Date.now() };
+    const update = { [`capture:${svc.service}`]: capture };
+    if (svc.oid) update.oid = svc.oid;
+    chrome.storage.session.set(update);
+  },
+  {
+    urls: [
+      "https://teams.cloud.microsoft/api/*",
+      "https://teams.microsoft.com/api/*",
+      "https://*.ng.msg.teams.microsoft.com/*",
+      "https://substrate.office.com/*",
+    ],
+  },
+  ["requestHeaders", "extraHeaders"],
+);
+
+async function getCapture(service) {
+  const key = `capture:${service}`;
+  return (await chrome.storage.session.get(key))[key] ?? null;
+}
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/** Waits until a session newer than `since` is captured for the service; null on timeout. */
+async function waitForCapture(service, since, timeoutMs) {
+  for (const end = Date.now() + timeoutMs; Date.now() < end; await sleep(250)) {
+    const cap = await getCapture(service);
+    if (cap && cap.at > since) return cap;
+  }
+  return null;
+}
+
+const OPEN_TAB_WAIT_MS = 60_000;
+let autoTabId = null; // the tab this extension opened, reused while it exists
+let opening = null; // Promise of the tab being opened, so parallel calls open one
+
+/**
+ * With no Teams tab open, opens one in the background (pinned, not focused) and waits
+ * until Teams has signed in and made its first chat request.
+ */
+function openTeamsTab() {
+  opening ??= (async () => {
+    const since = Date.now();
+    let tab = autoTabId === null ? null : await chrome.tabs.get(autoTabId).catch(() => null);
+    if (!tab) {
+      tab = await chrome.tabs
+        .create({ url: DEFAULT_TEAMS_URL, active: false, pinned: true })
+        // No browser window open: open Teams in a new one, without taking focus.
+        .catch(async () => (await chrome.windows.create({ url: DEFAULT_TEAMS_URL, focused: false })).tabs[0]);
+      autoTabId = tab.id;
+    }
+    const cap = await waitForCapture("chatsvc", since, OPEN_TAB_WAIT_MS);
+    const current = await chrome.tabs.get(tab.id).catch(() => null);
+    if (!current) throw new Error("The Teams tab that was opened was closed. Try again, or open Teams yourself.");
+    if (!cap) {
+      const at = current.url || current.pendingUrl;
+      throw new Error(`Teams was opened in a background tab but isn't signed in yet. Sign in there${at ? ` (${at.split("/").slice(0, 3).join("/")})` : ""}, then try again.`);
+    }
+    await waitForTabLoaded(tab.id);
+    return current;
+  })().finally(() => (opening = null));
+  return opening;
+}
+
+/** The Teams tab to run requests in: one on the origin of the service's capture, else any. */
+async function findTeamsTab(origin) {
+  const tabs = await chrome.tabs.query({ url: TEAMS_URLS });
+  if (!tabs.length) return openTeamsTab();
+  const sameOrigin = tabs.filter((t) => origin && t.url?.startsWith(origin));
+  const pool = sameOrigin.length ? sameOrigin : tabs;
+  return pool.find((t) => !t.discarded && t.status === "complete") ?? pool[0];
+}
+
+// Teams keeps routing for a moment after the page has loaded.
+const SETTLE_MS = 1_000;
+
+async function waitForTabLoaded(tabId, timeoutMs = 30_000) {
+  for (const end = Date.now() + timeoutMs; Date.now() < end; await sleep(250)) {
+    const t = await chrome.tabs.get(tabId).catch(() => null);
+    if (!t) return;
+    if (t.status === "complete") return sleep(SETTLE_MS);
+  }
+}
+
+const refreshing = new Map(); // service -> Promise<capture|null>, so parallel calls reload once
+
+/**
+ * A captured token is lost when the extension reloads and expires after about an hour.
+ * Teams' next own request to the service brings a fresh one; if none comes soon, reload
+ * the Teams tab, which makes Teams call its services again.
+ */
+function refreshSession(service, tab, { quickWaitMs = 4_000 } = {}) {
+  if (!refreshing.has(service)) {
+    const since = Date.now();
+    const p = (async () => {
+      const quick = quickWaitMs ? await waitForCapture(service, since, quickWaitMs) : null;
+      if (quick) return quick;
+      await chrome.tabs.reload(tab.id);
+      const cap = await waitForCapture(service, since, 45_000);
+      if (cap) await waitForTabLoaded(tab.id);
+      return cap;
+    })().finally(() => refreshing.delete(service));
+    refreshing.set(service, p);
+  }
+  return refreshing.get(service);
+}
+
+const SERVICE_HELP = {
+  chatsvc: "Teams' chat session is not available. Reload the Teams tab and try again.",
+  csa: "Teams' team list session is not available. Reload the Teams tab and try again.",
+  mt: "Teams' people session is not available. Reload the Teams tab and try again.",
+  substrate:
+    "Teams' search session is not available yet. Click into the search box at the top of Teams once (that makes Teams sign in to search), then try again.",
+};
+
+/**
+ * Runs inside the Teams page (MAIN world) so cookies and origin are the page's own.
+ * status 0: no answer (network error or timeoutMs passed).
+ */
+async function pageFetch(url, method, headers, body, timeoutMs) {
+  try {
+    const res = await fetch(url, {
+      method,
+      credentials: "include",
+      headers: body == null ? headers : { ...headers, "content-type": "application/json" },
+      body: body == null ? undefined : JSON.stringify(body),
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+    return { status: res.status, text: await res.text() };
+  } catch (err) {
+    return { status: 0, text: "", error: err?.name === "TimeoutError" ? "timeout" : String(err?.message ?? err) };
+  }
+}
+
+async function runInTab(tab, url, method, headers, body) {
+  const [injection] = await chrome.scripting.executeScript({
+    target: { tabId: tab.id },
+    world: "MAIN",
+    func: pageFetch,
+    // executeScript can't pass undefined.
+    args: [url, method, headers, body ?? null, REQUEST_TIMEOUT_MS],
+  });
+  const res = injection?.result;
+  if (!res) throw new Error("Could not run inside the Teams tab. Reload the Teams tab and try again.");
+  if (res.status === 0) {
+    throw new Error(
+      res.error === "timeout"
+        ? `Teams did not answer within ${REQUEST_TIMEOUT_MS / 1000} s. Reload the Teams tab and try again.`
+        : `Could not reach Teams: ${res.error}`,
+    );
+  }
+  return res;
+}
+
+/**
+ * One request to a Teams service. `path` is relative to the service's base URL (or a
+ * full URL on it). Returns the parsed JSON (null for an empty answer).
+ */
+async function api(service, path, { method = "GET", body, raw = false } = {}) {
+  let cap = await getCapture(service);
+  let tab = await findTeamsTab(cap ? new URL(cap.base).origin : null);
+  if (!cap) {
+    cap = await refreshSession(service, tab, { quickWaitMs: service === "substrate" ? 2_000 : 4_000 });
+    if (!cap) throw new Error(SERVICE_HELP[service]);
+  }
+  const urlFor = (c) => (/^https:/.test(path) ? teams.rebase(path, c.base) : `${c.base}${path}`);
+  let res = await runInTab(tab, urlFor(cap), method, cap.headers, body);
+  if (res.status === 401) {
+    // Rejected before running (expired token), so trying once more is safe. A 403 is a
+    // real answer (e.g. no longer a member of that chat).
+    cap = await refreshSession(service, tab, { quickWaitMs: 0 });
+    if (!cap) throw new Error(SERVICE_HELP[service]);
+    tab = await findTeamsTab(new URL(cap.base).origin);
+    res = await runInTab(tab, urlFor(cap), method, cap.headers, body);
+  }
+  if (raw) return res;
+  if (res.status >= 400) {
+    const start = res.text.replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim().slice(0, 200);
+    throw new Error(`Teams HTTP ${res.status} (${service})${start ? `: ${start}` : ""}`);
+  }
+  if (!res.text) return null;
+  try {
+    return JSON.parse(res.text);
+  } catch {
+    throw new Error(`Teams returned something that isn't JSON (${service}, HTTP ${res.status}).`);
+  }
+}
+
+// ------------------------------------------------------------ data
+
+/** The signed-in user's MRI ("8:orgid:<guid>"), from the people service's request paths. */
+async function myMri() {
+  const { oid } = await chrome.storage.session.get("oid");
+  return oid ? `8:orgid:${oid}` : null;
+}
+
+const LIST_CACHE_MS = 60_000;
+let listCache = null; // { at, data: { teams, chats } }
+
+/** Teams, channels and chats (csa), with names for untitled chats. Cached for a minute. */
+async function teamsAndChats(fresh = false) {
+  if (!fresh && listCache && Date.now() - listCache.at < LIST_CACHE_MS) return listCache.data;
+  const json = await api("csa", "/api/v1/teams/users/me?isPrefetch=false&enableMembershipSummary=true&enableRC2Fetch=false");
+  const data = { teams: teams.parseTeams(json), chats: teams.parseCsaChats(json) };
+  await nameChats(data.chats);
+  listCache = { at: Date.now(), data };
+  return data;
+}
+
+const names = new Map(); // mri -> display name; bounded, starts over when full
+const NAMES_MAX = 5000;
+
+/** Looks up display names for MRIs not seen yet (mt short profiles, 100 at a time). */
+async function lookupNames(mris) {
+  const unknown = [...new Set(mris)].filter((m) => m && !names.has(m) && /^8:/.test(m));
+  for (let i = 0; i < unknown.length; i += 100) {
+    const batch = unknown.slice(i, i + 100);
+    const json = await api("mt", "/beta/users/fetchShortProfile?isMailAddress=false&enableGuest=true&includeIBBarredUsers=true&skypeTeamsInfo=true", {
+      method: "POST",
+      body: batch,
+    }).catch(() => null);
+    if (names.size > NAMES_MAX) names.clear();
+    for (const p of teams.parseProfiles(json)) if (p.mri && p.name) names.set(p.mri, p.name);
+  }
+}
+
+async function nameChats(chats) {
+  const me = await myMri();
+  await lookupNames(chats.filter((c) => !c.title).flatMap((c) => c.members));
+  for (const c of chats) {
+    c.memberNames = c.members.filter((m) => m !== me).map((m) => names.get(m)).filter(Boolean);
+    c.title = teams.chatTitle(c, names, me);
+  }
+}
+
+async function resolve(conversation) {
+  const q = String(conversation ?? "").trim();
+  if (!q) throw new Error("Say which chat or channel: an id, 'Team/Channel', a chat title or a person's name.");
+  if (/^(19|48):/.test(q)) {
+    const data = await teamsAndChats().catch(() => ({ teams: [], chats: [] }));
+    return describe(q.split(";messageid=")[0], data);
+  }
+  return teams.resolveConversation(q, await teamsAndChats());
+}
+
+/** What we know about a conversation id from the lists. */
+function describe(id, { teams: ts, chats }) {
+  if (id === "48:notes") return { id, kind: "self", title: "Notes to self" };
+  for (const t of ts) {
+    const c = t.channels.find((x) => x.id === id);
+    if (c) return { id, kind: "channel", title: `${t.name}/${c.name}`, team: t.name, channel: c.name, teamId: t.id };
+  }
+  const chat = chats.find((c) => c.id === id);
+  if (chat) return { id, kind: chat.kind, title: chat.title };
+  return { id, kind: /@thread\.(tacv2|skype)$/.test(id) ? "channel" : null, title: null };
+}
+
+const MESSAGES_VIEW = "msnp24Equivalent|supportsMessageProperties";
+
+/**
+ * Messages of a conversation, newest first, until `limit` messages (after dropping system
+ * events when not wanted) or `before` is reached. Follows chatsvc's backward links.
+ */
+async function fetchMessages(id, { limit, before, includeSystem, threadId }) {
+  const target = threadId ? `${id};messageid=${threadId}` : id;
+  let path = `/v1/users/ME/conversations/${encodeURIComponent(target)}/messages?view=${encodeURIComponent(MESSAGES_VIEW)}&pageSize=${Math.min(200, Math.max(20, limit * 2))}&startTime=1`;
+  const beforeMs = before ? Date.parse(before) : null;
+  const raw = [];
+  let counted = 0;
+  for (let page = 0; page < 20 && path; page++) {
+    const json = await api("chatsvc", path);
+    const msgs = json?.messages ?? [];
+    for (const m of msgs) {
+      const t = Date.parse(m.originalarrivaltime ?? m.composetime ?? "");
+      if (beforeMs && t >= beforeMs) continue;
+      raw.push(m);
+      if (includeSystem || !/^(ThreadActivity\/|Event\/|Control\/)/i.test(m.messagetype ?? "")) counted++;
+    }
+    if (counted >= limit || !msgs.length) break;
+    path = json?._metadata?.backwardLink ?? null;
+  }
+  return raw;
+}
+
+const handlers = {
+  async status() {
+    const tabs = await chrome.tabs.query({ url: TEAMS_URLS });
+    const sessions = {};
+    for (const s of ["chatsvc", "csa", "mt", "substrate"]) {
+      const cap = await getCapture(s);
+      sessions[s] = cap ? new Date(cap.at).toISOString() : null;
+    }
+    return {
+      extensionVersion: VERSION,
+      teamsTabs: tabs.length,
+      // For the bridge's choice between browsers.
+      sessions: [{ sessionCaptured: !!sessions.chatsvc }],
+      services: sessions,
+      region: (await getCapture("chatsvc"))?.region ?? null,
+      signedInAs: await myMri(),
+    };
+  },
+
+  async listTeams() {
+    return { teams: (await teamsAndChats(true)).teams };
+  },
+
+  async listChats({ query, limit = 30, unreadOnly = false }) {
+    let chats = (await teamsAndChats(true)).chats;
+    if (unreadOnly) chats = chats.filter((c) => c.unread);
+    if (query) chats = chats.filter((c) => teams.matchesWords(c.title, query) || c.memberNames?.some((n) => teams.matchesWords(n, query)));
+    chats.sort((a, b) => (b.lastMessage?.time ?? "").localeCompare(a.lastMessage?.time ?? ""));
+    return {
+      total: chats.length,
+      chats: chats.slice(0, limit).map(({ members, memberNames, lastFrom, ...c }) => ({ ...c, memberCount: members.length || undefined })),
+    };
+  },
+
+  async readMessages({ conversation, limit = 30, before, includeSystem = false, threadId }) {
+    const conv = await resolve(conversation);
+    const raw = await fetchMessages(conv.id, { limit, before, includeSystem, threadId });
+    let messages = teams.buildConversation(raw, { includeSystem, channel: conv.kind === "channel" && !threadId });
+    // Newest `limit` posts (a post counts once, with its replies).
+    const more = messages.length > limit;
+    messages = messages.slice(-limit);
+    return {
+      conversation: conv,
+      count: messages.length,
+      messages,
+      ...(more || raw.length ? { olderBefore: messages[0]?.time ?? null } : {}),
+    };
+  },
+
+  async searchMessages({ query, limit = 25, offset = 0 }) {
+    const body = {
+      entityRequests: [
+        {
+          entityType: "Message",
+          contentSources: ["Teams"],
+          fields: ["Extension_SkypeSpaces_ConversationPost_Extension_FromSkypeInternalId_String", "Extension_SkypeSpaces_ConversationPost_Extension_FileData_String", "Extension_SkypeSpaces_ConversationPost_Extension_ThreadType_String"],
+          propertySet: "Optimized",
+          query: { queryString: query, displayQueryString: query },
+          from: offset,
+          size: limit,
+          topResultsCount: 0,
+        },
+      ],
+      cvid: crypto.randomUUID(),
+      logicalId: crypto.randomUUID(),
+      scenario: { Dimensions: [{ DimensionName: "QueryType", DimensionValue: "All" }, { DimensionName: "FormFactor", DimensionValue: "general.web.reactSearch" }], Name: "powerbar" },
+    };
+    const r = teams.parseSearch(await api("substrate", "/searchservice/api/v2/query", { method: "POST", body }));
+    return { query, ...r, results: r.results.slice(0, limit) };
+  },
+
+  async findPeople({ query, limit = 10 }) {
+    const body = {
+      EntityRequests: [{ Query: { QueryString: query, DisplayQueryString: query }, EntityType: "People", Size: limit, Fields: ["Id", "MRI", "DisplayName", "EmailAddresses", "PeopleType", "PeopleSubtype", "UserPrincipalName", "GivenName", "Surname", "JobTitle", "Department", "CompanyName", "OfficeLocation", "ExternalDirectoryObjectId"] }],
+      cvid: crypto.randomUUID(),
+      logicalId: crypto.randomUUID(),
+      AppName: "Microsoft Teams",
+      Scenario: { Name: "peoplepicker.newChat" },
+    };
+    const people = teams.parseSuggestions(await api("substrate", "/search/api/v1/suggestions?scenario=peoplepicker.newChat", { method: "POST", body }));
+    return { count: people.length, people };
+  },
+
+  /** Read-only diagnostics for development: a GET on a service, never its headers. */
+  async probe({ service, path }) {
+    if (!["chatsvc", "csa", "mt", "substrate"].includes(service)) throw new Error("Unknown service");
+    const res = await api(service, path, { raw: true });
+    return { status: res.status, text: res.text.slice(0, 20_000_000) };
+  },
+
+  /**
+   * Reloads the extension from disk (after an update). Refused while a send waits for
+   * the user's decision, since reloading would close that window.
+   */
+  async reload() {
+    if (pendingSends.size) throw new Error("A message is waiting for your decision in the confirmation window; reload after that.");
+    setTimeout(() => chrome.runtime.reload(), 250); // after this response is sent
+    return { reloading: true, version: VERSION };
+  },
+
+  async requestSend({ conversation, text, threadId, subject }) {
+    if (!String(text ?? "").trim()) throw new Error("The message is empty.");
+    const conv = await resolve(conversation);
+    if (threadId && conv.kind !== "channel") throw new Error("reply_to is only for channel posts; in a chat, just send the message.");
+    if (subject && (conv.kind !== "channel" || threadId)) throw new Error("A subject is only for a new channel post.");
+    let replyingTo = null;
+    if (threadId) {
+      const root = (await fetchMessages(conv.id, { limit: 1, threadId, includeSystem: false })).find((m) => String(m.id) === String(threadId));
+      replyingTo = root ? teams.parseMessage(root) : { id: threadId };
+    }
+    const request = { conversation: conv, text: String(text), threadId: threadId ?? null, subject: subject ?? null, replyingTo };
+    return askUserToConfirm(request);
+  },
+};
+
+async function sendMessage({ conversation, text, threadId, subject }) {
+  const target = threadId ? `${conversation.id};messageid=${threadId}` : conversation.id;
+  const me = await myMri();
+  if (me) await lookupNames([me]);
+  const body = {
+    id: "-1",
+    type: "Message",
+    conversationid: target,
+    from: me ?? undefined,
+    composetime: new Date().toISOString(),
+    originalarrivaltime: new Date().toISOString(),
+    content: teams.textToHtml(text),
+    messagetype: "RichText/Html",
+    contenttype: "Text",
+    imdisplayname: (me && names.get(me)) || "",
+    clientmessageid: teams.clientMessageId(),
+    properties: { importance: "", subject: subject ?? "", title: "", cards: "[]", links: "[]", mentions: "[]", onbehalfof: null, files: "[]", policyViolation: null, formatVariant: "TEAMS" },
+    postType: "Standard",
+    crossPostChannels: [],
+  };
+  const r = await api("chatsvc", `/v1/users/ME/conversations/${encodeURIComponent(target)}/messages`, { method: "POST", body });
+  return { sent: true, conversation: conversation.title ?? conversation.id, time: r?.OriginalArrivalTime ? new Date(r.OriginalArrivalTime).toISOString() : null };
+}
+
+// ------------------------------------------------------------ send confirmation
+
+/**
+ * The AI can only *request* a send. The message is posted only after the user clicks
+ * Send in an extension-owned window, showing exactly what will be posted where.
+ */
+const pendingSends = new Map();
+
+async function askUserToConfirm(request) {
+  const id = crypto.randomUUID();
+  const win = await chrome.windows.create({
+    url: chrome.runtime.getURL(`confirm.html?id=${id}`),
+    type: "popup",
+    width: 600,
+    height: 640,
+    focused: true,
+  });
+  return new Promise((resolve) => {
+    const finish = (result) => {
+      const p = pendingSends.get(id);
+      if (!p) return;
+      pendingSends.delete(id);
+      clearTimeout(p.timer);
+      chrome.windows.remove(p.windowId).catch(() => {});
+      resolve(result);
+    };
+    const timer = setTimeout(() => finish({ sent: false, reason: "No decision within 5 minutes; nothing was sent." }), CONFIRM_TIMEOUT_MS);
+    pendingSends.set(id, { request, windowId: win.id, timer, finish });
+  });
+}
+
+chrome.windows.onRemoved.addListener((windowId) => {
+  for (const p of pendingSends.values()) {
+    if (p.windowId === windowId) p.finish({ sent: false, reason: "The user closed the confirmation window; nothing was sent." });
+  }
+});
+
+chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  // Only our own confirmation page may decide.
+  if (sender.id !== chrome.runtime.id || !sender.url?.startsWith(chrome.runtime.getURL("confirm.html"))) return;
+  const p = pendingSends.get(msg.id);
+  if (msg.type === "confirm:get") {
+    sendResponse(p ? { request: p.request } : { error: "This request has expired." });
+    return;
+  }
+  if (msg.type === "confirm:decide" && p) {
+    (async () => {
+      if (!msg.approve) {
+        p.finish({ sent: false, reason: "The user declined; nothing was sent." });
+        return sendResponse({ ok: true });
+      }
+      try {
+        p.finish(await sendMessage(p.request));
+        sendResponse({ ok: true });
+      } catch (err) {
+        p.finish({ sent: false, reason: `Sending failed: ${err.message}` });
+        sendResponse({ ok: false, error: err.message });
+      }
+    })();
+    return true;
+  }
+});
+
+// Popup lives at popup.html; it is allowed to query status too.
+chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  if (sender.id !== chrome.runtime.id || !sender.url?.startsWith(chrome.runtime.getURL("popup.html"))) return;
+  if (msg.type === "popup:status") sendResponse({ state, lastError, version: VERSION });
+  if (msg.type === "popup:reconnect") {
+    reconnectNow();
+    connect().then(() => sendResponse({ state, lastError }));
+    return true;
+  }
+});
+
+// ------------------------------------------------------------ bridge connection
+
+function browserName() {
+  const brands = navigator.userAgentData?.brands?.map((b) => b.brand) ?? [];
+  if (brands.some((b) => /Edge/i.test(b))) return "Edge";
+  if (brands.some((b) => /Chrome/i.test(b))) return "Chrome";
+  return "Chromium";
+}
+
+let starting = false; // a connect() is between its checks and opening the socket
+const RETRY_MIN_MS = 500;
+const RETRY_MAX_MS = 30_000;
+let retryMs = RETRY_MIN_MS;
+let retryTimer = null;
+
+/** Drops the current connection (even one still closing) and connects again. */
+function reconnectNow() {
+  const old = ws;
+  ws = null;
+  old?.close();
+  retryMs = RETRY_MIN_MS;
+}
+
+/**
+ * Connects to the local MCP server. No pairing is needed: the server trusts this
+ * extension's fixed id (manifest "key"). A token saved under Advanced is sent too, for a
+ * copy of the extension loaded under another id.
+ */
+async function connect() {
+  if (starting || (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING))) return;
+  clearTimeout(retryTimer);
+  retryTimer = null;
+  starting = true;
+  let token, port, instance;
+  try {
+    ({ token, port, instance } = await chrome.storage.local.get(["token", "port", "instance"]));
+    // Identifies this browser profile to the server across reconnects (Chrome and Edge,
+    // or two profiles, can be connected at the same time).
+    if (!instance) {
+      instance = crypto.randomUUID();
+      await chrome.storage.local.set({ instance });
+    }
+  } finally {
+    starting = false;
+  }
+  if (ws) return;
+  state = "connecting";
+  const socket = new WebSocket(`ws://127.0.0.1:${port || DEFAULT_PORT}`);
+  ws = socket;
+  socket.onopen = () =>
+    socket.send(JSON.stringify({ type: "hello", token: token || null, version: VERSION, browser: browserName(), instance }));
+  socket.onmessage = async (ev) => {
+    let msg;
+    try {
+      msg = JSON.parse(ev.data);
+    } catch {
+      return;
+    }
+    if (!msg || typeof msg !== "object") return;
+    if (msg.type === "welcome") {
+      state = "connected";
+      lastError = null;
+      retryMs = RETRY_MIN_MS;
+      return;
+    }
+    if (msg.type !== "request") return;
+    const handler = Object.hasOwn(handlers, msg.method) ? handlers[msg.method] : null;
+    try {
+      if (!handler) throw new Error(`Unknown method ${msg.method}`);
+      const result = await handler(msg.params ?? {});
+      socket.send(JSON.stringify({ type: "response", id: msg.id, ok: true, result }));
+    } catch (err) {
+      socket.send(JSON.stringify({ type: "response", id: msg.id, ok: false, error: err?.message ?? String(err) }));
+    }
+  };
+  socket.onclose = (ev) => {
+    if (ws && ws !== socket) return; // replaced by a newer connection (reconnectNow)
+    ws = null;
+    // When a server session ends, another one takes over the port within a second:
+    // retry soon, backing off to the alarm's pace.
+    clearTimeout(retryTimer);
+    retryTimer = setTimeout(connect, retryMs);
+    retryMs = Math.min(retryMs * 2, RETRY_MAX_MS);
+    if (ev.code === 4401) {
+      state = "unauthorized";
+      lastError = "The MCP server refused this extension. Run `npx mcp-teams setup` and load the extension from the folder it shows.";
+    } else {
+      state = "disconnected";
+    }
+  };
+  socket.onerror = () => {
+    lastError = "MCP server not reachable (is your AI client running mcp-teams?)";
+  };
+}
+
+chrome.alarms.create("reconnect", { periodInMinutes: 0.5 });
+chrome.alarms.onAlarm.addListener((a) => a.name === "reconnect" && connect());
+chrome.storage.onChanged.addListener((changes, area) => {
+  if (area === "local" && (changes.token || changes.port)) {
+    state = "disconnected";
+    reconnectNow();
+    connect();
+  }
+});
+chrome.runtime.onStartup.addListener(connect);
+chrome.runtime.onInstalled.addListener(connect);
+connect();

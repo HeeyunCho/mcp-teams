@@ -1,0 +1,41 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>mcp-teams</title>
+  <style>
+    body { font: 13px system-ui, sans-serif; width: 320px; margin: 12px; color: #1b1b1b; }
+    h1 { font-size: 15px; margin: 0 0 8px; }
+    .row { margin: 8px 0; }
+    label { display: block; font-weight: 600; margin-bottom: 3px; }
+    input { width: 100%; box-sizing: border-box; padding: 5px; font: inherit; }
+    button { padding: 5px 10px; font: inherit; cursor: pointer; }
+    .state { padding: 6px 8px; border-radius: 4px; background: #eee; }
+    .state.connected { background: #dff6dd; }
+    .state.unauthorized { background: #fde7e9; }
+    .muted { color: #666; font-size: 12px; }
+    code { background: #f3f3f3; padding: 1px 3px; }
+  </style>
+</head>
+<body>
+  <h1>mcp-teams <span id="version" class="muted"></span></h1>
+  <div class="row"><div id="state" class="state">…</div></div>
+  <p class="muted">Nothing to set up here: the extension connects to mcp-teams by itself, and opens Teams when it needs it.</p>
+  <details>
+    <summary class="muted">Advanced</summary>
+    <div class="row">
+      <label for="token">Pairing token (only for a copy loaded under another id)</label>
+      <input id="token" type="password" autocomplete="off" placeholder="output of: npx mcp-teams token">
+    </div>
+    <div class="row">
+      <label for="port">Port</label>
+      <input id="port" type="number" placeholder="47393">
+    </div>
+    <div class="row">
+      <button id="save">Save &amp; connect</button>
+      <span id="saved" class="muted"></span>
+    </div>
+  </details>
+  <script src="popup.js"></script>
+</body>
+</html>

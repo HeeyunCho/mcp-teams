@@ -1,0 +1,313 @@
+import { readFileSync } from "node:fs";
+import { describe, expect, it } from "vitest";
+// @ts-expect-error plain JS module shared with the extension
+import * as teams from "../extension/teams.js";
+// @ts-expect-error plain JS script without types
+import { nextVersion } from "../scripts/bump-version.mjs";
+
+const OID = "99999999-8888-4777-8666-555555555555";
+
+describe("session capture", () => {
+  it("knows each Teams service and its base URL", () => {
+    expect(teams.serviceOf("https://teams.cloud.microsoft/api/chatsvc/kr/v1/users/ME/properties")).toEqual({
+      service: "chatsvc",
+      base: "https://teams.cloud.microsoft/api/chatsvc/kr",
+      region: "kr",
+    });
+    expect(teams.serviceOf(`https://teams.cloud.microsoft/api/mt/apac/beta/users/${OID}/profilepicturev2/8:orgid:x`)).toEqual({
+      service: "mt",
+      base: "https://teams.cloud.microsoft/api/mt/apac",
+      region: "apac",
+      oid: OID,
+    });
+    expect(teams.serviceOf("https://teams.microsoft.com/api/csa/emea/api/v1/teams/users/me")?.base).toBe(
+      "https://teams.microsoft.com/api/csa/emea",
+    );
+    expect(teams.serviceOf("https://kr.ng.msg.teams.microsoft.com/v1/users/ME/conversations")).toMatchObject({
+      service: "chatsvc",
+      base: "https://kr.ng.msg.teams.microsoft.com",
+    });
+    expect(teams.serviceOf("https://substrate.office.com/search/api/v1/suggestions")).toEqual({
+      service: "substrate",
+      base: "https://substrate.office.com",
+    });
+    expect(teams.serviceOf("https://teams.cloud.microsoft/v2/")).toBeNull();
+    expect(teams.serviceOf("not a url")).toBeNull();
+  });
+
+  it("keeps only the credential headers, and only from requests that carry credentials", () => {
+    const h = (name: string, value: string) => ({ name, value });
+    expect(teams.pickHeaders([h("Authorization", "Bearer x"), h("Cookie", "c"), h("x-ms-client-version", "1")])).toEqual({
+      authorization: "Bearer x",
+      "x-ms-client-version": "1",
+    });
+    expect(teams.pickHeaders([h("Authentication", "skypetoken=y")])).toEqual({ authentication: "skypetoken=y" });
+    expect(teams.pickHeaders([h("x-ms-client-version", "1")])).toBeNull();
+  });
+
+  it("moves chatsvc paging links onto the base we send requests to", () => {
+    expect(
+      teams.rebase("https://kr.ng.msg.teams.microsoft.com/v1/users/ME/conversations/19%3Aa/messages?syncState=s", "https://teams.cloud.microsoft/api/chatsvc/kr"),
+    ).toBe("https://teams.cloud.microsoft/api/chatsvc/kr/v1/users/ME/conversations/19%3Aa/messages?syncState=s");
+  });
+});
+
+describe("message content", () => {
+  it("turns message HTML into readable text", () => {
+    const html =
+      '<p>Hi <span itemtype="http://schema.skype.com/Mention" itemscope="" itemid="0">Ana</span>,</p><p>see <a href="https://x.com/doc">the doc</a> &amp; <a href="https://x.com">https://x.com</a> <img alt="😀" src="e.png"></p><ul><li>one</li><li>two</li></ul>';
+    expect(teams.htmlToText(html)).toBe("Hi Ana,\n\nsee the doc (https://x.com/doc) & https://x.com 😀\n\n• one\n• two");
+  });
+
+  it("shows a quoted reply as > lines", () => {
+    const html = '<blockquote itemtype="http://schema.skype.com/Reply"><strong>Bo</strong><p>original</p></blockquote><p>answer</p>';
+    expect(teams.htmlToText(html)).toBe("> Bo\n> original\n\nanswer");
+  });
+
+  it("leaves plain text alone and decodes entities", () => {
+    expect(teams.htmlToText("  plain  ")).toBe("plain");
+    expect(teams.decodeEntities("&lt;a&gt; &#39;b&#x27; &nbsp;")).toBe("<a> 'b'  ");
+  });
+
+  it("writes text as escaped HTML paragraphs with clickable links", () => {
+    expect(teams.textToHtml("a < b & c\n\nhttps://x.com/p?q=1.")).toBe(
+      '<p>a &lt; b &amp; c</p><p>&nbsp;</p><p><a href="https://x.com/p?q=1">https://x.com/p?q=1</a>.</p>',
+    );
+  });
+
+  it("makes 19-digit client message ids", () => {
+    expect(teams.clientMessageId()).toMatch(/^[1-9]\d{18}$/);
+  });
+});
+
+const msg = (id: string, time: string, extra: Record<string, unknown> = {}) => ({
+  id,
+  originalarrivaltime: time,
+  messagetype: "RichText/Html",
+  content: `<p>m${id}</p>`,
+  imdisplayname: "Ana Lee",
+  from: `https://kr.ng.msg.teams.microsoft.com/v1/users/ME/contacts/8:orgid:${OID}`,
+  ...extra,
+});
+
+describe("messages", () => {
+  it("parses a message with files, reactions, edits", () => {
+    const m = teams.parseMessage(
+      msg("1", "2026-10-10T08:00:00.000Z", {
+        properties: {
+          edittime: "1791631460008",
+          files: JSON.stringify([{ fileName: "plan.xlsx", fileType: "xlsx", fileInfo: { shareUrl: "https://sp/plan" } }]),
+          emotions: [{ key: "like", users: [{ mri: "8:orgid:a" }, { mri: "8:orgid:b" }] }, { key: "heart", users: [] }],
+        },
+      }),
+    );
+    expect(m).toEqual({
+      id: "1",
+      time: "2026-10-10T08:00:00.000Z",
+      from: { name: "Ana Lee", mri: `8:orgid:${OID}` },
+      text: "m1",
+      edited: new Date(1791631460008).toISOString(),
+      files: [{ name: "plan.xlsx", url: "https://sp/plan", type: "xlsx" }],
+      reactions: [{ reaction: "like", count: 2 }],
+    });
+  });
+
+  it("empties deleted messages and marks system events", () => {
+    expect(teams.parseMessage(msg("2", "2026-10-10T08:00:00Z", { properties: { deletetime: "1" } }))).toMatchObject({ text: "", deleted: true });
+    expect(teams.parseMessage(msg("3", "2026-10-10T08:00:00Z", { messagetype: "ThreadActivity/AddMember", content: "<addmember/>" })).system).toBe(
+      "ThreadActivity/AddMember",
+    );
+  });
+
+  it("orders a chat oldest first and drops system events unless asked", () => {
+    const raw = [
+      msg("3", "2026-10-10T10:00:00Z"),
+      msg("2", "2026-10-10T09:00:00Z", { messagetype: "Event/Call" }),
+      msg("1", "2026-10-10T08:00:00Z"),
+    ];
+    expect(teams.buildConversation(raw).map((m: { id: string }) => m.id)).toEqual(["1", "3"]);
+    expect(teams.buildConversation(raw, { includeSystem: true }).map((m: { id: string }) => m.id)).toEqual(["1", "2", "3"]);
+  });
+
+  it("nests channel replies under their post, and keeps replies whose post wasn't read", () => {
+    const ch = "19:abc@thread.tacv2";
+    const raw = [
+      msg("30", "2026-10-10T10:00:00Z", { conversationLink: `x/${ch};messageid=10` }),
+      msg("20", "2026-10-10T09:00:00Z", { conversationLink: `x/${ch};messageid=5` }),
+      msg("10", "2026-10-10T08:00:00Z", { conversationLink: `x/${ch};messageid=10` }),
+      msg("11", "2026-10-10T08:30:00Z", { conversationLink: `x/${ch}` }),
+    ];
+    const posts = teams.buildConversation(raw, { channel: true });
+    expect(posts.map((p: { id: string }) => p.id)).toEqual(["10", "11", "20"]);
+    expect(posts[0].replies.map((r: { id: string }) => r.id)).toEqual(["30"]);
+    expect(posts[2].replyTo).toBe("5");
+  });
+});
+
+describe("teams and chats", () => {
+  it("parses teams with their channels", () => {
+    const json = {
+      teams: [
+        {
+          id: "19:t@thread.tacv2",
+          displayName: "Engineering",
+          channels: [
+            { id: "19:g@thread.tacv2", displayName: "General", isGeneral: true },
+            { id: "19:p@thread.tacv2", displayName: "Secret", membershipType: "private" },
+            { id: "19:d@thread.tacv2", displayName: "Gone", isDeleted: true },
+          ],
+        },
+      ],
+    };
+    expect(teams.parseTeams(json)).toEqual([
+      {
+        id: "19:t@thread.tacv2",
+        name: "Engineering",
+        channels: [
+          { id: "19:g@thread.tacv2", name: "General", general: true },
+          { id: "19:p@thread.tacv2", name: "Secret", membership: "private" },
+        ],
+      },
+    ]);
+  });
+
+  it("parses the chat list and names untitled chats after the other members", () => {
+    const me = `8:orgid:${OID}`;
+    const [one, group] = teams.parseCsaChats({
+      chats: [
+        {
+          id: `19:${OID}_x@unq.gbl.spaces`,
+          chatType: "oneOnOne",
+          members: [{ mri: me }, { mri: "8:orgid:x" }],
+          isRead: false,
+          lastMessage: { imdisplayname: "Bo Kim", content: "<p>hi</p>", composetime: "2026-10-10T08:00:00Z" },
+        },
+        { id: "19:g@thread.v2", chatType: "group", title: "Launch", members: [{ mri: me }] },
+      ],
+    });
+    expect(one).toMatchObject({ kind: "oneOnOne", unread: true, lastMessage: { from: "Bo Kim", preview: "hi", time: "2026-10-10T08:00:00.000Z" } });
+    expect(teams.chatTitle(one, new Map([["8:orgid:x", "Bo Kim"]]), me)).toBe("Bo Kim");
+    expect(teams.chatTitle(group, new Map(), me)).toBe("Launch");
+  });
+
+  it("finds one conversation by id, Team/Channel, title or person", () => {
+    const lists = {
+      teams: [{ id: "T", name: "Engineering", channels: [{ id: "19:g@thread.tacv2", name: "General" }] }],
+      chats: [
+        { id: "19:a@unq.gbl.spaces", kind: "oneOnOne", title: "Bo Kim", memberNames: ["Bo Kim"] },
+        { id: "19:b@thread.v2", kind: "group", title: "Bo Kim, Ana Lee", memberNames: ["Bo Kim", "Ana Lee"] },
+        { id: "19:c@thread.v2", kind: "group", title: "Launch planning", memberNames: [] },
+        { id: "19:d@thread.v2", kind: "group", title: "Launch party", memberNames: [] },
+      ],
+    };
+    expect(teams.resolveConversation("19:x@thread.v2;messageid=5", lists).id).toBe("19:x@thread.v2");
+    expect(teams.resolveConversation("engineering/general", lists)).toMatchObject({ id: "19:g@thread.tacv2", kind: "channel", title: "Engineering/General" });
+    expect(teams.resolveConversation("Bo Kim", lists).id).toBe("19:a@unq.gbl.spaces");
+    expect(teams.resolveConversation("bo", lists).id).toBe("19:a@unq.gbl.spaces"); // the 1:1 beats a group with Bo
+    expect(teams.resolveConversation("launch planning", lists).id).toBe("19:c@thread.v2");
+    expect(() => teams.resolveConversation("launch", lists)).toThrow(/matches 2 conversations/);
+    expect(() => teams.resolveConversation("nobody", lists)).toThrow(/No chat or channel matches/);
+  });
+});
+
+describe("people and search", () => {
+  it("parses short profiles", () => {
+    expect(
+      teams.parseProfiles({ value: [{ mri: "8:orgid:x", displayName: "Bo Kim", email: "bo@x.com", jobTitle: "PM", userType: "Guest" }] }),
+    ).toEqual([{ mri: "8:orgid:x", name: "Bo Kim", email: "bo@x.com", jobTitle: "PM", userType: "Guest" }]);
+  });
+
+  it("parses people suggestions", () => {
+    const json = {
+      Groups: [
+        {
+          Suggestions: [
+            { EntityType: "People", DisplayName: "Bo Kim", EmailAddresses: ["bo@x.com"], ExternalDirectoryObjectId: "ABC", JobTitle: "PM" },
+            { EntityType: "Text", DisplayName: "bo" },
+          ],
+        },
+      ],
+    };
+    expect(teams.parseSuggestions(json)).toEqual([{ name: "Bo Kim", email: "bo@x.com", mri: "8:orgid:abc", jobTitle: "PM" }]);
+  });
+});
+
+describe("shapes seen live", () => {
+  it("reads csa's chat list: isOneOnOne, camelCase last message, bots named after their last message", () => {
+    const me = `8:orgid:${OID}`;
+    const [person, bot, gone] = teams.parseCsaChats({
+      chats: [
+        { id: "19:a_b@unq.gbl.spaces", chatType: "chat", isOneOnOne: true, isRead: true, members: [{ mri: me }, { mri: "8:orgid:x" }],
+          lastMessage: { imDisplayName: "Bo", originalArrivalTime: "2026-10-01T08:26:06.3000000Z", content: "<p>\n  hi\n</p>", from: me } },
+        { id: "19:c_d@unq.gbl.spaces", chatType: "chat", isOneOnOne: true, members: [{ mri: me }, { mri: "28:bot" }],
+          lastMessage: { imDisplayName: "Jira Cloud", messageType: "RichText/Media_Card", content: "Card - access it on https://go.skype.com/cards.unsupported  . Card   29:1VHec0 You have 37 overdue", from: "https://x/v1/users/ME/contacts/28:bot" } },
+        { id: "19:e@thread.v2", chatType: "chat", isConversationDeleted: true, members: [] },
+      ],
+    });
+    expect(gone).toBeUndefined();
+    expect(person).toMatchObject({ kind: "oneOnOne", lastMessage: { from: "Bo", time: "2026-10-01T08:26:06.300Z", preview: "hi" } });
+    expect(bot.lastMessage.preview).toBe("[card] You have 37 overdue");
+    expect(teams.chatTitle(bot, new Map(), me)).toBe("Jira Cloud");
+    expect(teams.chatTitle(person, new Map(), me)).toBeNull(); // my own last message doesn't name the chat
+  });
+
+  it("shows pasted pictures as [image] and ignores line breaks in the HTML source", () => {
+    const html = '<p>status:</p>\n<p>&nbsp;</p>\n<p><img src="https://x/views/imgo" itemtype="http://schema.skype.com/AMSImage" alt="image"></p>';
+    expect(teams.htmlToText(html)).toBe("status:\n\n[image]");
+  });
+
+  it("reads bot cards (base64 Adaptive Card JSON in <Swift>) as text", () => {
+    const card = {
+      attachments: [{ content: { type: "AdaptiveCard", body: [
+        { type: "RichTextBlock", inlines: [{ type: "TextRun", text: "You have " }, { type: "TextRun", text: "2 overdue items" }] },
+        { type: "Container", items: [{ type: "ColumnSet", columns: [
+          { type: "Column", items: [{ type: "Image", url: "x" }] },
+          { type: "Column", items: [{ type: "TextBlock", text: "MLYP-668 Koppelbox ✓" }] },
+        ] }, { type: "ColumnSet", columns: [{ type: "Column", items: [{ type: "Badge", text: "2 Oct" }] }, { type: "Column", items: [{ type: "TextBlock", text: "P1" }] }] }] },
+        { type: "FactSet", facts: [{ title: "Status", value: "Open" }] },
+      ] } }],
+    };
+    const b64 = Buffer.from(JSON.stringify(card)).toString("base64");
+    const content = `<URIObject type="SWIFT.1">Card - access it on <a href="https://go.skype.com/cards.unsupported">https://go.skype.com/cards.unsupported</a>. <Title>Card</Title><Swift b64="${b64}"></Swift></URIObject>`;
+    expect(teams.parseMessage(msg("9", "2026-10-09T06:23:52Z", { messagetype: "RichText/Media_Card", content })).text).toBe(
+      "[card]\nYou have 2 overdue items\nMLYP-668 Koppelbox ✓\n2 Oct · P1\nStatus: Open",
+    );
+  });
+
+  it("maps search results to their conversation and message", () => {
+    const json = {
+      EntitySets: [{ ResultSets: [{ Total: 8, Results: [{
+        HitHighlightedSummary: "the <c0>EMC</c0>   report",
+        Source: {
+          ClientConversationId: "19:a_b@unq.gbl.spaces;messageid=1790749785801",
+          ClientThreadId: "19:a_b@unq.gbl.spaces",
+          InternetMessageId: "1790749785801",
+          DateTimeReceived: "2026-09-30T06:29:45.801Z",
+          From: { EmailAddress: { Name: "Bo Kim", Address: "bo@x.com" } },
+          Extensions: { SkypeSpaces_ConversationPost_Extension_FromSkypeInternalId: "8:orgid:x", SkypeSpaces_ConversationPost_Extension_ThreadType: "chat" },
+        },
+      }] }] }],
+    };
+    expect(teams.parseSearch(json)).toEqual({ total: 8, results: [{
+      conversationId: "19:a_b@unq.gbl.spaces", messageId: "1790749785801", time: "2026-09-30T06:29:45.801Z",
+      from: "Bo Kim", fromEmail: "bo@x.com", fromMri: "8:orgid:x", threadType: "chat", text: "the EMC report",
+    }] });
+  });
+});
+
+describe("versions", () => {
+  const read = (f: string) => JSON.parse(readFileSync(f, "utf8"));
+
+  it("package.json, package-lock.json and the extension manifest agree", () => {
+    const { version } = read("package.json");
+    expect(read("extension/manifest.json").version).toBe(version);
+    expect(read("package-lock.json").version).toBe(version);
+    expect(read("package-lock.json").packages[""].version).toBe(version);
+  });
+
+  it("picks the bump from commit messages", () => {
+    expect(nextVersion("0.1.0", ["Fix search"])).toBe("0.1.1");
+    expect(nextVersion("0.1.3", ["fix: x", "feat(search): folders"])).toBe("0.2.0");
+    expect(nextVersion("0.1.0", ["feat: x\n\n- major for\n  BREAKING CHANGE / type!:, minor for feat:"])).toBe("0.2.0");
+  });
+});
