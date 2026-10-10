@@ -60,6 +60,33 @@ export function rebase(link, base) {
   return i === -1 ? link : `${base}${link.slice(i)}`;
 }
 
+/**
+ * The URL a request to a service goes to: `path` relative to its base, or a full URL put
+ * on the base. Throws for anything that would leave the base's origin, since the request
+ * carries the service's captured tokens.
+ */
+export function serviceUrl(path, base) {
+  const p = String(path ?? "");
+  const url = /^https:/i.test(p) ? rebase(p, base) : p.startsWith("/") ? `${base}${p}` : null;
+  let ok = false;
+  try {
+    ok = url !== null && new URL(url).origin === new URL(base).origin;
+  } catch {
+    // not a URL
+  }
+  if (!ok) throw new Error(`Refusing a request outside ${new URL(base).origin}`);
+  return url;
+}
+
+// ------------------------------------------------------------ bridge pairing
+
+/** HMAC-SHA256 of `${role}:${nonce}` with the pairing token, base64url (the server's proof() in src/bridge.ts). */
+export async function pairingProof(token, role, nonce) {
+  const key = await crypto.subtle.importKey("raw", new TextEncoder().encode(token), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+  const mac = new Uint8Array(await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(`${role}:${nonce}`)));
+  return btoa(String.fromCharCode(...mac)).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
 // ------------------------------------------------------------ people
 
 /** "8:orgid:<guid>" (or a contact URL ending in it) -> the MRI. */

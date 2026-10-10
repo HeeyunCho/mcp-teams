@@ -6,7 +6,7 @@ import { ExtensionBridge } from "./bridge.js";
 import { CONFIG_PATH, SERVER_VERSION, loadConfig } from "./config.js";
 import { registerTools } from "./tools.js";
 import { setup } from "./setup.js";
-import { installedVersion, PACKAGED_EXTENSION_DIR, syncExtension } from "./extension.js";
+import { installedVersion, PACKAGED_EXTENSION_DIR, syncExtension, writePairing } from "./extension.js";
 import { isNewer } from "./bridge.js";
 
 // A stray error in a socket callback must not end the server (the AI app would show it
@@ -25,6 +25,22 @@ if (command === "token") {
 if (command === "--version" || command === "version") {
   console.log(SERVER_VERSION);
   process.exit(0);
+}
+
+// Keeps the extension in step with this server: once setup has installed it, a newer
+// release (npx fetches it on start) updates the installed folder, never downgrading it (an
+// older copy still cached somewhere). The folder also gets the pairing token, which the
+// extension proves itself with. Both happen before the bridge starts, because an extension
+// of 0.2.0 or older that connects is asked to reload into what is in the folder.
+let extensionUpdated = false;
+const installed = installedVersion();
+if (installed !== null && !["token", "version", "--version"].includes(command)) {
+  try {
+    writePairing(config.token);
+    if (!isNewer(installed, installedVersion(PACKAGED_EXTENSION_DIR))) extensionUpdated = syncExtension().changed;
+  } catch (err) {
+    console.error(`[mcp-teams] could not update the extension folder: ${(err as Error).message}`);
+  }
 }
 
 const bridge = new ExtensionBridge(config.port, config.token, SERVER_VERSION);
@@ -83,17 +99,10 @@ process.on("SIGINT", shutdown);
 process.on("SIGTERM", shutdown);
 process.stdin.on("close", shutdown);
 
-// Keeps the extension in step with this server: once setup has installed it, a newer
-// release (npx fetches it on start) updates the installed folder and reloads the
-// extension. Never downgrades it (an older copy still cached somewhere).
+// After an update of the folder, reloads the extension (one of 0.2.0 or older reloads
+// itself when it connects, see bridge.ts).
 void (async () => {
-  const installed = installedVersion();
-  if (installed === null || isNewer(installed, installedVersion(PACKAGED_EXTENSION_DIR))) return;
-  try {
-    if (!syncExtension().changed) return;
-  } catch (err) {
-    return console.error(`[mcp-teams] could not update the extension folder: ${(err as Error).message}`);
-  }
+  if (!extensionUpdated) return;
   for (const end = Date.now() + 120_000; !bridge.connected && Date.now() < end; ) await new Promise((r) => setTimeout(r, 1_000));
   if (!bridge.connected) return;
   try {

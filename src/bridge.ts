@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHmac, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import type { IncomingMessage } from "node:http";
 import { WebSocketServer, WebSocket } from "ws";
 import { EXTENSION_ORIGIN as TRUSTED_EXTENSION_ORIGIN } from "./extension.js";
@@ -15,9 +15,28 @@ import { EXTENSION_ORIGIN as TRUSTED_EXTENSION_ORIGIN } from "./extension.js";
  *
  * Only loopback connections are accepted, and never from a web page: browsers always
  * send an Origin header, so connections must come from an extension origin or from
- * a local process (no Origin). Our own extension (its fixed id) needs no token; any
- * other extension origin and the peers must present the pairing token.
+ * a local process (no Origin). Both sides prove they know the pairing token without
+ * sending it: the server opens with a challenge, the client (extension or peer) answers
+ * with proof(token, "client", challenge) and its own nonce, and the welcome carries
+ * proof(token, "server", nonce). So neither a program posing as the extension (any
+ * local process can send any Origin) nor one holding the port while no AI app runs
+ * gets anything. The extension reads the token from pairing.json, which setup writes
+ * into its installed folder.
  */
+
+/** HMAC-SHA256 of `${role}:${nonce}` with the pairing token, base64url. The extension computes the same (teams.js). */
+export function proof(token: string, role: "client" | "server", nonce: string): string {
+  return createHmac("sha256", token).update(`${role}:${nonce}`).digest("base64url");
+}
+
+function sameProof(a: unknown, b: string): boolean {
+  if (typeof a !== "string") return false;
+  const x = Buffer.from(a);
+  const y = Buffer.from(b);
+  return x.length === y.length && timingSafeEqual(x, y);
+}
+
+const newNonce = () => randomBytes(24).toString("base64url");
 
 export interface ExtensionInfo {
   version: string;
@@ -86,6 +105,7 @@ export class ExtensionBridge {
   private closed = false;
   private steppingDown = false;
   private alive = new WeakSet<WebSocket>(); // hub: extensions that answered the last ping
+  private legacyReloaded = false; // hub: an extension of 0.2.0 or older was told to reload
 
   constructor(
     private readonly port: number,
@@ -145,6 +165,8 @@ export class ExtensionBridge {
   private onConnection(ws: WebSocket, origin?: string) {
     let authed = false;
     const authTimer = setTimeout(() => !authed && ws.close(4401, "auth timeout"), 5000);
+    const challenge = newNonce();
+    ws.send(JSON.stringify({ type: "challenge", nonce: challenge }));
 
     ws.on("message", (raw) => {
       let msg: any;
@@ -155,15 +177,19 @@ export class ExtensionBridge {
       }
       if (!msg || typeof msg !== "object") return;
       if (!authed) {
-        const trusted = msg.type === "hello" && origin === TRUSTED_EXTENSION_ORIGIN;
-        if ((!trusted && msg.token !== this.token) || (msg.type !== "hello" && msg.type !== "peer-hello")) {
-          ws.close(4401, "bad token");
-          return;
+        if (msg.type !== "hello" && msg.type !== "peer-hello") return void ws.close(4401, "bad token");
+        // Clients up to 0.2.0 send the token itself (peers, or an extension paired by hand).
+        const proven = sameProof(msg.proof, proof(this.token, "client", challenge)) || (typeof msg.token === "string" && msg.token === this.token);
+        if (!proven) {
+          // Our extension up to 0.2.0 says hello with neither; it is only told to reload.
+          if (msg.type === "hello" && origin === TRUSTED_EXTENSION_ORIGIN && msg.token == null && msg.proof == null) return this.reloadLegacy(ws);
+          return void ws.close(4401, "bad token");
         }
         authed = true;
         clearTimeout(authTimer);
-        if (msg.type === "hello") this.acceptExtension(ws, msg, origin);
-        else this.acceptPeer(ws, msg.version);
+        const welcome = typeof msg.nonce === "string" ? { proof: proof(this.token, "server", msg.nonce) } : {};
+        if (msg.type === "hello") this.acceptExtension(ws, msg, welcome, origin);
+        else this.acceptPeer(ws, msg.version, welcome);
         return;
       }
       if (this.sockets.has(ws)) this.onExtensionMessage(msg);
@@ -195,7 +221,7 @@ export class ExtensionBridge {
    * connected, copies with another id (e.g. an older one loaded from another folder) are
    * turned away, and connecting ours replaces them.
    */
-  private acceptExtension(ws: WebSocket, msg: any, origin?: string) {
+  private acceptExtension(ws: WebSocket, msg: any, welcome: object, origin?: string) {
     const info: ExtensionInfo = {
       version: String(msg.version ?? "unknown"),
       browser: msg.browser,
@@ -219,7 +245,7 @@ export class ExtensionBridge {
       }
     }
     this.sockets.set(ws, info);
-    ws.send(JSON.stringify({ type: "welcome", serverVersion: this.serverVersion }));
+    ws.send(JSON.stringify({ type: "welcome", serverVersion: this.serverVersion, ...welcome }));
     this.startKeepAlive(ws);
     this.updateExtensions();
   }
@@ -250,10 +276,23 @@ export class ExtensionBridge {
     return open[best];
   }
 
-  private acceptPeer(ws: WebSocket, peerVersion: unknown) {
+  /**
+   * Our extension up to 0.2.0 can't prove it knows the token, and anything can claim its
+   * origin, so it gets no calls. It is asked once to reload, which loads the update this
+   * server put in its folder, and the new version connects with a proof.
+   */
+  private reloadLegacy(ws: WebSocket) {
+    if (!this.legacyReloaded) {
+      this.legacyReloaded = true;
+      ws.send(JSON.stringify({ type: "request", id: randomUUID(), method: "reload", params: {}, timeoutMs: 10_000 }));
+    }
+    setTimeout(() => ws.close(4426, "extension update required"), 1_000).unref();
+  }
+
+  private acceptPeer(ws: WebSocket, peerVersion: unknown, welcome: object) {
     this.peers.add(ws);
     ws.send(
-      JSON.stringify({ type: "peer-welcome", serverVersion: this.serverVersion, extension: this.extension ?? null, extensions: this.extensions }),
+      JSON.stringify({ type: "peer-welcome", serverVersion: this.serverVersion, extension: this.extension ?? null, extensions: this.extensions, ...welcome }),
     );
     // A newer server joined: hand the port to it, so its fixes (and what the newer
     // extension expects) take effect without restarting this AI session.
@@ -354,8 +393,10 @@ export class ExtensionBridge {
     return new Promise((resolve) => {
       const ws = new WebSocket(`ws://127.0.0.1:${this.port}`, { maxPayload: this.maxMessageBytes });
       let joined = false;
+      let challenged = false;
+      let forged = false;
+      const nonce = newNonce();
       const timer = setTimeout(() => ws.terminate(), JOIN_TIMEOUT_MS);
-      ws.on("open", () => ws.send(JSON.stringify({ type: "peer-hello", token: this.token, version: this.serverVersion })));
       ws.on("message", (raw) => {
         let msg: any;
         try {
@@ -364,7 +405,15 @@ export class ExtensionBridge {
           return;
         }
         if (!msg || typeof msg !== "object") return;
-        if (msg.type === "peer-welcome" && !joined) {
+        if (msg.type === "challenge" && !challenged && typeof msg.nonce === "string") {
+          challenged = true;
+          ws.send(JSON.stringify({ type: "peer-hello", proof: proof(this.token, "client", msg.nonce), nonce, version: this.serverVersion }));
+        } else if (msg.type === "peer-welcome" && !joined) {
+          // Only the real hub can answer our nonce; never forward calls to anything else.
+          if (!challenged || !sameProof(msg.proof, proof(this.token, "server", nonce))) {
+            forged = true;
+            return void ws.terminate();
+          }
           joined = true;
           clearTimeout(timer);
           this.hub = ws;
@@ -388,7 +437,9 @@ export class ExtensionBridge {
           this.listenError =
             code === 4401
               ? `The mcp-teams server on port ${this.port} rejected this server's token.`
-              : `Port ${this.port} is in use by another program.`;
+              : forged || !challenged
+                ? `Port ${this.port} is held by an mcp-teams of 0.2.0 or older (restart the other AI sessions, in Claude Code with /mcp) or by another program.`
+                : `Port ${this.port} is in use by another program.`;
           return resolve(false);
         }
         if (this.hub !== ws) return;

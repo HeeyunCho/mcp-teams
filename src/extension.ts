@@ -4,7 +4,7 @@
  * ("Load unpacked") and the server keeps up to date.
  */
 import { createHash } from "node:crypto";
-import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
+import { chmodSync, copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { CONFIG_DIR } from "./config.js";
@@ -17,6 +17,8 @@ export const EXTENSION_ORIGIN = `chrome-extension://${EXTENSION_ID}`;
 export const PACKAGED_EXTENSION_DIR = fileURLToPath(new URL("../extension/", import.meta.url));
 /** Where Chrome loads it from. */
 export const INSTALLED_EXTENSION_DIR = join(CONFIG_DIR, "extension");
+/** In the installed folder only: the pairing token, which the extension needs to prove itself to the server and check the server. */
+export const PAIRING_FILE = "pairing.json";
 
 /** An extension id from a manifest key: SHA-256 of the key, first 32 hex digits mapped to a–p. */
 export function extensionIdFromKey(keyBase64: string): string {
@@ -57,9 +59,20 @@ export function syncExtension(from = PACKAGED_EXTENSION_DIR, to = INSTALLED_EXTE
     changed = true;
   }
   for (const file of filesIn(to)) {
-    if (wanted.has(file)) continue;
+    if (wanted.has(file) || file === PAIRING_FILE) continue;
     rmSync(join(to, file));
     changed = true;
   }
   return { changed, dir: to };
+}
+
+/** Writes the pairing token into the installed extension folder (readable by this user only). Returns whether it changed. */
+export function writePairing(token: string, dir = INSTALLED_EXTENSION_DIR): boolean {
+  const file = join(dir, PAIRING_FILE);
+  const text = `${JSON.stringify({ token })}\n`;
+  if (existsSync(file) && readFileSync(file, "utf8") === text) return false;
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(file, text, { mode: 0o600 });
+  chmodSync(file, 0o600); // writeFileSync keeps the mode of a file that exists
+  return true;
 }

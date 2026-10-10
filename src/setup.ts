@@ -11,7 +11,8 @@ import { createInterface } from "node:readline/promises";
 import { fileURLToPath } from "node:url";
 import type { ExtensionBridge } from "./bridge.js";
 import { applyPlan, planClients, type Plan, type ServerCommand } from "./clients.js";
-import { EXTENSION_ORIGIN, installedVersion, syncExtension } from "./extension.js";
+import { EXTENSION_ORIGIN, installedVersion, syncExtension, writePairing } from "./extension.js";
+import { loadConfig } from "./config.js";
 
 const SERVER_SCRIPT = fileURLToPath(new URL("./index.js", import.meta.url));
 const EXTENSION_WAIT_MS = 10 * 60_000;
@@ -187,6 +188,7 @@ async function waitFor(cond: () => boolean, ms: number) {
 /** Installs or updates the extension folder and waits until the extension connects. */
 async function connectExtension(bridge: ExtensionBridge, serverVersion: string): Promise<boolean> {
   const { changed, dir } = syncExtension();
+  writePairing(loadConfig().token, dir);
   ok(`Extension ${installedVersion(dir)} ${changed ? "installed in" : "up to date in"} ${dir}`);
 
   // An installed extension connects within seconds (it retries every 30 s).

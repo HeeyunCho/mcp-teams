@@ -488,3 +488,18 @@ describe("versions", () => {
     expect(nextVersion("0.1.0", ["feat: x\n\n- major for\n  BREAKING CHANGE / type!:, minor for feat:"])).toBe("0.2.0");
   });
 });
+
+describe("serviceUrl", () => {
+  const base = "https://teams.cloud.microsoft/api/chatsvc/kr";
+  it("puts paths and chatsvc links on the service's base", () => {
+    expect(teams.serviceUrl("/v1/users/ME", base)).toBe(`${base}/v1/users/ME`);
+    expect(teams.serviceUrl("https://kr.ng.msg.teams.microsoft.com/v1/x?y=1", base)).toBe(`${base}/v1/x?y=1`);
+  });
+  it("never sends a service's tokens to another host", () => {
+    expect(() => teams.serviceUrl("https://evil.example/collect", base)).toThrow(/Refusing/);
+    expect(() => teams.serviceUrl(".evil.example/v1/x", "https://kr.ng.msg.teams.microsoft.com")).toThrow(/Refusing/);
+    expect(() => teams.serviceUrl("@evil.example/x", "https://substrate.office.com")).toThrow(/Refusing/);
+    expect(teams.serviceUrl("//evil.example/x", "https://substrate.office.com")).toBe("https://substrate.office.com//evil.example/x");
+    expect(() => teams.serviceUrl("http://teams.cloud.microsoft/x", base)).toThrow(/Refusing/);
+  });
+});
