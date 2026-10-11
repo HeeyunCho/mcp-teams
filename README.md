@@ -118,3 +118,5 @@ npm run probe -- status    # calls one extension method through the bridge (see 
 ```
 
 Versions are bumped automatically. On every push to `main` (except Markdown-only changes), the **Version bump** GitHub Action runs the tests, then bumps `package.json`, `package-lock.json` and `extension/manifest.json`, commits `chore(release): vX.Y.Z` and tags it. `feat:` commits bump the minor version, anything else the patch. Stay on 0.x: don't use `type!:` or a `BREAKING CHANGE:` footer.
+
+Every pull request and every push to `main` is also scanned for committed secrets by the **Secret scan** GitHub Action (gitleaks). Known false positives go in `.gitleaksignore`.
