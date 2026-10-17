@@ -22,10 +22,9 @@ jobs:
 
       - run: npm test
 
-  # Same tests on Windows. Non-blocking until the first failures are fixed.
+  # Same tests on Windows.
   test-windows:
     runs-on: windows-latest
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
 
