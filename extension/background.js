@@ -760,7 +760,7 @@ export const handlers = {
     return { reloading: true, version: VERSION };
   },
 
-  async requestSend({ conversation, to, title, text, threadId, subject }) {
+  async requestSend({ conversation, to, title, text, threadId, subject }, ctx) {
     if (!String(text ?? "").trim()) throw new Error("The message is empty.");
     if (to?.length) {
       if (conversation) throw new Error("Give either a conversation or people (to), not both.");
@@ -773,7 +773,7 @@ export const handlers = {
       const request = existing
         ? { conversation: { id: existing.id, kind: existing.kind, title: existing.title }, people, text: String(text), existingChat: true }
         : { conversation: null, newChat: { members: people.map((p) => p.mri), title: title ?? null }, people, text: String(text) };
-      return askUserToConfirm(request);
+      return askUserToConfirm(request, ctx);
     }
     const conv = await resolve(conversation);
     if (threadId && conv.kind !== "channel") throw new Error("reply_to is only for channel posts; in a chat, just send the message.");
@@ -784,7 +784,7 @@ export const handlers = {
       replyingTo = root ? teams.parseMessage(root) : { id: threadId };
     }
     const request = { conversation: conv, text: String(text), threadId: threadId ?? null, subject: subject ?? null, replyingTo };
-    return askUserToConfirm(request);
+    return askUserToConfirm(request, ctx);
   },
 };
 
@@ -849,7 +849,25 @@ async function sendMessage({ conversation, newChat, people, text, threadId, subj
  */
 const pendingSends = new Map();
 
-async function askUserToConfirm(request) {
+/** How many confirmation windows wait for the user's decision. */
+export function pendingSendCount() {
+  return pendingSends.size;
+}
+
+const WITHDRAWN = {
+  sent: false,
+  reason: "The request was withdrawn (cancelled, or the server stopped waiting), so the confirmation window was closed; nothing was sent.",
+};
+
+/**
+ * Shows the confirmation window and resolves with the outcome. When the request is
+ * withdrawn while the window is open (ctx: the server cancelled it, or the connection it
+ * came on closed), the window closes and nothing is sent, so a late click can't post after
+ * the AI was told the send failed. Once the user clicked Send, the post runs to the end
+ * and its outcome is the answer.
+ */
+async function askUserToConfirm(request, ctx) {
+  if (ctx?.cancelled) return WITHDRAWN;
   const id = crypto.randomUUID();
   const win = await chrome.windows.create({
     url: chrome.runtime.getURL(`confirm.html?id=${id}`),
@@ -859,16 +877,22 @@ async function askUserToConfirm(request) {
     focused: true,
   });
   return new Promise((resolve) => {
-    const finish = (result) => {
+    let stopWatching = () => {};
+    // fromSend: the outcome of the post the user started; anything else is ignored then.
+    const finish = (result, fromSend = false) => {
       const p = pendingSends.get(id);
-      if (!p) return;
+      if (!p || (p.sending && !fromSend)) return;
       pendingSends.delete(id);
       clearTimeout(p.timer);
+      stopWatching();
       chrome.windows.remove(p.windowId).catch(() => {});
       resolve(result);
     };
     const timer = setTimeout(() => finish({ sent: false, reason: "No decision within 5 minutes; nothing was sent." }), CONFIRM_TIMEOUT_MS);
-    pendingSends.set(id, { request, windowId: win.id, timer, finish });
+    pendingSends.set(id, { request, windowId: win.id, timer, finish, sending: false });
+    // Withdrawn while the window was opening, or later.
+    if (ctx?.cancelled) finish(WITHDRAWN);
+    else if (ctx) stopWatching = ctx.onCancel(() => finish(WITHDRAWN));
   });
 }
 
@@ -892,11 +916,13 @@ function onConfirmMessage(msg, sender, sendResponse) {
         p.finish({ sent: false, reason: "The user declined; nothing was sent." });
         return sendResponse({ ok: true });
       }
+      // From here on the post runs to the end: a withdrawal no longer closes the window.
+      p.sending = true;
       try {
-        p.finish(await sendMessage(p.request));
+        p.finish(await sendMessage(p.request), true);
         sendResponse({ ok: true });
       } catch (err) {
-        p.finish({ sent: false, reason: `Sending failed: ${err.message}` });
+        p.finish({ sent: false, reason: `Sending failed: ${err.message}` }, true);
         sendResponse({ ok: false, error: err.message });
       }
     })();
@@ -1016,9 +1042,12 @@ async function connect() {
       }
       return;
     }
-    await dispatch(msg, (reply) => socket.send(JSON.stringify(reply)));
+    await dispatch(msg, (reply) => socket.readyState === WebSocket.OPEN && socket.send(JSON.stringify(reply)), socket);
   };
   socket.onclose = (ev) => {
+    // Nobody can be told the outcome of what came on this connection: withdraw it
+    // (an open confirmation window closes; nothing is sent).
+    withdrawAll(socket);
     if (ws && ws !== socket) return; // replaced by a newer connection (reconnectNow)
     ws = null;
     // When a server session ends, another one takes over the port within a second:
@@ -1043,19 +1072,56 @@ async function connect() {
   };
 }
 
+/** Requests being run, by id, so they can be withdrawn (a cancel from the server, or their connection closed). */
+const running = new Map();
+
+/** What a handler gets besides its params: whether the request was withdrawn, and onCancel(f) (returns a stop function). */
+function requestContext(conn) {
+  const listeners = new Set();
+  const ctx = {
+    conn,
+    cancelled: false,
+    cancel() {
+      if (ctx.cancelled) return;
+      ctx.cancelled = true;
+      for (const f of [...listeners]) f();
+    },
+    onCancel(f) {
+      listeners.add(f);
+      return () => listeners.delete(f);
+    },
+  };
+  return ctx;
+}
+
+/** Withdraws the requests that came on `conn`: their answers can no longer arrive. */
+function withdrawAll(conn) {
+  for (const ctx of running.values()) if (ctx.conn === conn) ctx.cancel();
+}
+
 /**
- * Runs one request from the server with its handler and sends back the response. Anything
- * but a request is ignored.
+ * Runs one request from the server with its handler and sends back the response.
+ * {type:"cancel", id} withdraws a running request that came on the same connection (`conn`);
+ * an unknown one is ignored, as is any other message.
  */
-export async function dispatch(msg, send) {
+export async function dispatch(msg, send, conn = null) {
+  if (msg.type === "cancel") {
+    const ctx = running.get(msg.id);
+    if (ctx?.conn === conn) ctx.cancel();
+    return;
+  }
   if (msg.type !== "request") return;
+  const ctx = requestContext(conn);
+  running.set(msg.id, ctx);
   const handler = Object.hasOwn(handlers, msg.method) ? handlers[msg.method] : null;
   try {
     if (!handler) throw new Error(`Unknown method ${msg.method}`);
-    const result = await handler(msg.params ?? {});
+    const result = await handler(msg.params ?? {}, ctx);
     send({ type: "response", id: msg.id, ok: true, result });
   } catch (err) {
     send({ type: "response", id: msg.id, ok: false, error: err?.message ?? String(err) });
+  } finally {
+    if (running.get(msg.id) === ctx) running.delete(msg.id);
   }
 }
 

@@ -19,10 +19,10 @@ const fail = (err: unknown) => ({
 });
 
 /** Wraps a handler so thrown errors become MCP tool errors instead of protocol errors. */
-function safe<A>(fn: (args: A) => Promise<ReturnType<typeof text>>) {
-  return async (args: A) => {
+function safe<A, E = unknown>(fn: (args: A, extra: E) => Promise<ReturnType<typeof text>>) {
+  return async (args: A, extra: E) => {
     try {
-      return await fn(args);
+      return await fn(args, extra);
     } catch (err) {
       return fail(err);
     }
@@ -296,9 +296,10 @@ export function registerTools(server: McpServer, bridge: ExtensionBridge, config
         subject: z.string().optional().describe("Channel only: a subject for a new post"),
       },
     },
-    safe(async ({ conversation, to, title, text: message, reply_to, subject }) => {
+    // A cancelled call withdraws the send: the confirmation window closes and nothing is sent.
+    safe(async ({ conversation, to, title, text: message, reply_to, subject }, extra: { signal?: AbortSignal }) => {
       if (!conversation === !to) throw new Error("Give either conversation (an existing chat or channel) or to (people to start a chat with).");
-      return text(await bridge.call("requestSend", { conversation, to, title, text: message, threadId: reply_to, subject }, SEND_TIMEOUT_MS));
+      return text(await bridge.call("requestSend", { conversation, to, title, text: message, threadId: reply_to, subject }, SEND_TIMEOUT_MS, extra.signal));
     }),
   );
 }

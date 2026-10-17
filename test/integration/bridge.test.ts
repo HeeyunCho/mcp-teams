@@ -221,6 +221,7 @@ describe("ExtensionBridge options", () => {
       authTimeoutMs: 5_000,
       pickStatusTimeoutMs: 3_000,
       stepDownMaxWaitMs: 5 * 60_000,
+      cancelGraceMs: 2_000, // 1.2: how long a withdrawn call's answer still counts
     });
   });
 
