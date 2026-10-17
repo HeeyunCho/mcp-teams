@@ -127,7 +127,7 @@ describe("send confirmation window", () => {
     const ext = await h.extension({ handle: (req) => (req.method === "slow" ? new Promise(() => {}) : { ok: true }) });
     await expect(hub.call("slow", {}, 200)).rejects.toThrow("timed out");
     const slow = ext.requests().find((r) => r.method === "slow")!;
-    expect(ext.received).toContainEqual({ type: "cancel", id: slow.id });
+    await until(() => ext.received.some((m) => m.type === "cancel" && m.id === slow.id));
     await expect(hub.call("status", {}, 1_000)).resolves.toEqual({ ok: true });
   });
 });

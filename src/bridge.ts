@@ -55,6 +55,8 @@ interface Pending {
   timer: NodeJS.Timeout;
   /** Told the other side to drop it ({type:"cancel"}); its answer still counts for a moment. */
   withdrawn?: boolean;
+  /** A send: after it is withdrawn its answer still counts for cancelGraceMs (the user may have clicked). */
+  grace?: boolean;
   /** Hub: the extension connection the request went to. */
   socket?: WebSocket;
 }
@@ -562,6 +564,7 @@ export class ExtensionBridge {
         resolve: (v) => (done(), resolve(v as T)),
         reject: (e) => (done(), reject(e)),
         timer,
+        grace: method === "requestSend",
         socket: this.role === "hub" ? target : undefined,
       });
       signal?.addEventListener("abort", onAbort, { once: true });
@@ -571,8 +574,8 @@ export class ExtensionBridge {
 
   /**
    * Withdraws a call nobody waits for any more (timed out or cancelled): tells the other side
-   * to drop it with {type:"cancel", id} (sides that don't know it ignore it), and lets its
-   * answer count for cancelGraceMs. So a send the user already clicked reports its real
+   * to drop it with {type:"cancel", id} (sides that don't know it ignore it). A send's answer
+   * still counts for cancelGraceMs. So a send the user already clicked reports its real
    * outcome, and a confirmation window that closed reports "nothing was sent". Without an
    * answer by then, the call fails with `err`.
    */
@@ -592,6 +595,7 @@ export class ExtensionBridge {
     } catch {
       return fail();
     }
+    if (!p.grace) return fail();
     p.timer = setTimeout(fail, this.opts.cancelGraceMs);
   }
 
