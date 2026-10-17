@@ -137,7 +137,10 @@ export class ExtensionBridge {
     private readonly serverVersion: string,
     options: BridgeOptions | number = {},
   ) {
-    this.opts = { ...DEFAULT_BRIDGE_OPTIONS, ...(typeof options === "number" ? { maxMessageBytes: options } : options) };
+    const given: BridgeOptions = typeof options === "number" ? { maxMessageBytes: options } : options;
+    // A key given as undefined keeps its default (spreading it would overwrite the default).
+    const defined = Object.fromEntries(Object.entries(given).filter(([, v]) => v !== undefined));
+    this.opts = { ...DEFAULT_BRIDGE_OPTIONS, ...defined };
   }
 
   /** The bridge's port: the one it listens on as the hub (port 0 picks a free one), else the one it was given. */
