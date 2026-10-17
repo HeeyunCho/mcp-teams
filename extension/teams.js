@@ -465,14 +465,20 @@ function group(msgs, channel) {
   return posts;
 }
 
+/** The first `n` UTF-16 units of `text`, one fewer if the last would be half a surrogate pair (an emoji). */
+export function cutAt(text, n) {
+  const code = text.charCodeAt(n - 1);
+  return text.slice(0, code >= 0xd800 && code <= 0xdbff ? n - 1 : n);
+}
+
 /**
  * Cuts each message's text (replies too) to `maxLength` UTF-16 units plus "…", marking it
- * `truncated`. The server cuts the same way, for extensions older than this.
+ * `truncated`; never through an emoji. The server cuts the same way, for extensions older than this.
  */
 export function capText(messages, maxLength) {
   if (!maxLength) return messages;
   const cut = (m) => {
-    const r = m.text.length > maxLength ? { ...m, text: `${m.text.slice(0, maxLength)}…`, truncated: true } : m;
+    const r = m.text.length > maxLength ? { ...m, text: `${cutAt(m.text, maxLength)}…`, truncated: true } : m;
     return r.replies ? { ...r, replies: r.replies.map(cut) } : r;
   };
   return messages.map(cut);
