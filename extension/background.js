@@ -450,7 +450,7 @@ async function resolve(conversation, ctx = null) {
     return teams.resolveConversation(q, data);
   } catch (err) {
     // Untitled chats are found by their members' names: without them a match can be missed.
-    if (data.namesThrottled?.chats) err.message += ` ${namesNote("Chat names")}`;
+    if (data.namesThrottled?.chats) err.message += `\n${namesNote("Chat names")}`;
     throw err;
   }
 }
