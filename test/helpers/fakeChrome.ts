@@ -295,6 +295,8 @@ export async function loadWorker(fake: FakeChrome): Promise<Worker> {
   vi.resetModules();
   vi.stubGlobal("chrome", fake.chrome);
   vi.stubGlobal("WebSocket", InertWebSocket);
+  // As in Chrome's service worker; Node 20 (CI) has no navigator, Node 21+ one without brands.
+  vi.stubGlobal("navigator", { userAgentData: { brands: [{ brand: "Google Chrome", version: "130" }] } });
   // @ts-expect-error plain JS service worker without types
   return import("../../extension/background.js");
 }
