@@ -113,7 +113,7 @@ git clone https://github.com/HeeyunCho/mcp-teams.git
 cd mcp-teams
 npm install && npm run build
 node dist/index.js setup   # registers this copy (node dist/index.js) instead of npx
-npm test                   # builds, then runs unit + end-to-end tests (fake extension)
+npm test                   # builds, then runs unit, integration and system tests (see docs/testing.md)
 npm run probe -- status    # calls one extension method through the bridge (see scripts/probe.mjs)
 ```
 
