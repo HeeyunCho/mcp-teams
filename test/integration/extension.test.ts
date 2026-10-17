@@ -1,14 +1,19 @@
 import { mkdirSync, mkdtempSync, readFileSync, statSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import WebSocket from "ws";
 import { ExtensionBridge, isNewer, proof } from "../../src/bridge.js";
 import { EXTENSION_ID, EXTENSION_ORIGIN, extensionIdFromKey, installedVersion, syncExtension, writePairing } from "../../src/extension.js";
 // @ts-expect-error plain JS module shared with the extension
 import { pairingProof } from "../../extension/teams.js";
+import { freePort } from "../helpers/bridgeHarness.js";
 
-const PORT = 47597;
+// A free port per test, so test files and worktrees can run side by side.
+let PORT: number;
+beforeEach(async () => {
+  PORT = await freePort();
+});
 
 describe("extension id", () => {
   it("matches the key in the manifest, so Chrome gives the extension this id", () => {

@@ -5,10 +5,11 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import WebSocket from "ws";
+import { freePort } from "../helpers/bridgeHarness.js";
 
 // Runs the built server (dist/) over stdio, with a fake extension on the bridge.
 const VERSION: string = JSON.parse(readFileSync("package.json", "utf8")).version;
-const PORT = 47598;
+let PORT: number;
 const home = mkdtempSync(join(tmpdir(), "mcp-teams-"));
 const calls: { method: string; params: any }[] = [];
 let client: Client;
@@ -41,6 +42,7 @@ const call = async (name: string, args: Record<string, unknown> = {}) => {
 };
 
 beforeAll(async () => {
+  PORT = await freePort();
   writeFileSync(join(home, "config.json"), JSON.stringify({ token: "tok", port: PORT }));
   client = new Client({ name: "test", version: "0" });
   await client.connect(

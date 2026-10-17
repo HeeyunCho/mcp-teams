@@ -1,8 +1,13 @@
-import { describe, expect, it, afterEach } from "vitest";
+import { describe, expect, it, afterEach, beforeEach } from "vitest";
 import WebSocket from "ws";
 import { DEFAULT_BRIDGE_OPTIONS, ExtensionBridge } from "../../src/bridge.js";
+import { freePort } from "../helpers/bridgeHarness.js";
 
-const PORT = 47599;
+// A free port per test, so test files and worktrees can run side by side.
+let PORT: number;
+beforeEach(async () => {
+  PORT = await freePort();
+});
 const ORIGIN = "chrome-extension://abcdefghijklmnop";
 
 function connectExt(token: string, origin = ORIGIN) {
