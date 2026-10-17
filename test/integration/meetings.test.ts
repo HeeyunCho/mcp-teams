@@ -119,6 +119,9 @@ describe("meeting chat read once per call", () => {
     ]);
     expect(fake.count("sharepoint")).toBe(3);
     expect(r.meetingsSearched).toBe(3);
+    // Stopping early is said, not silent: the AI must not read `matches` as the total of all 50.
+    expect(r.notSearched).toBe(47);
+    expect(r.note).toMatch(/47 older meetings/);
   });
 
   it("1.3: the same meeting under another chatsvc base is not served from the cache", async () => {
