@@ -244,6 +244,32 @@ describe("ExtensionBridge options", () => {
     expect(await closed).toBe(1006); // terminated, not closed politely
   });
 
+  it("keeps the defaults for options given as undefined", async () => {
+    bridge = new ExtensionBridge(0, "secret", "0.1.0", {
+      maxMessageBytes: undefined,
+      keepAliveMs: undefined,
+      retryMs: undefined,
+      joinTimeoutMs: undefined,
+      authTimeoutMs: undefined,
+      pickStatusTimeoutMs: undefined,
+      stepDownMaxWaitMs: undefined,
+    });
+    await bridge.start();
+    // A frozen extension (no pongs) and a socket that never authenticates: with the default
+    // 20 s keep-alive and 5 s auth timeout, both are still there 500 ms later.
+    const frozen = helloExt(bridge.port, false);
+    await waitFor(() => bridge!.connected);
+    const silent = new WebSocket(`ws://127.0.0.1:${bridge.port}`, { origin: ORIGIN });
+    let silentClosed = false;
+    silent.on("close", () => (silentClosed = true));
+    await new Promise((r) => silent.on("open", r));
+    await new Promise((r) => setTimeout(r, 500));
+    expect(bridge.connected).toBe(true);
+    expect(silentClosed).toBe(false);
+    frozen.terminate();
+    silent.terminate();
+  });
+
   it("closes a connection that doesn't authenticate within the auth timeout it was given", async () => {
     bridge = new ExtensionBridge(0, "secret", "0.1.0", { authTimeoutMs: 100 });
     await bridge.start();
