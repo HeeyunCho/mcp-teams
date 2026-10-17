@@ -463,25 +463,47 @@ const MESSAGES_VIEW = "msnp24Equivalent|supportsMessageProperties";
  * Messages of a conversation, newest first, until `limit` messages (after dropping system
  * events when not wanted) or `before` is reached. Follows chatsvc's backward links.
  */
-async function fetchMessages(id, { limit, before, includeSystem, threadId }) {
-  const target = threadId ? `${id};messageid=${threadId}` : id;
-  let path = `/v1/users/ME/conversations/${encodeURIComponent(target)}/messages?view=${encodeURIComponent(MESSAGES_VIEW)}&pageSize=${Math.min(200, Math.max(20, limit * 2))}&startTime=1`;
+async function fetchMessages(id, opts) {
+  return (await fetchMessagePages(id, opts)).raw;
+}
+
+const MAX_PAGES = 20;
+
+/** The conversation id chatsvc pages: the conversation, or one channel post's thread. */
+const messagesTarget = (id, threadId) => (threadId ? `${id};messageid=${threadId}` : id);
+
+/**
+ * fetchMessages with where each message came from: `linkOf` (message id → the link of its
+ * page), `first` (the first page's link), `next` (the backward link not followed yet, if
+ * any) and `capped` (stopped after MAX_PAGES pages short of `limit`). Starts at the newest
+ * page, or at `from` (a link from a cursor, see teams.readMessagesCursor).
+ */
+async function fetchMessagePages(id, { limit, before, includeSystem, threadId, from }) {
+  const target = messagesTarget(id, threadId);
+  const first = from ?? `/v1/users/ME/conversations/${encodeURIComponent(target)}/messages?view=${encodeURIComponent(MESSAGES_VIEW)}&pageSize=${Math.min(200, Math.max(20, limit * 2))}&startTime=1`;
+  let path = first;
   const beforeMs = before ? Date.parse(before) : null;
   const raw = [];
+  const linkOf = new Map();
   let counted = 0;
-  for (let page = 0; page < 20 && path; page++) {
+  let pages = 0;
+  while (path) {
+    if (pages === MAX_PAGES) return { raw, linkOf, first, next: path, capped: true, pages };
     const json = await api("chatsvc", path);
+    pages++;
     const msgs = json?.messages ?? [];
     for (const m of msgs) {
       const t = Date.parse(m.originalarrivaltime ?? m.composetime ?? "");
       if (beforeMs && t >= beforeMs) continue;
       raw.push(m);
+      linkOf.set(String(m.id ?? m.clientmessageid ?? ""), path);
       if (includeSystem || !/^(ThreadActivity\/|Event\/|Control\/)/i.test(m.messagetype ?? "")) counted++;
     }
-    if (counted >= limit || !msgs.length) break;
-    path = json?._metadata?.backwardLink ?? null;
+    const next = msgs.length ? (json?._metadata?.backwardLink ?? null) : null;
+    if (counted >= limit) return { raw, linkOf, first, next, capped: false, pages };
+    path = next;
   }
-  return raw;
+  return { raw, linkOf, first, next: null, capped: false, pages };
 }
 
 export const handlers = {
@@ -518,18 +540,34 @@ export const handlers = {
     };
   },
 
-  async readMessages({ conversation, limit = 30, before, includeSystem = false, threadId }) {
+  async readMessages({ conversation, limit = 30, before, cursor, includeSystem = false, threadId }) {
+    if (cursor && before) throw new Error("Give either cursor or before, not both (cursor already knows where to go on).");
     const conv = await resolve(conversation);
-    const raw = await fetchMessages(conv.id, { limit, before, includeSystem, threadId });
+    // A cursor resumes at the page that held the oldest message returned last time, and
+    // only takes what is older than that message.
+    const from = cursor ? teams.readMessagesCursor(cursor, messagesTarget(conv.id, threadId)) : null;
+    if (from) before = from.before ?? undefined;
+    const { raw, linkOf, first, next, capped, pages } = await fetchMessagePages(conv.id, { limit, before, includeSystem, threadId, from: from?.path });
     let messages = teams.buildConversation(raw, { includeSystem, channel: conv.kind === "channel" && !threadId });
     // Newest `limit` posts (a post counts once, with its replies).
     const more = messages.length > limit;
     messages = messages.slice(-limit);
+    const oldest = messages[0];
+    let olderCursor = null;
+    if (oldest && (more || next)) olderCursor = teams.messagesCursor(linkOf.get(oldest.id) ?? first, oldest.time);
+    else if (!oldest && next) olderCursor = teams.messagesCursor(next, before ?? null);
     return {
       conversation: conv,
       count: messages.length,
       messages,
-      ...(more || raw.length ? { olderBefore: messages[0]?.time ?? null } : {}),
+      ...(more || raw.length ? { olderBefore: oldest?.time ?? null } : {}),
+      ...(olderCursor ? { olderCursor } : {}),
+      ...(capped && messages.length < limit
+        ? {
+            truncated: true,
+            note: `Stopped after reading ${pages} pages (${MAX_PAGES} at most per call)${before ? ` without reaching all messages older than ${before}` : ""}. Older history exists: pass olderCursor as cursor to go on.`,
+          }
+        : {}),
     };
   },
 

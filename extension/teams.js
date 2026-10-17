@@ -78,6 +78,56 @@ export function serviceUrl(path, base) {
   return url;
 }
 
+// ------------------------------------------------------------ read_messages cursor
+
+const toBase64Url = (s) => btoa(String.fromCharCode(...new TextEncoder().encode(s))).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+const fromBase64Url = (s) => new TextDecoder().decode(Uint8Array.from(atob(s.replace(/-/g, "+").replace(/_/g, "/")), (c) => c.charCodeAt(0)));
+
+/**
+ * An opaque read_messages cursor: where to resume (a chatsvc messages link, kept as a path
+ * from /v1/ so it goes to whatever base the session uses) and, optionally, the time the
+ * next page must be older than.
+ */
+export function messagesCursor(link, before) {
+  const s = String(link);
+  const i = s.indexOf("/v1/");
+  return toBase64Url(JSON.stringify({ p: i === -1 ? s : s.slice(i), b: before ?? null }));
+}
+
+/**
+ * Reads a cursor back for conversation `target` (its id, with ";messageid=…" for a thread).
+ * Throws unless it points at exactly that conversation's messages on chatsvc: a caller can't
+ * steer the request (and the session's tokens) at another path.
+ */
+export function readMessagesCursor(cursor, target) {
+  const invalid = () => new Error("Not a valid cursor for this conversation. Pass olderCursor exactly as the previous read_messages call on the same conversation returned it.");
+  let p, b;
+  try {
+    ({ p, b } = JSON.parse(fromBase64Url(String(cursor))));
+  } catch {
+    throw invalid();
+  }
+  if (typeof p !== "string" || !p.startsWith("/v1/users/ME/conversations/") || /[\\\s]/.test(p)) throw invalid();
+  if (b != null && (typeof b !== "string" || Number.isNaN(Date.parse(b)))) throw invalid();
+  let url;
+  try {
+    url = new URL(p, "https://cursor.invalid");
+  } catch {
+    throw invalid();
+  }
+  // The path as given, unchanged by URL normalization (no "..", "%2e%2e" or fragment).
+  const segs = url.pathname.split("/");
+  let id = null;
+  try {
+    id = decodeURIComponent(segs[5] ?? "");
+  } catch {
+    // not percent-encoded properly
+  }
+  const ok = url.origin === "https://cursor.invalid" && url.pathname === p.split("?")[0] && segs.length === 7 && segs[6] === "messages" && id === String(target);
+  if (!ok) throw invalid();
+  return { path: p, before: b ?? null };
+}
+
 // ------------------------------------------------------------ bridge pairing
 
 /** HMAC-SHA256 of `${role}:${nonce}` with the pairing token, base64url (the server's proof() in src/bridge.ts). */
