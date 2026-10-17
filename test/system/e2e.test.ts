@@ -126,6 +126,12 @@ describe("MCP server end to end", () => {
     expect(data.messages[0].replies[0]).toMatchObject({ text: `${"y".repeat(100)}…`, truncated: true });
   });
 
+  it("1.1: refuses a cursor longer than 4096 characters without asking the extension", async () => {
+    const before = calls.length;
+    expect((await call("read_messages", { conversation: "Engineering/General", cursor: "a".repeat(4097) })).isError).toBe(true);
+    expect(calls.length).toBe(before);
+  });
+
   it("returns extension errors as tool errors", async () => {
     expect(await call("read_messages", { conversation: "nobody" })).toEqual({ isError: true, data: 'No chat or channel matches "nobody".' });
   });

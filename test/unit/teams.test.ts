@@ -509,10 +509,10 @@ describe("read_messages cursor", () => {
   const path = (id: string, rest = "/messages?startTime=1&syncState=abc&pageSize=60") => `/v1/users/ME/conversations/${encodeURIComponent(id)}${rest}`;
   it("1.1: round-trips a chatsvc backward link (as a path on the service) and a time", () => {
     const c = teams.messagesCursor(`https://emea.ng.msg.teams.microsoft.com${path(CHAT)}`, "2026-01-01T00:00:00.000Z");
-    expect(teams.readMessagesCursor(c, CHAT)).toEqual({ path: path(CHAT), before: "2026-01-01T00:00:00.000Z" });
+    expect(teams.readMessagesCursor(c, CHAT)).toEqual({ path: path(CHAT), before: "2026-01-01T00:00:00.000Z", id: null });
     const thread = `${CHAT};messageid=1700000000000`;
     const t = teams.messagesCursor(path(thread, "/messages?pageSize=20"), null);
-    expect(teams.readMessagesCursor(t, thread)).toEqual({ path: path(thread, "/messages?pageSize=20"), before: null });
+    expect(teams.readMessagesCursor(t, thread)).toEqual({ path: path(thread, "/messages?pageSize=20"), before: null, id: null });
   });
   it("1.1: rejects cursors for other hosts, paths or conversations", () => {
     const forge = (p: string, b?: string) => Buffer.from(JSON.stringify({ p, b })).toString("base64url");
@@ -527,7 +527,17 @@ describe("read_messages cursor", () => {
       forge(path(`${CHAT}/messages/../x`, "/messages")),
       forge(path(CHAT, "/messages\\..\\x")),
       forge(path(CHAT), "not a time"),
+      forge(path(CHAT, "/messages?pageSize=20#x")),
+      forge(path(CHAT, "/messages#x")),
+      Buffer.from(JSON.stringify({ p: path(CHAT), b: null, i: 42 })).toString("base64url"),
+      Buffer.from(JSON.stringify({ p: path(CHAT), b: null, i: "x".repeat(300) })).toString("base64url"),
     ];
     for (const c of bad) expect(() => teams.readMessagesCursor(c, CHAT), c).toThrow(/not a valid cursor/i);
+  });
+  it("1.1: carries the id of the oldest message returned, and reads cursors made before ids were kept", () => {
+    const c = teams.messagesCursor(path(CHAT), "2026-01-01T00:00:00.000Z", "1767225600000");
+    expect(teams.readMessagesCursor(c, CHAT)).toEqual({ path: path(CHAT), before: "2026-01-01T00:00:00.000Z", id: "1767225600000" });
+    const old = Buffer.from(JSON.stringify({ p: path(CHAT), b: "2026-01-01T00:00:00.000Z" })).toString("base64url");
+    expect(teams.readMessagesCursor(old, CHAT)).toEqual({ path: path(CHAT), before: "2026-01-01T00:00:00.000Z", id: null });
   });
 });
