@@ -69,17 +69,16 @@ describe("claudeLookupFailure", () => {
   const exitError = (status: number) => Object.assign(new Error("Command failed"), { status });
 
   it("treats a missing CLI as missing", () => {
-    expect(claudeLookupFailure(spawnError("ENOENT"), "darwin")).toBe("missing");
+    expect(claudeLookupFailure(spawnError("ENOENT"))).toBe("missing");
   });
 
   it("treats a non-zero exit of `claude mcp get` as not registered", () => {
-    expect(claudeLookupFailure(exitError(1), "win32")).toBe("not-registered");
-    expect(claudeLookupFailure(exitError(1), "linux")).toBe("not-registered");
+    expect(claudeLookupFailure(exitError(1))).toBe("not-registered");
   });
 
   it("reports a CLI that could not be started (EINVAL, EACCES) instead of planning to add", () => {
-    expect(claudeLookupFailure(spawnError("EINVAL"), "win32")).toBe("broken");
-    expect(claudeLookupFailure(spawnError("EACCES"), "linux")).toBe("broken");
+    expect(claudeLookupFailure(spawnError("EINVAL"))).toBe("broken");
+    expect(claudeLookupFailure(spawnError("EACCES"))).toBe("broken");
   });
 });
 
