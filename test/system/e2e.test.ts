@@ -76,6 +76,15 @@ afterAll(async () => {
 });
 
 describe("MCP server end to end", () => {
+  // What the AI sees. When a change to it is intended: npx vitest run test/system -u, and review the diff.
+  it("keeps the tool contract: every tool's name, description and input schema", async () => {
+    const { tools } = await client.listTools();
+    const contract = Object.fromEntries(
+      [...tools].sort((a, b) => a.name.localeCompare(b.name)).map((t) => [t.name, { description: t.description, inputSchema: t.inputSchema }]),
+    );
+    await expect(JSON.stringify(contract, null, 2) + "\n").toMatchFileSnapshot("__snapshots__/tools.json");
+  });
+
   it("exposes the expected tools", async () => {
     const { tools } = await client.listTools();
     expect(tools.map((t) => t.name).sort()).toEqual([
