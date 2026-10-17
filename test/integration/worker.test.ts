@@ -1,7 +1,7 @@
 // The extension's service worker (extension/background.js) against a fake chrome with Teams
 // open (test/helpers/fakeChrome.ts). These are also the fake's self-tests.
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { BASES, createFakeChrome, loadWorker, ME_OID, never, openedSockets, reply, type SentRequest } from "../helpers/fakeChrome.js";
+import { BASES, createFakeChrome, loadWorker, ME_OID, networkError, never, openedSockets, reply, timedOut, type SentRequest } from "../helpers/fakeChrome.js";
 
 const CHAT = "19:contoso-launch@thread.v2";
 const ALEX = "8:orgid:00000000-0000-4000-8000-00000000000a";
@@ -101,6 +101,46 @@ describe("fake chrome", () => {
     const outcome = await Promise.race([worker.handlers.readMessages({ conversation: CHAT }).then(() => "settled"), new Promise((r) => setTimeout(() => r("pending"), 200))]);
     expect(outcome).toBe("pending");
     expect(fake.count("chatsvc")).toBe(1);
+  });
+
+  it("runs a tab script only in a tab that exists, like Chrome", async () => {
+    const fake = createFakeChrome({ services: { csa } });
+    await loadWorker(fake);
+    const pageFetch = async function pageFetch() {};
+    const run = (tabId: number) => fake.chrome.scripting.executeScript({ target: { tabId }, world: "MAIN", func: pageFetch, args: [`${BASES.csa}/x`, "GET", {}, null, 1] });
+    await expect(run(42)).rejects.toThrow("No tab with id: 42.");
+    fake.closeTab(1);
+    await expect(run(1)).rejects.toThrow("No tab with id: 1.");
+    expect(fake.tabs).toEqual([]);
+  });
+
+  it("a Teams tab closed between finding it and running in it fails the call with Chrome's error", async () => {
+    const fake = createFakeChrome({ services: { csa, chatsvc: chatsvc(1) } });
+    const worker = await loadWorker(fake);
+    // The worker finds tab 1, then the user closes it before the request runs there.
+    const query = fake.spies.tabsQuery.getMockImplementation()!;
+    fake.spies.tabsQuery.mockImplementationOnce(async (q) => {
+      const found = await query(q);
+      fake.closeTab(1);
+      return found;
+    });
+    const send = vi.fn();
+    await worker.dispatch({ type: "request", id: "r3", method: "readMessages", params: { conversation: CHAT } }, send);
+    expect(send).toHaveBeenCalledWith({ type: "response", id: "r3", ok: false, error: "No tab with id: 1." });
+    expect(fake.sent).toEqual([]);
+  });
+
+  it("networkError() is a fetch that failed in the page: the worker's 'Could not reach Teams' error with the reason", async () => {
+    const fake = createFakeChrome({ services: { csa, chatsvc: () => networkError("Failed to fetch") } });
+    const worker = await loadWorker(fake);
+    await expect(worker.handlers.readMessages({ conversation: CHAT })).rejects.toThrow("Could not reach Teams: Failed to fetch");
+    expect(fake.count("chatsvc")).toBe(1);
+  });
+
+  it("timedOut() is a request the page gave up on: the worker's 'did not answer' error", async () => {
+    const fake = createFakeChrome({ services: { csa, chatsvc: () => timedOut() } });
+    const worker = await loadWorker(fake);
+    await expect(worker.handlers.readMessages({ conversation: CHAT })).rejects.toThrow("Teams did not answer within 60 s. Reload the Teams tab and try again.");
   });
 
   it("captures a session from a Teams request fired at the worker's webRequest listeners", async () => {
