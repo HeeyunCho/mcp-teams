@@ -18,6 +18,9 @@ const fail = (err: unknown) => ({
   content: [{ type: "text" as const, text: err instanceof Error ? err.message : String(err) }],
 });
 
+/** Bridge errors for a call that was already sent, so its outcome is unknown (see src/bridge.ts). */
+const OUTCOME_UNKNOWN = /timed out|withdrawn|disconnected|reconnected|restarted|shutting down|connection/i;
+
 /** Wraps a handler so thrown errors become MCP tool errors instead of protocol errors. */
 function safe<A, E = unknown>(fn: (args: A, extra: E) => Promise<ReturnType<typeof text>>) {
   return async (args: A, extra: E) => {
@@ -302,8 +305,11 @@ export function registerTools(server: McpServer, bridge: ExtensionBridge, config
       try {
         return text(await bridge.call("requestSend", { conversation, to, title, text: message, threadId: reply_to, subject }, SEND_TIMEOUT_MS, extra.signal));
       } catch (err) {
-        // No outcome came back: the user may have clicked Send just before. Retrying blindly could post twice.
-        throw new Error(`${(err as Error).message} The message may have been posted if the user had just clicked Send: check with read_messages before sending again.`);
+        const message = (err as Error).message;
+        // The bridge lost the call after it was sent (its own messages, also as relayed by a hub):
+        // the user may have clicked Send just before, so retrying blindly could post twice.
+        if (!OUTCOME_UNKNOWN.test(message)) throw err;
+        throw new Error(`${message} The message may have been posted if the user had just clicked Send: check with read_messages before sending again.`);
       }
     }),
   );
