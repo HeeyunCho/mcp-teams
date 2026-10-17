@@ -83,6 +83,11 @@ export interface BridgeOptions {
   stepDownMaxWaitMs?: number;
   /** After a call is withdrawn (timeout or cancel), how long its answer still counts. */
   cancelGraceMs?: number;
+  /**
+   * Hub: a peer with more than this waiting in its send buffer at two keep-alive ticks in a row
+   * isn't reading its answers and is closed (1013); over 4x this, at once.
+   */
+  maxPeerBufferedBytes?: number;
 }
 
 export const DEFAULT_BRIDGE_OPTIONS: Readonly<Required<BridgeOptions>> = Object.freeze({
@@ -94,7 +99,11 @@ export const DEFAULT_BRIDGE_OPTIONS: Readonly<Required<BridgeOptions>> = Object.
   pickStatusTimeoutMs: 3_000,
   stepDownMaxWaitMs: 5 * 60_000,
   cancelGraceMs: 2_000,
+  maxPeerBufferedBytes: 64 * 1024 * 1024,
 });
+
+/** Hub: a peer with more than this many times maxPeerBufferedBytes waiting is closed at once. */
+const PEER_BUFFER_HARD_CAP = 4;
 
 /**
  * What a call fails with when the bridge lost it after sending it, so its outcome is unknown (a
@@ -167,6 +176,7 @@ export class ExtensionBridge {
   private closed = false;
   private steppingDown = false;
   private alive = new WeakSet<WebSocket>(); // hub: extensions and peers that answered the last ping
+  private backlogged = new WeakSet<WebSocket>(); // hub: peers over maxPeerBufferedBytes at the last tick
   private legacyReloaded = false; // hub: an extension of 0.2.0 or older was told to reload
   private readonly opts: Required<BridgeOptions>;
   private boundPort?: number; // hub: the port it listens on (port 0 picks a free one)
@@ -458,7 +468,7 @@ export class ExtensionBridge {
     if (msg.type !== "request" || typeof msg.id !== "string") return;
     const reply = (body: object) => {
       try {
-        if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: "response", id: msg.id, ...body }));
+        this.sendToPeer(ws, JSON.stringify({ type: "response", id: msg.id, ...body }));
       } catch (err) {
         console.error(`[mcp-teams] could not answer a peer: ${(err as Error).message}`);
       }
@@ -478,7 +488,28 @@ export class ExtensionBridge {
 
   private broadcastState() {
     const state = JSON.stringify({ type: "ext-state", extension: this.extension ?? null, extensions: this.extensions });
-    for (const peer of this.peers) if (peer.readyState === WebSocket.OPEN) peer.send(state);
+    for (const peer of this.peers) this.sendToPeer(peer, state);
+  }
+
+  /**
+   * Hub: sends to a peer that is open and keeping up. One with over 4x maxPeerBufferedBytes
+   * waiting is closed instead; a smaller backlog only when it lasts (see startPeerBeat), so a
+   * burst of large answers doesn't drop a healthy peer.
+   */
+  private sendToPeer(ws: WebSocket, text: string) {
+    if (ws.readyState !== WebSocket.OPEN) return;
+    if (ws.bufferedAmount > this.opts.maxPeerBufferedBytes * PEER_BUFFER_HARD_CAP) return this.closeSlowPeer(ws);
+    ws.send(text);
+  }
+
+  /** Hub: closes a peer that isn't reading its answers (1013); its calls are withdrawn and it connects again. */
+  private closeSlowPeer(ws: WebSocket) {
+    console.error(`[mcp-teams] closing a peer that doesn't read its answers (${Math.round(ws.bufferedAmount / 1024 / 1024)} MB waiting)`);
+    this.peers.delete(ws);
+    // Its close may wait for the backlog; its calls are withdrawn now (as on close).
+    for (const ac of this.peerCalls.get(ws)?.values() ?? []) ac.abort();
+    this.peerCalls.delete(ws);
+    ws.close(1013, "too slow");
   }
 
   /**
@@ -509,7 +540,8 @@ export class ExtensionBridge {
   /**
    * Hub: pings each peer every keepAliveMs; one that didn't answer the previous ping (a
    * suspended or hung session) is dropped, within 2 periods. The peers in turn drop a hub
-   * that stops pinging them (see join).
+   * that stops pinging them (see join). A peer over maxPeerBufferedBytes at this tick and the
+   * previous one isn't draining its answers and is closed (1013).
    */
   private startPeerBeat(ws: WebSocket) {
     this.alive.add(ws);
@@ -519,6 +551,13 @@ export class ExtensionBridge {
       if (!this.peers.size) return this.stopPeerBeat();
       for (const p of this.peers) {
         if (p.readyState !== WebSocket.OPEN) continue;
+        if (p.bufferedAmount > this.opts.maxPeerBufferedBytes) {
+          if (this.backlogged.has(p)) {
+            this.closeSlowPeer(p);
+            continue;
+          }
+          this.backlogged.add(p);
+        } else this.backlogged.delete(p);
         if (!this.alive.has(p)) {
           p.terminate();
           continue;
