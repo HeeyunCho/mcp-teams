@@ -236,6 +236,7 @@ describe("ExtensionBridge options", () => {
       pickStatusTimeoutMs: 3_000,
       stepDownMaxWaitMs: 5 * 60_000,
       cancelGraceMs: 2_000, // 1.2: how long a withdrawn call's answer still counts
+      maxPeerBufferedBytes: 64 * 1024 * 1024, // 2.3: a peer's backlog that closes it at two ticks in a row
     });
   });
 
