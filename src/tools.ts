@@ -18,8 +18,13 @@ const fail = (err: unknown) => ({
   content: [{ type: "text" as const, text: err instanceof Error ? err.message : String(err) }],
 });
 
-/** Bridge errors for a call that was already sent, so its outcome is unknown (see src/bridge.ts). */
-const OUTCOME_UNKNOWN = /timed out|withdrawn|disconnected|reconnected|restarted|shutting down|connection/i;
+/**
+ * The bridge's own errors for a call that was already sent, so its outcome is unknown (see
+ * src/bridge.ts; a hub relays them to peers word for word). Matched at the start: an error
+ * the extension answered with (it refused before any window opened) may quote such words.
+ */
+const OUTCOME_UNKNOWN =
+  /^(Extension call '[^']*' timed out|Cancelled: the request was withdrawn|Browser extension (disconnected|reconnected)|The mcp-teams hub restarted|mcp-teams is shutting down|mcp-teams was updated|Bridge connection error|bridge server error|The response was too large)/;
 
 /** What the MCP SDK passes a tool besides its arguments: `signal` aborts when the AI app cancels the call. */
 type Extra = { signal?: AbortSignal };
