@@ -62,8 +62,13 @@ describe("throttling (429 with Retry-After)", () => {
     expect(second.reply.result.note).toMatch(/names missing \(throttled\)/i);
     expect(fake.count("mt")).toBe(1);
 
+    // Still inside the 2 s near its end (a shorter gate would have opened by now).
+    await sleep(700);
+    await request(worker, "listChats", {}, 10_000);
+    expect(fake.count("mt")).toBe(1);
+
     // Once the wait is over: names again, and no note.
-    await sleep(1_300);
+    await sleep(600);
     const third = await request(worker, "listChats", {}, 10_000);
     expect(fake.count("mt")).toBeGreaterThan(1);
     expect(third.reply.result.note).toBeUndefined();
@@ -121,5 +126,27 @@ describe("throttling (429 with Retry-After)", () => {
     const second = await request(worker, "listTeams", {}, 500);
     expect(second.reply).toMatchObject({ ok: false, error: expect.stringMatching(/Teams is busy \(throttled\)/) });
     expect(fake.count("csa")).toBe(1);
+  });
+
+  it("2.2: a send whose post Teams throttles after the click says it failed (Teams refused it), and is not sent again", async () => {
+    const fake = createFakeChrome({ services: { csa, mt: profiles, chatsvc: (req) => (req.method === "POST" ? throttled("2") : undefined) } });
+    const worker = await loadWorker(fake);
+    worker.registerListeners();
+    const replies: any[] = [];
+    const done = worker.dispatch({ type: "request", id: "s1", method: "requestSend", params: { conversation: "19:contoso-group@thread.v2", text: "Hi both" }, timeoutMs: 60_000 }, (r) => replies.push(r));
+    await vi.waitFor(() => expect(fake.spies.windowsCreate).toHaveBeenCalledTimes(1));
+    const id = /id=([^&]+)/.exec(fake.spies.windowsCreate.mock.calls[0][0]!.url!)![1];
+    await fake.pageMessage(`confirm.html?id=${id}`, { type: "confirm:decide", id, approve: true });
+    await done;
+    expect(replies[0].result).toMatchObject({ sent: false, reason: expect.stringMatching(/^Sending failed: Teams is busy \(throttled\)/) });
+    expect(replies[0].result.reason).not.toMatch(/may have been posted/);
+    expect(fake.sent.filter((r) => r.service === "chatsvc" && r.method === "POST")).toHaveLength(1);
+  });
+
+  it("2.2: a chat looked up by a person's name while names are throttled says why it isn't found", async () => {
+    const fake = createFakeChrome({ services: { csa, mt: () => throttled("2"), chatsvc: () => ({ messages: [] }) } });
+    const worker = await loadWorker(fake);
+    const { reply: r } = await request(worker, "readMessages", { conversation: "Alex Doe" }, 10_000);
+    expect(r).toMatchObject({ ok: false, error: expect.stringMatching(/names missing \(throttled\)/i) });
   });
 });
