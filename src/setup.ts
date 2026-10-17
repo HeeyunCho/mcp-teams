@@ -87,11 +87,10 @@ export function commandInvocation(
  * Why `claude mcp get teams` failed: no Claude Code ("missing"), no "teams" server
  * ("not-registered"), or a CLI that could not be started at all ("broken").
  */
-export function claudeLookupFailure(err: unknown, platform: NodeJS.Platform = process.platform): "missing" | "not-registered" | "broken" {
+export function claudeLookupFailure(err: unknown): "missing" | "not-registered" | "broken" {
   const e = err as NodeJS.ErrnoException & { status?: number | null };
+  // Windows: a missing claude is caught earlier, by windowsHas.
   if (e.code === "ENOENT") return "missing";
-  // cmd.exe: "'claude' is not recognized as an internal or external command".
-  if (platform === "win32" && e.status === 9009) return "missing";
   // A code is set only when the process could not be started (EINVAL, EACCES, …).
   if (typeof e.code === "string") return "broken";
   return "not-registered";
@@ -115,16 +114,21 @@ function claude(args: string[], options: ExecFileSyncOptions): string {
   return execFileSync(inv.file, inv.args, { ...inv.options, ...options }) as string;
 }
 
-/** Claude Code is configured through its CLI. */
-function planClaudeCode(cmd: ServerCommand): ClaudeCode | null {
+/** The command that registers this server with Claude Code, to run by hand. */
+export const claudeAddCommand = (cmd: ServerCommand) =>
+  ["claude", "mcp", "add", "--scope", "user", "teams", "--", cmd.command, ...cmd.args].map(quote).join(" ");
+
+/** Claude Code is configured through its CLI: null if it isn't installed, "broken" if its CLI won't start. */
+function planClaudeCode(cmd: ServerCommand): ClaudeCode | "broken" | null {
   if (process.platform === "win32" && !windowsHas("claude")) return null;
   let out: string;
   try {
     out = claude(["mcp", "get", "teams"], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
   } catch (err) {
     const failure = claudeLookupFailure(err);
-    if (failure === "broken") todo(`Claude Code: could not run its CLI (${(err as Error).message}). Register by hand: claude mcp add teams`);
-    return failure === "not-registered" ? { status: "added" } : null;
+    if (failure !== "broken") return failure === "not-registered" ? { status: "added" } : null;
+    todo(`Claude Code: could not run its CLI (${(err as Error).message}). Register by hand: ${claudeAddCommand(cmd)}`);
+    return "broken";
   }
   if (out.includes(cmd.command) && cmd.args.every((a) => out.includes(a))) return { status: "unchanged" };
   if (!out.includes("mcp-teams")) return { status: "foreign" };
@@ -159,27 +163,35 @@ async function confirm(question: string, yes: boolean): Promise<boolean> {
   return answer === "" || answer === "y" || answer === "yes";
 }
 
+const claudeChanges = (c: ClaudeCode | "broken" | null): c is ClaudeCode =>
+  typeof c === "object" && (c?.status === "added" || c?.status === "updated");
+
+/**
+ * What registering does next: nothing found, nothing to change, ask before changing, or
+ * stop (Claude Code's CLI won't start, its hint is printed, and nothing else to change).
+ */
+export function registerNext(claudeCode: ClaudeCode | "broken" | null, plans: Pick<Plan, "text">[]): "none-found" | "up-to-date" | "ask" | "stop" {
+  if (!claudeCode && !plans.length) return "none-found";
+  if (claudeChanges(claudeCode) || plans.some((p) => p.text)) return "ask";
+  return claudeCode === "broken" ? "stop" : "up-to-date";
+}
+
 /** Shows what registering would change in each AI app, asks once, then does it. */
 async function registerApps(yes: boolean) {
   const cmd = serverCommand();
   const claudeCode = planClaudeCode(cmd);
   const plans: Plan[] = planClients(cmd);
   console.log("AI apps on this computer:");
-  if (claudeCode) console.log(`  ${"Claude Code".padEnd(15)} ${STATUS_TEXT[claudeCode.status]}`);
+  if (claudeCode && claudeCode !== "broken") console.log(`  ${"Claude Code".padEnd(15)} ${STATUS_TEXT[claudeCode.status]}`);
   for (const p of plans) console.log(`  ${p.client.name.padEnd(15)} ${STATUS_TEXT[p.status]}`);
-  if (!claudeCode && !plans.length) {
-    todo(`No AI app found. Register this stdio server with yours: ${[cmd.command, ...cmd.args].map(quote).join(" ")}`);
-    return;
-  }
-  const changes = plans.filter((p) => p.text);
-  const claudeChange = claudeCode && (claudeCode.status === "added" || claudeCode.status === "updated");
-  if (!changes.length && !claudeChange) {
-    ok("Registered with every AI app found");
-    return;
-  }
+  const next = registerNext(claudeCode, plans);
+  if (next === "none-found") todo(`No AI app found. Register this stdio server with yours: ${[cmd.command, ...cmd.args].map(quote).join(" ")}`);
+  if (next === "up-to-date") ok("Registered with every AI app found");
+  if (next !== "ask") return;
   if (!(await confirm("Add mcp-teams to these apps?", yes))) return;
+  const changes = plans.filter((p) => p.text);
   const done: string[] = [];
-  if (claudeChange) {
+  if (claudeChanges(claudeCode)) {
     try {
       applyClaudeCode(claudeCode, cmd);
       done.push("Claude Code");

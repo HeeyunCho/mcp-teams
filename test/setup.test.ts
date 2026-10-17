@@ -3,7 +3,7 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { claudeLookupFailure, cmdQuote, commandInvocation, openCommand, windowsHas } from "../src/setup.js";
+import { claudeAddCommand, claudeLookupFailure, cmdQuote, commandInvocation, openCommand, registerNext, windowsHas } from "../src/setup.js";
 
 // Paths cmd.exe would otherwise split (&), expand (%...%) or treat specially (^ ( ) !).
 const tricky = [
@@ -69,19 +69,58 @@ describe("claudeLookupFailure", () => {
   const exitError = (status: number) => Object.assign(new Error("Command failed"), { status });
 
   it("treats a missing CLI as missing", () => {
-    expect(claudeLookupFailure(spawnError("ENOENT"), "darwin")).toBe("missing");
-    // cmd.exe: "'claude' is not recognized as an internal or external command".
-    expect(claudeLookupFailure(exitError(9009), "win32")).toBe("missing");
+    expect(claudeLookupFailure(spawnError("ENOENT"))).toBe("missing");
   });
 
   it("treats a non-zero exit of `claude mcp get` as not registered", () => {
-    expect(claudeLookupFailure(exitError(1), "win32")).toBe("not-registered");
-    expect(claudeLookupFailure(exitError(1), "linux")).toBe("not-registered");
+    expect(claudeLookupFailure(exitError(1))).toBe("not-registered");
   });
 
   it("reports a CLI that could not be started (EINVAL, EACCES) instead of planning to add", () => {
-    expect(claudeLookupFailure(spawnError("EINVAL"), "win32")).toBe("broken");
-    expect(claudeLookupFailure(spawnError("EACCES"), "linux")).toBe("broken");
+    expect(claudeLookupFailure(spawnError("EINVAL"))).toBe("broken");
+    expect(claudeLookupFailure(spawnError("EACCES"))).toBe("broken");
+  });
+});
+
+describe("claudeAddCommand", () => {
+  it("is the full command to register by hand, server command included", () => {
+    expect(claudeAddCommand({ command: "/usr/local/bin/node", args: ["/Users/alex/mcp-teams/dist/index.js"] })).toBe(
+      "claude mcp add --scope user teams -- /usr/local/bin/node /Users/alex/mcp-teams/dist/index.js",
+    );
+    expect(claudeAddCommand({ command: "C:\\Program Files\\nodejs\\node.exe", args: ["C:\\Users\\Alex Doe\\index.js"] })).toBe(
+      'claude mcp add --scope user teams -- "C:\\Program Files\\nodejs\\node.exe" "C:\\Users\\Alex Doe\\index.js"',
+    );
+    expect(claudeAddCommand({ command: "npx", args: ["-y", "mcp-teams@latest"] })).toBe("claude mcp add --scope user teams -- npx -y mcp-teams@latest");
+  });
+});
+
+describe("registerNext", () => {
+  const unchanged = { text: undefined };
+  const toWrite = { text: "{}" };
+
+  it("says no AI app was found only when nothing was found", () => {
+    expect(registerNext(null, [])).toBe("none-found");
+  });
+
+  it("does not claim no AI app was found when Claude Code's CLI could not be started", () => {
+    expect(registerNext("broken", [])).toBe("stop");
+  });
+
+  it("does not claim every app is registered when Claude Code's CLI could not be started", () => {
+    expect(registerNext("broken", [unchanged])).toBe("stop");
+    expect(registerNext("broken", [toWrite])).toBe("ask");
+  });
+
+  it("asks when there is something to add or update", () => {
+    expect(registerNext({ status: "added" }, [])).toBe("ask");
+    expect(registerNext({ status: "updated", scope: "local" }, [unchanged])).toBe("ask");
+    expect(registerNext(null, [toWrite])).toBe("ask");
+  });
+
+  it("reports everything registered when nothing needs changing", () => {
+    expect(registerNext({ status: "unchanged" }, [])).toBe("up-to-date");
+    expect(registerNext({ status: "foreign" }, [unchanged])).toBe("up-to-date");
+    expect(registerNext(null, [unchanged])).toBe("up-to-date");
   });
 });
 
