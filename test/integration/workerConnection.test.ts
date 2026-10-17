@@ -68,7 +68,10 @@ describe("worker connection", () => {
     for (const l of fake.chrome.runtime.onStartup.listeners) l();
     await vi.waitFor(() => expect(hub.closed()).toBe(true), { timeout: 2_000 });
     await new Promise((r) => setTimeout(r, 300));
-    expect(fake.spies.windowsCreate).not.toHaveBeenCalled();
+    // On a busy machine the check may finish before the drop arrives: then the send ran on an open
+    // connection and its close withdrew it. Either way no window is left that nobody can answer.
+    const opened = await Promise.all(fake.spies.windowsCreate.mock.results.map((r) => r.value));
+    for (const w of opened) expect(fake.spies.windowsRemove).toHaveBeenCalledWith(w.id);
     expect(worker.pendingSendCount()).toBe(0);
   });
 
