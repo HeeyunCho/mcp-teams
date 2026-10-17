@@ -540,7 +540,7 @@ export const handlers = {
     };
   },
 
-  async readMessages({ conversation, limit = 30, before, cursor, includeSystem = false, threadId }) {
+  async readMessages({ conversation, limit = 30, before, cursor, includeSystem = false, threadId, maxLength }) {
     if (cursor && before) throw new Error("Give either cursor or before, not both (cursor already knows where to go on).");
     const conv = await resolve(conversation);
     // A cursor resumes at the page that held the oldest message returned last time, and
@@ -559,7 +559,8 @@ export const handlers = {
     return {
       conversation: conv,
       count: messages.length,
-      messages,
+      // Cut here, so long texts don't cross the bridge only to be cut by the server.
+      messages: teams.capText(messages, maxLength),
       ...(more || raw.length ? { olderBefore: oldest?.time ?? null } : {}),
       ...(olderCursor ? { olderCursor } : {}),
       ...(capped && messages.length < limit

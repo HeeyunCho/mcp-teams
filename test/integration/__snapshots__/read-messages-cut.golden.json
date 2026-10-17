@@ -1,0 +1,95 @@
+{
+  "conversation": {
+    "id": "19:contoso-general@thread.tacv2",
+    "kind": "channel",
+    "title": "Contoso/General",
+    "team": "Contoso",
+    "channel": "General",
+    "teamId": "19:contoso-team@thread.tacv2"
+  },
+  "count": 5,
+  "messages": [
+    {
+      "id": "1772442060000",
+      "time": "2026-03-02T09:01:00.000Z",
+      "from": {
+        "name": "Alex Doe",
+        "mri": "8:orgid:00000000-0000-4000-8000-00000000000a"
+      },
+      "text": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\ud83d…",
+      "replies": [
+        {
+          "id": "1772442360000",
+          "time": "2026-03-02T09:06:00.000Z",
+          "from": {
+            "name": "Sam Roe",
+            "mri": "8:orgid:00000000-0000-4000-8000-00000000000b"
+          },
+          "text": "Sam Roe here, with a pasted stack trace: at frame() Sam Roe here, with a pasted stack trace: at fram…",
+          "truncated": true
+        },
+        {
+          "id": "1772442420000",
+          "time": "2026-03-02T09:07:00.000Z",
+          "from": {
+            "name": "Sam Roe",
+            "mri": "8:orgid:00000000-0000-4000-8000-00000000000b"
+          },
+          "text": "Thanks, Alex 👍"
+        }
+      ],
+      "truncated": true
+    },
+    {
+      "id": "1772442120000",
+      "time": "2026-03-02T09:02:00.000Z",
+      "from": {
+        "name": "Alex Doe",
+        "mri": "8:orgid:00000000-0000-4000-8000-00000000000a"
+      },
+      "text": "Thanks, Alex 👍"
+    },
+    {
+      "id": "1772442180000",
+      "time": "2026-03-02T09:03:00.000Z",
+      "from": {
+        "name": "Sam Roe",
+        "mri": "8:orgid:00000000-0000-4000-8000-00000000000b"
+      },
+      "text": "회의록 정리했습니다. 다음 주 배포 일정과 테스트 결과를 공유드립니다. 다음 주 배포 일정과 테스트 결과를 공유드립니다. 다음 주 배포 일정과 테스트 결과를 공유드립니다. 다음 주…",
+      "truncated": true
+    },
+    {
+      "id": "1772442240000",
+      "time": "2026-03-02T09:04:00.000Z",
+      "from": {
+        "name": "Alex Doe",
+        "mri": "8:orgid:00000000-0000-4000-8000-00000000000a"
+      },
+      "text": "Build log 🚀✅ 단계 ok · 단계 ok · 단계 ok · 단계 ok · 단계 ok · 단계 ok · 단계 ok · 단계 ok · 단계 ok · 단계 ok · 단계 ok …",
+      "truncated": true
+    },
+    {
+      "id": "1772442300000",
+      "time": "2026-03-02T09:05:00.000Z",
+      "from": {
+        "name": "Alex Doe",
+        "mri": "8:orgid:00000000-0000-4000-8000-00000000000a"
+      },
+      "text": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+      "replies": [
+        {
+          "id": "1772442480000",
+          "time": "2026-03-02T09:08:00.000Z",
+          "from": {
+            "name": "Sam Roe",
+            "mri": "8:orgid:00000000-0000-4000-8000-00000000000b"
+          },
+          "text": "🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉…",
+          "truncated": true
+        }
+      ]
+    }
+  ],
+  "olderBefore": "2026-03-02T09:01:00.000Z"
+}

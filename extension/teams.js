@@ -388,6 +388,19 @@ export function buildConversation(raw, { includeSystem = false, channel = false 
   return posts;
 }
 
+/**
+ * Cuts each message's text (replies too) to `maxLength` UTF-16 units plus "…", marking it
+ * `truncated`. The server cuts the same way, for extensions older than this.
+ */
+export function capText(messages, maxLength) {
+  if (!maxLength) return messages;
+  const cut = (m) => {
+    const r = m.text.length > maxLength ? { ...m, text: `${m.text.slice(0, maxLength)}…`, truncated: true } : m;
+    return r.replies ? { ...r, replies: r.replies.map(cut) } : r;
+  };
+  return messages.map(cut);
+}
+
 // ------------------------------------------------------------ teams and chats
 
 const kindOf = (id, t = {}) => {

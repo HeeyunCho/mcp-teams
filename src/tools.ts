@@ -37,12 +37,16 @@ const conversation = z
     "Which chat or channel: its id from list_chats/list_teams (19:…), 'Team/Channel' (e.g. 'Engineering/General'), a chat title, or a person's name for your 1:1 chat with them. A name must match exactly one conversation, otherwise the matches are listed.",
   );
 
-type Message = { text: string; replies?: Message[] };
+type Message = { text: string; truncated?: boolean; replies?: Message[] };
 
-/** Cuts long message texts (pasted logs, long mails) so a conversation stays readable. */
+/**
+ * Cuts long message texts (pasted logs, long mails) so a conversation stays readable. The
+ * extension cuts them already (maxLength); this cuts for older extensions that don't, and
+ * leaves a text it cut alone.
+ */
 function capText<T extends Message>(messages: T[], maxLength: number): T[] {
   const cut = (m: Message): Message => {
-    const r = m.text.length > maxLength ? { ...m, text: `${m.text.slice(0, maxLength)}…`, truncated: true } : m;
+    const r = !m.truncated && m.text.length > maxLength ? { ...m, text: `${m.text.slice(0, maxLength)}…`, truncated: true } : m;
     return r.replies ? { ...r, replies: r.replies.map(cut) } : r;
   };
   return messages.map(cut) as T[];
@@ -167,7 +171,7 @@ export function registerTools(server: McpServer, bridge: ExtensionBridge, config
     safe(async ({ conversation, limit, cursor, before, reply_to, include_system, max_length }) => {
       const r = await bridge.call<{ messages: Message[] }>(
         "readMessages",
-        { conversation, limit, cursor, before, threadId: reply_to, includeSystem: include_system },
+        { conversation, limit, cursor, before, threadId: reply_to, includeSystem: include_system, maxLength: max_length },
         READ_TIMEOUT_MS,
       );
       return text({ ...r, messages: capText(r.messages, max_length) });
