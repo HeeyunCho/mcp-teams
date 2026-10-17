@@ -139,3 +139,81 @@ describe("2.3: peer heartbeat", () => {
     expect(hub.inFlight.peerCalls).toBe(0);
   });
 });
+
+// A peer that doesn't read its answers (a hung session, or one paused in a debugger) would make
+// the hub buffer them without limit. Over maxPeerBufferedBytes at two ticks in a row, or over 4x
+// it at any send, the hub closes it (1013): its calls fail and it connects again. Big payloads
+// here, so the period is a full second (a pong can queue behind the data).
+describe("2.3: slow peers", () => {
+  const LIMIT = 1024 * 1024;
+
+  it("2.3: a peer that stops reading is closed (1013) within about 2 ticks", async () => {
+    const keepAliveMs = 1_000;
+    h = await bridgeHarness({ ...FAST, keepAliveMs, maxPeerBufferedBytes: LIMIT });
+    const hub = await h.session();
+    // One answer far larger than the kernel's socket buffers, sent while the buffer is empty
+    // (under the hard cap), so only the check at the ticks can close the peer.
+    const big = "x".repeat(16 * 1024 * 1024);
+    const ext = await h.extension({ handle: () => big });
+    const peer = await rawPeer(h.port);
+    (peer.ws as any)._socket.pause();
+    peer.ws.send(JSON.stringify({ type: "request", id: "r1", method: "readMessages", params: {}, timeoutMs: 60_000 }));
+    await until(() => ext.requests().length === 1, 3_000, "the request to reach the extension");
+    const t0 = Date.now();
+    await until(() => (hub as any).peers.size === 0, 4 * keepAliveMs, "the hub to drop the stalled peer");
+    expect(Date.now() - t0).toBeLessThanOrEqual(3 * keepAliveMs);
+    (peer.ws as any)._socket.resume();
+    await until(() => peer.closeCode !== undefined, 10_000, "the stalled peer to see the close");
+    // Windows may take the whole answer into its loopback buffers, so the backlog never shows;
+    // the peer, not reading, then misses a ping and is dropped without a close frame (1006).
+    expect(process.platform === "win32" ? [1006, 1013] : [1013]).toContain(peer.closeCode);
+  }, 30_000);
+
+  it("2.3: over 4x the limit, a peer that doesn't read is closed (1013) at once, between ticks", async () => {
+    // Ticks are slow here, so only the check at send time can close the stalled peer.
+    h = await bridgeHarness({ ...FAST, keepAliveMs: 30_000, maxPeerBufferedBytes: LIMIT });
+    await h.session();
+    const big = "x".repeat(4 * 1024 * 1024);
+    const ext = await h.extension({ handle: () => big });
+    const peer = await rawPeer(h.port);
+    (peer.ws as any)._socket.pause();
+    const n = 20;
+    for (let i = 0; i < n; i++) peer.ws.send(JSON.stringify({ type: "request", id: `r${i}`, method: "readMessages", params: {}, timeoutMs: 60_000 }));
+    await until(() => ext.requests().length === n, 10_000, "every request to reach the extension");
+    await new Promise((r) => setTimeout(r, 500));
+    (peer.ws as any)._socket.resume();
+    await until(() => peer.closeCode !== undefined, 10_000, "the stalled peer to be closed");
+    expect(peer.closeCode).toBe(1013);
+    expect(peer.received.filter((m) => m.type === "response").length).toBeLessThan(n);
+  }, 30_000);
+
+  it("2.3: a burst over the limit that drains before the next tick never closes the peer", async () => {
+    // 6 answers of 512 KB at once: up to 3 MB buffered, over the 1 MB limit but under the hard
+    // cap, and drained long before the next tick.
+    const keepAliveMs = 1_000;
+    h = await bridgeHarness({ ...FAST, keepAliveMs, maxPeerBufferedBytes: LIMIT });
+    await h.session();
+    const big = "x".repeat(512 * 1024);
+    await h.extension({ handle: () => big });
+    const peer = await h.session();
+    const hubSocket = (peer as any).hub;
+    for (let round = 0; round < 3; round++) {
+      const results = await Promise.all(Array.from({ length: 6 }, () => peer.call<string>("readMessages", {})));
+      expect(results.every((r) => r.length === big.length)).toBe(true);
+      await new Promise((r) => setTimeout(r, keepAliveMs));
+    }
+    expect((peer as any).hub).toBe(hubSocket);
+    expect(peer.role).toBe("peer");
+  }, 20_000);
+
+  it("2.3: a peer that reads its answers gets them all, even ones larger than the limit", async () => {
+    h = await bridgeHarness({ ...FAST, keepAliveMs: 1_000, maxPeerBufferedBytes: LIMIT });
+    await h.session();
+    const big = "x".repeat(2 * 1024 * 1024);
+    await h.extension({ handle: () => big });
+    const peer = await h.session();
+    const hubSocket = (peer as any).hub;
+    for (let i = 0; i < 6; i++) expect((await peer.call<string>("readMessages", {})).length).toBe(big.length);
+    expect((peer as any).hub).toBe(hubSocket);
+  }, 20_000);
+});
