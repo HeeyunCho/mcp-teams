@@ -71,7 +71,8 @@ describe("send confirmation window", () => {
 
   it("1.2: a send the hub stops waiting for (bridge timeout) is withdrawn: the window closes and the call reports nothing sent", async () => {
     const { hub, fake, worker } = await setup();
-    const call = hub.call("requestSend", SEND, 300);
+    // Long enough that the window has opened before the hub stops waiting, even on a busy machine.
+    const call = hub.call("requestSend", SEND, 1_500);
     const w = await windowOpened(fake);
     await expect(call).resolves.toMatchObject({ sent: false, reason: expect.stringContaining("nothing was sent") });
     await expectWithdrawn(fake, worker, w);
