@@ -153,20 +153,21 @@ export function registerTools(server: McpServer, bridge: ExtensionBridge, config
     {
       title: "Read a chat or channel",
       description:
-        "Reads the latest messages of a chat or channel, oldest first: sender, time, text (formatting removed), files shared and reactions. In channels, replies are nested under their post. To read further back, pass the returned olderBefore as `before`. With reply_to, reads one channel post's whole thread.",
+        "Reads the latest messages of a chat or channel, oldest first: sender, time, text (formatting removed), files shared and reactions. In channels, replies are nested under their post. To read further back, pass the returned olderCursor as `cursor` (with the same conversation and reply_to); it is there whenever older history exists, and costs one or two Teams requests per page. `before` (a time) also works but re-reads from the newest message each call; it gives up after 20 pages and then returns `truncated: true` with a note and an olderCursor to go on. Give cursor or before, not both. With reply_to, reads one channel post's whole thread.",
       inputSchema: {
         conversation,
         limit: z.number().int().min(1).max(200).default(30).describe("How many messages (channel: posts, each with its replies)"),
-        before: z.string().optional().describe("Only messages older than this time (ISO 8601, e.g. olderBefore from a previous call)"),
+        cursor: z.string().optional().describe("Continue from olderCursor of a previous call on the same conversation (opaque; pass it exactly as returned)"),
+        before: z.string().optional().describe("Only messages older than this time (ISO 8601, e.g. olderBefore from a previous call). Prefer cursor for paging"),
         reply_to: z.string().optional().describe("Channel only: the id of a post, to read its thread"),
         include_system: z.boolean().default(false).describe("Also return events such as members added or calls started"),
         max_length: z.number().int().min(100).max(100_000).default(4_000).describe("Maximum length of each message's text"),
       },
     },
-    safe(async ({ conversation, limit, before, reply_to, include_system, max_length }) => {
+    safe(async ({ conversation, limit, cursor, before, reply_to, include_system, max_length }) => {
       const r = await bridge.call<{ messages: Message[] }>(
         "readMessages",
-        { conversation, limit, before, threadId: reply_to, includeSystem: include_system },
+        { conversation, limit, cursor, before, threadId: reply_to, includeSystem: include_system },
         READ_TIMEOUT_MS,
       );
       return text({ ...r, messages: capText(r.messages, max_length) });

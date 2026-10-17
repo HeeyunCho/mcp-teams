@@ -139,7 +139,7 @@
     }
   },
   "read_messages": {
-    "description": "Reads the latest messages of a chat or channel, oldest first: sender, time, text (formatting removed), files shared and reactions. In channels, replies are nested under their post. To read further back, pass the returned olderBefore as `before`. With reply_to, reads one channel post's whole thread.",
+    "description": "Reads the latest messages of a chat or channel, oldest first: sender, time, text (formatting removed), files shared and reactions. In channels, replies are nested under their post. To read further back, pass the returned olderCursor as `cursor` (with the same conversation and reply_to); it is there whenever older history exists, and costs one or two Teams requests per page. `before` (a time) also works but re-reads from the newest message each call; it gives up after 20 pages and then returns `truncated: true` with a note and an olderCursor to go on. Give cursor or before, not both. With reply_to, reads one channel post's whole thread.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -155,8 +155,12 @@
           "minimum": 1,
           "maximum": 200
         },
+        "cursor": {
+          "description": "Continue from olderCursor of a previous call on the same conversation (opaque; pass it exactly as returned)",
+          "type": "string"
+        },
         "before": {
-          "description": "Only messages older than this time (ISO 8601, e.g. olderBefore from a previous call)",
+          "description": "Only messages older than this time (ISO 8601, e.g. olderBefore from a previous call). Prefer cursor for paging",
           "type": "string"
         },
         "reply_to": {
