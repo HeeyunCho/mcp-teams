@@ -19,6 +19,19 @@ const REPLY = Symbol("reply");
 export const reply = (status: number, body: unknown = {}, extra: Omit<Reply, "status" | "body"> = {}): Reply => ({ status, body, ...extra, [REPLY]: true }) as Reply;
 const isReply = (x: unknown): x is Reply => !!x && typeof x === "object" && REPLY in x;
 
+/** What the in-page pageFetch (extension/background.js) returns when fetch gets no answer. */
+interface NoAnswer {
+  status: 0;
+  text: "";
+  error: string;
+}
+const NO_ANSWER = Symbol("no answer");
+const isNoAnswer = (x: unknown): x is NoAnswer => !!x && typeof x === "object" && NO_ANSWER in x;
+/** The page's fetch failed (e.g. offline): pageFetch's { status: 0, text: "", error: message }. */
+export const networkError = (message = "Failed to fetch"): NoAnswer => ({ status: 0, text: "", error: message, [NO_ANSWER]: true }) as NoAnswer;
+/** The page's fetch hit its timeout: pageFetch's { status: 0, text: "", error: "timeout" }. */
+export const timedOut = (): NoAnswer => networkError("timeout");
+
 /** A promise that never settles: a tab script that never runs (e.g. a frozen tab). */
 export const never = <T = never>() => new Promise<T>(() => {});
 
@@ -34,7 +47,7 @@ export interface SentRequest {
   tabId: number;
 }
 
-/** A fake service: answers each request; undefined → 404. */
+/** A fake service: answers each request (a body, reply(), networkError(), timedOut() or never()); undefined → 404. */
 export type Answer = (req: SentRequest) => unknown;
 
 export const TEAMS_ORIGIN = "https://teams.cloud.microsoft";
@@ -122,6 +135,7 @@ export function createFakeChrome({ services = {}, captured = [...TEAMS_SERVICES]
   const toResult = async (x: unknown) => {
     const r = await x;
     if (r === undefined) return [{ result: { status: 404, text: "", location: null } }];
+    if (isNoAnswer(r)) return [{ result: { status: 0, text: "", error: r.error } }];
     const { status, body, text, location = null } = isReply(r) ? r : { status: 200, body: r, text: undefined, location: null };
     return [{ result: { status, text: text ?? (body === undefined ? "" : JSON.stringify(body)), location } }];
   };
@@ -134,6 +148,8 @@ export function createFakeChrome({ services = {}, captured = [...TEAMS_SERVICES]
   const spies = {
     executeScript: vi.fn(async ({ target, func, args }: { target: { tabId: number }; world?: string; func: Function; args: any[] }) => {
       if (func.name !== "pageFetch") throw new Error(`fakeChrome: unexpected tab script ${func.name}`);
+      // Like Chrome: a tab that doesn't exist (or was closed) runs nothing.
+      if (!tabs.some((t) => t.id === target.tabId)) throw new Error(`No tab with id: ${target.tabId}.`);
       const [url, method, headers, body] = args;
       const route = routeOf(url);
       if (!route) throw new Error(`fakeChrome: no fake service for ${url}`);
@@ -197,6 +213,11 @@ export function createFakeChrome({ services = {}, captured = [...TEAMS_SERVICES]
     spies,
     /** How many requests went to `service` (whose path matches `path`, if given). */
     count: (service: Service, path?: RegExp) => sent.filter((r) => r.service === service && (!path || path.test(r.path))).length,
+    /** The user closes a tab: it is no longer found, and a script can't run in it. */
+    closeTab(tabId: number) {
+      const i = tabs.findIndex((t) => t.id === tabId);
+      if (i >= 0) tabs.splice(i, 1);
+    },
     /** Chrome reports that the user closed a window. */
     closeWindow: (windowId: number) => windowRemoved.listeners.forEach((l) => l(windowId)),
     /** Runs the worker's webRequest listeners whose URL filter matches, as Chrome would. */

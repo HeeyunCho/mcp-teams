@@ -115,7 +115,7 @@ describe("fake chrome", () => {
   });
 
   it("a Teams tab closed between finding it and running in it fails the call with Chrome's error", async () => {
-    const fake = createFakeChrome({ services: { csa, chatsvc: chatsvc(1) } });
+    const fake = createFakeChrome({ services: { csa } });
     const worker = await loadWorker(fake);
     // The worker finds tab 1, then the user closes it before the request runs there.
     const query = fake.spies.tabsQuery.getMockImplementation()!;
@@ -125,7 +125,7 @@ describe("fake chrome", () => {
       return found;
     });
     const send = vi.fn();
-    await worker.dispatch({ type: "request", id: "r3", method: "readMessages", params: { conversation: CHAT } }, send);
+    await worker.dispatch({ type: "request", id: "r3", method: "listChats", params: {} }, send);
     expect(send).toHaveBeenCalledWith({ type: "response", id: "r3", ok: false, error: "No tab with id: 1." });
     expect(fake.sent).toEqual([]);
   });
