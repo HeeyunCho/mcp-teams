@@ -719,7 +719,15 @@ export const handlers = {
         }
       }
     }
-    return { query, meetingsSearched: searched, matches: total, results, ...(skipped.length ? { skipped } : {}) };
+    const notSearched = list.length - searched;
+    return {
+      query,
+      meetingsSearched: searched,
+      matches: total,
+      results,
+      ...(skipped.length ? { skipped } : {}),
+      ...(notSearched ? { notSearched, note: `Stopped at limit: ${notSearched} older meetings with a transcript weren't searched. Raise limit to search them.` } : {}),
+    };
   },
 
   /** Read-only diagnostics for development: a GET on a service, never its headers. */
