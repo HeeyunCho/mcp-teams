@@ -305,7 +305,7 @@ export const openedSockets: string[] = [];
  * The browser WebSocket API, taken before any test stubs it: Node's own (Node 22+), else
  * the ws package's, which implements the same API (Node 20, as in CI, has no global one).
  */
-const NativeWebSocket = globalThis.WebSocket ?? (WsWebSocket as unknown as typeof globalThis.WebSocket);
+export const NativeWebSocket = globalThis.WebSocket ?? (WsWebSocket as unknown as typeof globalThis.WebSocket);
 
 /** Stands in for WebSocket: records the URL and never connects. */
 class InertWebSocket {
@@ -344,8 +344,8 @@ export async function connectWorker(fake: FakeChrome, connected: () => boolean) 
   vi.stubGlobal("WebSocket", NativeWebSocket);
   for (const l of fake.chrome.runtime.onStartup.listeners) l();
   await vi.waitFor(() => expect(connected()).toBe(true), { timeout: 3_000 });
-  // The hub counts it connected once it sent its welcome; the worker answers requests only after
-  // it checked the welcome's proof (asynchronously), and drops any that come before.
+  // The hub counts it connected once it sent its welcome; the worker is connected only after
+  // it checked the welcome's proof (asynchronously).
   await vi.waitFor(async () => expect(await fake.pageMessage("popup.html", { type: "popup:status" })).toMatchObject({ state: "connected" }), { timeout: 3_000 });
   return {
     /** A pairing change makes the worker reconnect, here to a socket that never opens. */
