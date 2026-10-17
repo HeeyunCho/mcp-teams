@@ -445,7 +445,14 @@ async function resolve(conversation, ctx = null) {
     ctx?.check();
     return describe(q.split(";messageid=")[0], data);
   }
-  return teams.resolveConversation(q, await teamsAndChats(false, ctx));
+  const data = await teamsAndChats(false, ctx);
+  try {
+    return teams.resolveConversation(q, data);
+  } catch (err) {
+    // Untitled chats are found by their members' names: without them a match can be missed.
+    if (data.namesThrottled?.chats) err.message += ` ${namesNote("Chat names")}`;
+    throw err;
+  }
 }
 
 /** What we know about a conversation id from the lists. */
