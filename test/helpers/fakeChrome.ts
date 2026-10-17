@@ -128,7 +128,11 @@ export function createFakeChrome({ services = {}, captured = [...TEAMS_SERVICES]
 
   const routeOf = (url: string): { service: Service; path: string } | null => {
     if (url.startsWith(`${SHAREPOINT_ORIGIN}/`) || /^https:\/\/[a-z0-9-]+\.sharepoint\.com\//i.test(url)) return { service: "sharepoint", path: url };
-    for (const s of TEAMS_SERVICES) if (url.startsWith(BASES[s])) return { service: s, path: url.slice(BASES[s].length) };
+    for (const s of TEAMS_SERVICES) {
+      // The default base, or whatever base the test captured for the service (another region or tenant).
+      const captured = (session.get(`capture:${s}`) as { base?: string } | undefined)?.base;
+      for (const base of [BASES[s], captured]) if (base && url.startsWith(`${base}/`)) return { service: s, path: url.slice(base.length) };
+    }
     return null;
   };
 
