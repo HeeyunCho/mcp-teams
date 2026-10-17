@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAvoz9Wexl4ZqY9YtEyBZsu/Qi5Ft5EjNUNB8b30wgt3AR8TjXI5UumcPQFBIm7ZfvBsjgrh6tBJlygsgFbZ5cB1EiI+WSz/2Wcqwz4eowKMXXPvGuDGrO+2O2zbSpTG19/MwTljI+g0TLfn8Vkoqd8z9MskKk+vCZjjV0Jk8QjVEdHypgM7H8zTuUM06SO12IIZMdeE3IURzf35zbjlfPPkJiDWoo3wB9nxAvLd57xrQhPUB/lGtCJk9mS3SY+/VwOlG5kJ9WS/RCHXcs5Qs7huIlKIatmFz7YiducvTR3DKBbjqbMTyqHzXkmkUmJRqzsYtgtKcz0C0cjFOt6uNdhwIDAQAB",
   "name": "mcp-teams bridge",
-  "version": "0.2.9",
+  "version": "0.2.10",
   "description": "Lets AI assistants (via the mcp-teams MCP server) read and search Microsoft Teams chats, channels and meeting transcripts and, with your explicit confirmation, post messages.",
   "minimum_chrome_version": "116",
   "icons": {
