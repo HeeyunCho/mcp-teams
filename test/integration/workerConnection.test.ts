@@ -22,9 +22,10 @@ afterEach(async () => {
 
 /**
  * A hub that answers hello with a welcome (proving itself like the real one, unless `forged`)
- * and sends `afterWelcome` right behind it, before the worker can have checked the proof.
+ * and sends `afterWelcome` right behind it, before the worker can have checked the proof;
+ * with `dropAfter` it then drops the connection.
  */
-async function scriptedHub(afterWelcome: object[], { forged = false } = {}) {
+async function scriptedHub(afterWelcome: object[], { forged = false, dropAfter = false } = {}) {
   const port = await freePort();
   const received: any[] = [];
   let welcomed = false;
@@ -40,6 +41,8 @@ async function scriptedHub(afterWelcome: object[], { forged = false } = {}) {
       ws.send(JSON.stringify({ type: "welcome", serverVersion: "0.0.0", proof: proof(forged ? "not-the-token" : TOKEN, "server", msg.nonce) }));
       for (const m of afterWelcome) ws.send(JSON.stringify(m));
       welcomed = true;
+      // The connection goes away before the worker can have checked the welcome.
+      if (dropAfter) ws.terminate();
     });
   });
   return { port, received, welcomed: () => welcomed, closed: () => closed };
@@ -53,6 +56,20 @@ describe("worker connection", () => {
     worker.registerListeners();
     link = await connectWorker(fake, hub.welcomed);
     await vi.waitFor(() => expect(hub.received).toContainEqual(expect.objectContaining({ type: "response", id: "r1", ok: true })), { timeout: 2_000 });
+  });
+
+  it("2.1b: a request held while its connection closed is never run (a send opens no window nobody could answer)", async () => {
+    const send = { type: "request", id: "s1", method: "requestSend", params: { conversation: "19:contoso-launch@thread.v2", text: "Hi Alex" }, timeoutMs: 60_000 };
+    const hub = await scriptedHub([send], { dropAfter: true });
+    const fake = createFakeChrome({ local: { token: TOKEN, port: hub.port } });
+    const worker = await loadWorker(fake);
+    worker.registerListeners();
+    vi.stubGlobal("WebSocket", NativeWebSocket);
+    for (const l of fake.chrome.runtime.onStartup.listeners) l();
+    await vi.waitFor(() => expect(hub.closed()).toBe(true), { timeout: 2_000 });
+    await new Promise((r) => setTimeout(r, 300));
+    expect(fake.spies.windowsCreate).not.toHaveBeenCalled();
+    expect(worker.pendingSendCount()).toBe(0);
   });
 
   it("2.1b: after a welcome without the right proof, a request that came with it is never run", async () => {
