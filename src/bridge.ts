@@ -572,14 +572,14 @@ export class ExtensionBridge {
   }
 
   /** Sends one request on a connection (an extension for the hub, the hub for a peer). */
-  private send<T>(target: WebSocket, method: string, params: unknown, timeoutMs: number, signal?: AbortSignal, until?: number): Promise<T> {
+  private send<T>(target: WebSocket, method: string, params: unknown, timeoutMs: number, signal?: AbortSignal, deadline?: number): Promise<T> {
     if (signal?.aborted) return Promise.reject(cancelledError());
     const id = randomUUID();
-    // Taken before the timer starts, so the timer never fires before this deadline.
     const now = Date.now();
-    const deadline = Math.min(now + timeoutMs, until ?? Infinity);
+    // Taken before the timer starts, so the timer never fires before it.
+    const end = Math.min(now + timeoutMs, deadline ?? Infinity);
     // A peer waits a little longer than the hub, so the hub's own timeout message wins.
-    const wait = Math.max(0, deadline - now) + (this.role === "peer" ? 5_000 : 0);
+    const wait = Math.max(0, end - now) + (this.role === "peer" ? 5_000 : 0);
     return new Promise<T>((resolve, reject) => {
       const onAbort = () => this.withdraw(id, target, cancelledError());
       const done = () => signal?.removeEventListener("abort", onAbort);
@@ -594,7 +594,7 @@ export class ExtensionBridge {
       signal?.addEventListener("abort", onAbort, { once: true });
       // deadline: when this side stops waiting (same machine, same clock), so the extension
       // sends nothing to Teams after it, however long the request took to arrive.
-      target.send(JSON.stringify({ type: "request", id, method, params, timeoutMs, deadline }));
+      target.send(JSON.stringify({ type: "request", id, method, params, timeoutMs, deadline: end }));
     });
   }
 

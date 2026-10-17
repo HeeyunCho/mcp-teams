@@ -230,13 +230,18 @@ async function runInTab(tab, url, method, headers, body, ctx = null) {
       deadline - start + SCRIPT_MARGIN_MS,
     );
   });
-  const run = chrome.scripting.executeScript({
-    target: { tabId: tab.id },
-    world: "MAIN",
-    func: pageFetch,
-    // executeScript can't pass undefined.
-    args: [url, method, headers, body ?? null, deadline],
-  });
+  const run = chrome.scripting
+    .executeScript({
+      target: { tabId: tab.id },
+      world: "MAIN",
+      func: pageFetch,
+      // executeScript can't pass undefined.
+      args: [url, method, headers, body ?? null, deadline],
+    })
+    // E.g. the tab closed or reloaded while the request ran: it may have reached Teams.
+    .catch((err) => {
+      throw unanswered(String(err?.message ?? err));
+    });
   let injection;
   try {
     [injection] = await guarded(Promise.race([run, scriptTimeout]), ctx);
@@ -244,7 +249,7 @@ async function runInTab(tab, url, method, headers, body, ctx = null) {
     clearTimeout(timer);
   }
   const res = injection?.result;
-  if (!res) throw new Error("Could not run inside the Teams tab. Reload the Teams tab and try again.");
+  if (!res) throw unanswered("Could not run inside the Teams tab. Reload the Teams tab and try again.");
   if (res.status === 0) {
     ctx?.check(); // the deadline passed: say that rather than "Teams did not answer"
     // A fetch that failed may have been sent already (a reset connection, no answer in time).
@@ -859,7 +864,14 @@ async function createChat({ members, title }) {
 
 async function sendMessage({ conversation, newChat, people, text, threadId, subject }) {
   if (newChat) {
-    const id = await createChat(newChat);
+    let id;
+    try {
+      id = await createChat(newChat);
+    } catch (err) {
+      // Without an answer the chat may exist, but the message was never sent.
+      if (err.outcomeUnknown) err.chatMayExist = true;
+      throw err;
+    }
     const title = newChat.title ?? people.map((p) => p.name).join(", ");
     const r = await sendMessage({ conversation: { id, title }, text });
     return { ...r, newChat: true, conversationId: id };
@@ -969,9 +981,12 @@ function onConfirmMessage(msg, sender, sendResponse) {
         sendResponse({ ok: true });
       } catch (err) {
         // Without an answer the post may have gone through: saying it failed would invite a second one.
-        const reason = err.outcomeUnknown
-          ? `Sending did not finish: ${err.message} The message may have been posted: check with read_messages before sending again.`
-          : `Sending failed: ${err.message}`;
+        const cause = /[.!?]$/.test(err.message) ? err.message : `${err.message}.`;
+        const reason = err.chatMayExist
+          ? `Creating the chat did not finish: ${cause} The chat may have been created, without the message: check with list_chats before trying again.`
+          : err.outcomeUnknown
+            ? `Sending did not finish: ${cause} The message may have been posted: check with read_messages before sending again.`
+            : `Sending failed: ${err.message}`;
         p.finish({ sent: false, reason }, true);
         sendResponse({ ok: false, error: err.message });
       }
