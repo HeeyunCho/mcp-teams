@@ -1,6 +1,6 @@
 import { describe, expect, it, afterEach } from "vitest";
 import WebSocket from "ws";
-import { ExtensionBridge } from "../src/bridge.js";
+import { ExtensionBridge } from "../../src/bridge.js";
 
 const PORT = 47599;
 const ORIGIN = "chrome-extension://abcdefghijklmnop";

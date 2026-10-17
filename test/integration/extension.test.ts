@@ -3,9 +3,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import WebSocket from "ws";
-import { ExtensionBridge, isNewer, proof } from "../src/bridge.js";
-import { EXTENSION_ID, EXTENSION_ORIGIN, extensionIdFromKey, installedVersion, syncExtension, writePairing } from "../src/extension.js";
-import { pairingProof } from "../extension/teams.js";
+import { ExtensionBridge, isNewer, proof } from "../../src/bridge.js";
+import { EXTENSION_ID, EXTENSION_ORIGIN, extensionIdFromKey, installedVersion, syncExtension, writePairing } from "../../src/extension.js";
+// @ts-expect-error plain JS module shared with the extension
+import { pairingProof } from "../../extension/teams.js";
 
 const PORT = 47597;
 

@@ -1,9 +1,9 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 // @ts-expect-error plain JS module shared with the extension
-import * as teams from "../extension/teams.js";
+import * as teams from "../../extension/teams.js";
 // @ts-expect-error plain JS script without types
-import { nextVersion } from "../scripts/bump-version.mjs";
+import { nextVersion } from "../../scripts/bump-version.mjs";
 
 const OID = "99999999-8888-4777-8666-555555555555";
 
