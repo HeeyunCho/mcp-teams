@@ -4,7 +4,7 @@
  * installs the extension folder, walks the user through the one manual step per browser
  * (Load unpacked) and waits until Teams answers.
  */
-import { execFileSync, spawn } from "node:child_process";
+import { execFileSync, spawn, type ExecFileSyncOptions } from "node:child_process";
 import { existsSync } from "node:fs";
 import { join, sep } from "node:path";
 import { createInterface } from "node:readline/promises";
@@ -41,13 +41,90 @@ interface ClaudeCode {
   scope?: string;
 }
 
+/** What to start for `program args`: the file, its arguments and the extra spawn options. */
+export interface Invocation {
+  file: string;
+  args: string[];
+  /** execFileSync passes windowsVerbatimArguments on to spawn (its types omit it). */
+  options: ExecFileSyncOptions & { windowsVerbatimArguments?: boolean };
+}
+
+/**
+ * One argument for a program started through `cmd.exe /s /c`: quoted for the program's
+ * own parser (CommandLineToArgvW / a .cmd file's %*), then every character cmd treats
+ * specially escaped with ^, quotes included, so cmd never sees a quoted region and
+ * neither splits (&, |), redirects (<, >) nor expands (%VAR%, !VAR!) anything in it.
+ */
+export function cmdQuote(arg: string): string {
+  // A .cmd file re-parses %*: an inner quote would expose what follows to cmd. Windows
+  // paths can't contain quotes or line breaks, so nothing we pass ever does.
+  if (/["\r\n]/.test(arg)) throw new Error(`Cannot pass ${JSON.stringify(arg)} to a Windows command safely`);
+  const quoted = `"${arg.replace(/(\\+)$/, "$1$1")}"`;
+  return quoted.replace(/[()[\]%!^"`<>&|;, *?]/g, "^$&");
+}
+
+/**
+ * How to start a command-line program found on PATH. On Windows through cmd.exe: npm
+ * installs CLIs as .cmd files, which neither execFile finds nor (since Node 18.20.2 /
+ * 20.12.2) runs without a shell; cmd finds a .exe or a .cmd alike (PATHEXT).
+ */
+export function commandInvocation(
+  program: string,
+  args: string[],
+  platform: NodeJS.Platform = process.platform,
+  comspec: string | undefined = process.env.ComSpec,
+): Invocation {
+  if (platform !== "win32") return { file: program, args, options: {} };
+  const line = [program, ...args.map(cmdQuote)].join(" ");
+  return {
+    file: comspec || "cmd.exe",
+    args: ["/d", "/v:off", "/s", "/c", `"${line}"`],
+    options: { windowsVerbatimArguments: true, windowsHide: true },
+  };
+}
+
+/**
+ * Why `claude mcp get teams` failed: no Claude Code ("missing"), no "teams" server
+ * ("not-registered"), or a CLI that could not be started at all ("broken").
+ */
+export function claudeLookupFailure(err: unknown, platform: NodeJS.Platform = process.platform): "missing" | "not-registered" | "broken" {
+  const e = err as NodeJS.ErrnoException & { status?: number | null };
+  if (e.code === "ENOENT") return "missing";
+  // cmd.exe: "'claude' is not recognized as an internal or external command".
+  if (platform === "win32" && e.status === 9009) return "missing";
+  // A code is set only when the process could not be started (EINVAL, EACCES, …).
+  if (typeof e.code === "string") return "broken";
+  return "not-registered";
+}
+
+/**
+ * Windows: whether `program` (a .exe, .cmd, …) is on PATH. Asked of where.exe, because
+ * cmd's exit code for an unknown command isn't reliable when started with /s /c.
+ */
+export function windowsHas(program: string, env: NodeJS.ProcessEnv = process.env): boolean {
+  try {
+    execFileSync("where.exe", [program], { stdio: "ignore", windowsHide: true, env });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function claude(args: string[], options: ExecFileSyncOptions): string {
+  const inv = commandInvocation("claude", args);
+  return execFileSync(inv.file, inv.args, { ...inv.options, ...options }) as string;
+}
+
 /** Claude Code is configured through its CLI. */
 function planClaudeCode(cmd: ServerCommand): ClaudeCode | null {
+  if (process.platform === "win32" && !windowsHas("claude")) return null;
   let out: string;
   try {
-    out = execFileSync("claude", ["mcp", "get", "teams"], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+    out = claude(["mcp", "get", "teams"], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
   } catch (err) {
-    return (err as NodeJS.ErrnoException).code === "ENOENT" ? null : { status: "added" };
+    const failure = claudeLookupFailure(err);
+    if (failure === "broken") todo(`Claude Code: could not run its CLI (${(err as Error).message}). Register by hand: claude mcp add teams`);
+    return failure === "not-registered" ? { status: "added" } : null;
   }
   if (out.includes(cmd.command) && cmd.args.every((a) => out.includes(a))) return { status: "unchanged" };
   if (!out.includes("mcp-teams")) return { status: "foreign" };
@@ -58,8 +135,8 @@ function planClaudeCode(cmd: ServerCommand): ClaudeCode | null {
 
 function applyClaudeCode(plan: ClaudeCode, cmd: ServerCommand) {
   const scope = plan.scope ?? "user";
-  if (plan.status === "updated") execFileSync("claude", ["mcp", "remove", "teams", "-s", scope], { stdio: "ignore" });
-  execFileSync("claude", ["mcp", "add", "--scope", scope, "teams", "--", cmd.command, ...cmd.args], { stdio: "ignore" });
+  if (plan.status === "updated") claude(["mcp", "remove", "teams", "-s", scope], { stdio: "ignore" });
+  claude(["mcp", "add", "--scope", scope, "teams", "--", cmd.command, ...cmd.args], { stdio: "ignore" });
 }
 
 const STATUS_TEXT: Record<string, string> = {
@@ -123,8 +200,10 @@ async function registerApps(yes: boolean) {
 
 // ------------------------------------------------------------------ browsers
 
-interface Browser {
+export interface Browser {
   name: "Chrome" | "Edge";
+  /** Windows: the browser's exe, started directly. */
+  exe?: string;
   page: string;
   /** Where Developer mode is on that page. */
   devMode: string;
@@ -135,6 +214,7 @@ function installedBrowsers(): Browser[] {
   const chrome: Browser = { name: "Chrome", page: "chrome://extensions", devMode: "top right" };
   const edge: Browser = { name: "Edge", page: "edge://extensions", devMode: "in the left sidebar" };
   const has = (paths: string[]) => paths.some((p) => p && existsSync(p));
+  const find = (paths: string[]) => paths.find((p) => existsSync(p));
   const which = (bin: string) => {
     try {
       execFileSync("which", [bin], { stdio: "ignore" });
@@ -151,10 +231,12 @@ function installedBrowsers(): Browser[] {
   }
   if (process.platform === "win32") {
     const pf = [process.env.ProgramFiles, process.env["ProgramFiles(x86)"], process.env.LOCALAPPDATA].filter(Boolean) as string[];
-    return [
-      has(pf.map((d) => join(d, "Google", "Chrome", "Application", "chrome.exe"))) && chrome,
-      has(pf.map((d) => join(d, "Microsoft", "Edge", "Application", "msedge.exe"))) && edge,
-    ].filter((b): b is Browser => !!b);
+    const chromeExe = find(pf.map((d) => join(d, "Google", "Chrome", "Application", "chrome.exe")));
+    const edgeExe = find(pf.map((d) => join(d, "Microsoft", "Edge", "Application", "msedge.exe")));
+    const found: Browser[] = [];
+    if (chromeExe) found.push({ ...chrome, exe: chromeExe });
+    if (edgeExe) found.push({ ...edge, exe: edgeExe });
+    return found;
   }
   return [
     (which("google-chrome") || which("google-chrome-stable") || which("chromium")) && chrome,
@@ -162,17 +244,29 @@ function installedBrowsers(): Browser[] {
   ].filter((b): b is Browser => !!b);
 }
 
+/**
+ * What to start to open a folder, or a browser's internal page in that browser; null if
+ * nothing can. On Windows nothing goes through cmd, which would split a path at & or
+ * expand %…%: explorer.exe opens folders, the browser's own exe opens its page.
+ */
+export function openCommand(target: string, browser?: Browser, platform: NodeJS.Platform = process.platform): [string, string[]] | null {
+  if (platform === "darwin") {
+    const app = { Chrome: "Google Chrome", Edge: "Microsoft Edge" };
+    return ["open", browser ? ["-a", app[browser.name], target] : [target]];
+  }
+  if (platform === "win32") {
+    if (!browser) return ["explorer.exe", [target]];
+    return browser.exe ? [browser.exe, [target]] : null;
+  }
+  return [browser ? (browser.name === "Edge" ? "microsoft-edge" : "google-chrome") : "xdg-open", [target]];
+}
+
 /** Opens a folder, or a browser's internal page in that browser. Best effort. */
 function open(target: string, browser?: Browser) {
-  const app = browser && { darwin: { Chrome: "Google Chrome", Edge: "Microsoft Edge" }, win32: { Chrome: "chrome", Edge: "msedge" } };
-  const [cmd, args] =
-    process.platform === "darwin"
-      ? ["open", browser ? ["-a", app!.darwin[browser.name], target] : [target]]
-      : process.platform === "win32"
-        ? ["cmd", ["/c", "start", '""', ...(browser ? [app!.win32[browser.name]] : []), target]]
-        : [browser ? (browser.name === "Edge" ? "microsoft-edge" : "google-chrome") : "xdg-open", [target]];
+  const command = openCommand(target, browser);
+  if (!command) return;
   try {
-    spawn(cmd, args as string[], { stdio: "ignore", detached: true }).unref();
+    spawn(command[0], command[1], { stdio: "ignore", detached: true }).unref();
   } catch {
     // The instructions printed alongside say where to go.
   }
