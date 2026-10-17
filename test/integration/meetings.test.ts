@@ -2,7 +2,7 @@
 // against a fake chatsvc whose meeting chats page like Teams (newest first, backwardLink to
 // the next older page) and a fake OneDrive holding each call's transcript.
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { BASES, createFakeChrome, loadWorker, openedSockets, SHAREPOINT_ORIGIN, TEAMS_ORIGIN, type SentRequest } from "../helpers/fakeChrome.js";
+import { BASES, createFakeChrome, loadWorker, openedSockets, reply, SHAREPOINT_ORIGIN, TEAMS_ORIGIN, type SentRequest } from "../helpers/fakeChrome.js";
 
 /** Meeting chat n (1 = most recent). */
 const meetingId = (n: number) => `19:meeting_contoso-${String(n).padStart(3, "0")}@thread.v2`;
@@ -82,6 +82,8 @@ const sharepoint = (req: SentRequest) => {
 };
 
 const meetingChatRequests = (fake: { sent: SentRequest[] }) => fake.sent.filter((r) => r.service === "chatsvc" && /\/conversations\/[^/]*meeting_contoso[^/]*\/messages/.test(r.path));
+/** Requests for meeting n's chat. */
+const chatRequestsOf = (fake: { sent: SentRequest[] }, n: number) => meetingChatRequests(fake).filter((r) => decodeURIComponent(r.path).includes(meetingId(n)));
 
 afterEach(() => {
   vi.useRealTimers();
@@ -153,5 +155,57 @@ describe("meeting chat read once per call", () => {
     const r = await worker.handlers.getMeeting({ meeting: meetingId(1) });
     expect(meetingChatRequests(fake)).toHaveLength(4);
     expect(r.sessions.map((s: { callId: string }) => s.callId)).toEqual([callId(1)]);
+  });
+
+  it("1.3: a 401 from chatsvc empties the meeting chat cache: the next call reads the chat again", async () => {
+    let expire = false;
+    const chatsvc = chatsvcWith(1);
+    const fake = createFakeChrome({
+      services: {
+        csa: csaWith(2),
+        sharepoint,
+        chatsvc: (req) => {
+          if (!expire) return chatsvc(req);
+          expire = false;
+          // The token expired; Teams' next request brings a fresh one.
+          fake.session.set("capture:chatsvc", { base: BASES.chatsvc, region: "emea", headers: { authorization: "Bearer fake-fresh" }, at: Date.now() + 60_000 });
+          return reply(401);
+        },
+      },
+    });
+    const worker = await loadWorker(fake);
+    await worker.handlers.getMeeting({ meeting: meetingId(1) });
+    await worker.handlers.getMeeting({ meeting: meetingId(1) });
+    expect(chatRequestsOf(fake, 1)).toHaveLength(1);
+
+    expire = true;
+    await worker.handlers.getMeeting({ meeting: meetingId(2) });
+    await worker.handlers.getMeeting({ meeting: meetingId(1) });
+    expect(chatRequestsOf(fake, 1)).toHaveLength(2);
+  });
+
+  it("1.3: a meeting chat that failed to load is not cached: the next call reads it again", async () => {
+    let fail = true;
+    const chatsvc = chatsvcWith(1);
+    const fake = createFakeChrome({ services: { csa: csaWith(1), sharepoint, chatsvc: (req) => (fail ? reply(500) : chatsvc(req)) } });
+    const worker = await loadWorker(fake);
+    await expect(worker.handlers.getMeeting({ meeting: meetingId(1) })).rejects.toThrow();
+    fail = false;
+    const r = await worker.handlers.getMeeting({ meeting: meetingId(1) });
+    expect(r.sessions.map((s: { callId: string }) => s.callId)).toEqual([callId(1)]);
+    await worker.handlers.getMeeting({ meeting: meetingId(1) });
+    expect(chatRequestsOf(fake, 1)).toHaveLength(2);
+  });
+
+  it("1.3: the cache holds 50 meeting chats: a 51st evicts the oldest, which is read again", async () => {
+    const fake = createFakeChrome({ services: { csa: csaWith(51), chatsvc: chatsvcWith(1), sharepoint } });
+    const worker = await loadWorker(fake);
+    for (let n = 1; n <= 51; n++) await worker.handlers.getMeeting({ meeting: meetingId(n) });
+    expect(meetingChatRequests(fake)).toHaveLength(51);
+
+    await worker.handlers.getMeeting({ meeting: meetingId(51) }); // still cached
+    expect(chatRequestsOf(fake, 51)).toHaveLength(1);
+    await worker.handlers.getMeeting({ meeting: meetingId(1) }); // evicted
+    expect(chatRequestsOf(fake, 1)).toHaveLength(2);
   });
 });
