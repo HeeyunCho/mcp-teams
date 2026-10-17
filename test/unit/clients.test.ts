@@ -2,7 +2,7 @@ import { mkdirSync, mkdtempSync, readFileSync, writeFileSync, existsSync } from 
 import { tmpdir } from "node:os";
 import { join, posix } from "node:path";
 import { describe, expect, it } from "vitest";
-import { applyPlan, knownClients, planClients, upsertCodexToml, upsertJson } from "../src/clients.js";
+import { applyPlan, knownClients, planClients, upsertCodexToml, upsertJson } from "../../src/clients.js";
 
 const cmd = { command: "/usr/local/bin/node", args: ["/opt/mcp-teams/dist/index.js"] };
 
@@ -99,7 +99,7 @@ describe("knownClients and planClients", () => {
 
 describe("serverCommand", () => {
   it("registers npx for a copy installed from npm, and this copy otherwise", async () => {
-    const { serverCommand, NPX_COMMAND } = await import("../src/setup.js");
+    const { serverCommand, NPX_COMMAND } = await import("../../src/setup.js");
     const { sep, join } = await import("node:path");
     const npm = join(sep, "home", "u", ".npm", "_npx", "abc", "node_modules", "mcp-teams", "dist", "index.js");
     expect(serverCommand(npm)).toEqual(NPX_COMMAND);

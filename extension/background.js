@@ -23,27 +23,25 @@ let lastError = null;
  * token, sent in headers. We observe them on Teams' own requests, including those of
  * its workers, and replay them. They live in chrome.storage.session (memory only).
  */
-chrome.webRequest.onBeforeSendHeaders.addListener(
-  (details) => {
-    const svc = teams.serviceOf(details.url);
-    if (!svc) return;
-    const headers = teams.pickHeaders(details.requestHeaders);
-    if (!headers) return;
-    const capture = { base: svc.base, region: svc.region ?? null, headers, at: Date.now() };
-    const update = { [`capture:${svc.service}`]: capture };
-    if (svc.oid) update.oid = svc.oid;
-    chrome.storage.session.set(update);
-  },
-  {
-    urls: [
-      "https://teams.cloud.microsoft/api/*",
-      "https://teams.microsoft.com/api/*",
-      "https://*.ng.msg.teams.microsoft.com/*",
-      "https://substrate.office.com/*",
-    ],
-  },
-  ["requestHeaders", "extraHeaders"],
-);
+function captureSession(details) {
+  const svc = teams.serviceOf(details.url);
+  if (!svc) return;
+  const headers = teams.pickHeaders(details.requestHeaders);
+  if (!headers) return;
+  const capture = { base: svc.base, region: svc.region ?? null, headers, at: Date.now() };
+  const update = { [`capture:${svc.service}`]: capture };
+  if (svc.oid) update.oid = svc.oid;
+  chrome.storage.session.set(update);
+}
+
+const captureFilter = {
+  urls: [
+    "https://teams.cloud.microsoft/api/*",
+    "https://teams.microsoft.com/api/*",
+    "https://*.ng.msg.teams.microsoft.com/*",
+    "https://substrate.office.com/*",
+  ],
+};
 
 /**
  * Which endpoints Teams uses for meetings, recaps and files is not documented, so we log
@@ -70,22 +68,18 @@ function updateTraffic(fn) {
 
 const trafficFilter = { urls: teams.TRAFFIC_URLS, types: ["xmlhttprequest", "other", "media"] };
 
-chrome.webRequest.onBeforeSendHeaders.addListener(
-  (details) => {
-    if (!teams.isTeamsOrigin(details.initiator)) return;
-    const entry = teams.summarizeRequest(details);
-    updateTraffic((list) => teams.recordTraffic(list, entry));
-  },
-  trafficFilter,
-  ["requestHeaders", "extraHeaders"],
-);
+function recordRequest(details) {
+  if (!teams.isTeamsOrigin(details.initiator)) return;
+  const entry = teams.summarizeRequest(details);
+  updateTraffic((list) => teams.recordTraffic(list, entry));
+}
 
-chrome.webRequest.onCompleted.addListener((details) => {
+function recordCompleted(details) {
   if (!teams.isTeamsOrigin(details.initiator)) return;
   const url = new URL(details.url);
   const key = `${details.method} ${url.host}${url.pathname.slice(0, 300)}`;
   updateTraffic((list) => teams.recordStatus(list, key, details.statusCode));
-}, trafficFilter);
+}
 
 async function getCapture(service) {
   const key = `capture:${service}`;
@@ -490,7 +484,7 @@ async function fetchMessages(id, { limit, before, includeSystem, threadId }) {
   return raw;
 }
 
-const handlers = {
+export const handlers = {
   async status() {
     const tabs = await chrome.tabs.query({ url: TEAMS_URLS });
     const sessions = {};
@@ -803,13 +797,13 @@ async function askUserToConfirm(request) {
   });
 }
 
-chrome.windows.onRemoved.addListener((windowId) => {
+function onWindowRemoved(windowId) {
   for (const p of pendingSends.values()) {
     if (p.windowId === windowId) p.finish({ sent: false, reason: "The user closed the confirmation window; nothing was sent." });
   }
-});
+}
 
-chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+function onConfirmMessage(msg, sender, sendResponse) {
   // Only our own confirmation page may decide.
   if (sender.id !== chrome.runtime.id || !sender.url?.startsWith(chrome.runtime.getURL("confirm.html"))) return;
   const p = pendingSends.get(msg.id);
@@ -833,10 +827,10 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     })();
     return true;
   }
-});
+}
 
 // Popup lives at popup.html; it is allowed to query status too.
-chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+function onPopupMessage(msg, sender, sendResponse) {
   if (sender.id !== chrome.runtime.id || !sender.url?.startsWith(chrome.runtime.getURL("popup.html"))) return;
   if (msg.type === "popup:status") sendResponse({ state, lastError, version: VERSION });
   if (msg.type === "popup:reconnect") {
@@ -844,7 +838,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     connect().then(() => sendResponse({ state, lastError }));
     return true;
   }
-});
+}
 
 // ------------------------------------------------------------ bridge connection
 
@@ -947,15 +941,7 @@ async function connect() {
       }
       return;
     }
-    if (msg.type !== "request") return;
-    const handler = Object.hasOwn(handlers, msg.method) ? handlers[msg.method] : null;
-    try {
-      if (!handler) throw new Error(`Unknown method ${msg.method}`);
-      const result = await handler(msg.params ?? {});
-      socket.send(JSON.stringify({ type: "response", id: msg.id, ok: true, result }));
-    } catch (err) {
-      socket.send(JSON.stringify({ type: "response", id: msg.id, ok: false, error: err?.message ?? String(err) }));
-    }
+    await dispatch(msg, (reply) => socket.send(JSON.stringify(reply)));
   };
   socket.onclose = (ev) => {
     if (ws && ws !== socket) return; // replaced by a newer connection (reconnectNow)
@@ -982,15 +968,49 @@ async function connect() {
   };
 }
 
-chrome.alarms.create("reconnect", { periodInMinutes: 0.5 });
-chrome.alarms.onAlarm.addListener((a) => a.name === "reconnect" && connect());
-chrome.storage.onChanged.addListener((changes, area) => {
+/**
+ * Runs one request from the server with its handler and sends back the response. Anything
+ * but a request is ignored.
+ */
+export async function dispatch(msg, send) {
+  if (msg.type !== "request") return;
+  const handler = Object.hasOwn(handlers, msg.method) ? handlers[msg.method] : null;
+  try {
+    if (!handler) throw new Error(`Unknown method ${msg.method}`);
+    const result = await handler(msg.params ?? {});
+    send({ type: "response", id: msg.id, ok: true, result });
+  } catch (err) {
+    send({ type: "response", id: msg.id, ok: false, error: err?.message ?? String(err) });
+  }
+}
+
+function onStorageChanged(changes, area) {
   if (area === "local" && (changes.token || changes.port)) {
     state = "disconnected";
     reconnectNow();
     connect();
   }
-});
-chrome.runtime.onStartup.addListener(connect);
-chrome.runtime.onInstalled.addListener(connect);
-connect();
+}
+
+/** Registers the worker's chrome event listeners (no connection; see below). */
+export function registerListeners() {
+  chrome.webRequest.onBeforeSendHeaders.addListener(captureSession, captureFilter, ["requestHeaders", "extraHeaders"]);
+  chrome.webRequest.onBeforeSendHeaders.addListener(recordRequest, trafficFilter, ["requestHeaders", "extraHeaders"]);
+  chrome.webRequest.onCompleted.addListener(recordCompleted, trafficFilter);
+  chrome.windows.onRemoved.addListener(onWindowRemoved);
+  chrome.runtime.onMessage.addListener(onConfirmMessage);
+  chrome.runtime.onMessage.addListener(onPopupMessage);
+  chrome.alarms.onAlarm.addListener((a) => a.name === "reconnect" && connect());
+  chrome.storage.onChanged.addListener(onStorageChanged);
+  chrome.runtime.onStartup.addListener(connect);
+  chrome.runtime.onInstalled.addListener(connect);
+}
+
+// In the browser: listen and connect synchronously on load, as MV3 needs for its listeners
+// to wake the worker. Tests import this module under a fake chrome, where neither happens.
+const IN_EXTENSION = typeof ServiceWorkerGlobalScope === "function" && globalThis instanceof ServiceWorkerGlobalScope;
+if (IN_EXTENSION) {
+  registerListeners();
+  chrome.alarms.create("reconnect", { periodInMinutes: 0.5 });
+  connect();
+}
