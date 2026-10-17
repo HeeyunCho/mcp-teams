@@ -157,6 +157,8 @@ export function createFakeChrome({ services = {}, captured = [...TEAMS_SERVICES]
   };
   /** Tabs whose scripts wait (a frozen or discarded tab), and the wake-up of each waiting script. */
   const frozen = new Map<number, (() => void)[]>();
+  /** Scripts running in each tab, by the function that fails them (the tab closed under them). */
+  const runningScripts = new Map<number, Set<(err: Error) => void>>();
 
   const windowRemoved = event<(windowId: number) => void>();
   const runtimeMessage = event<(msg: any, sender: any, sendResponse: (r: unknown) => void) => unknown>();
@@ -172,7 +174,14 @@ export function createFakeChrome({ services = {}, captured = [...TEAMS_SERVICES]
       if (waiting) await new Promise<void>((wake) => waiting.push(wake));
       // Chrome runs the function from its source in the page, so it can use nothing of the worker.
       const script = new Function("fetch", `return (${func.toString()})`)(fakeFetch(target.tabId));
-      return [{ result: await script(...args) }];
+      const scripts = runningScripts.get(target.tabId) ?? new Set();
+      runningScripts.set(target.tabId, scripts);
+      return new Promise((resolve, reject) => {
+        scripts.add(reject);
+        script(...args)
+          .then((result: unknown) => resolve([{ result }]), reject)
+          .finally(() => scripts.delete(reject));
+      });
     }),
     tabsQuery: vi.fn(async ({ url }: { url?: string | string[] } = {}) => {
       const patterns = (url === undefined ? [] : Array.isArray(url) ? url : [url]).map(patternToRegExp);
@@ -229,10 +238,11 @@ export function createFakeChrome({ services = {}, captured = [...TEAMS_SERVICES]
     spies,
     /** How many requests went to `service` (whose path matches `path`, if given). */
     count: (service: Service, path?: RegExp) => sent.filter((r) => r.service === service && (!path || path.test(r.path))).length,
-    /** The user closes a tab: it is no longer found, and a script can't run in it. */
+    /** The user closes a tab: it is no longer found, a script can't run in it, and one running there fails, as in Chrome. */
     closeTab(tabId: number) {
       const i = tabs.findIndex((t) => t.id === tabId);
       if (i >= 0) tabs.splice(i, 1);
+      for (const fail of runningScripts.get(tabId) ?? []) fail(new Error("The tab was closed."));
     },
     /** The tab stops running scripts (frozen or discarded): executeScript waits until wake(). */
     freezeTab(tabId: number) {

@@ -177,8 +177,35 @@ describe("send confirmation window", () => {
     await click(fake, w.id);
     const r = (await call) as { sent: boolean; reason: string };
     expect(r.sent).toBe(false);
-    expect(r.reason).toMatch(/may have been posted/);
+    // Its own sentence, after the cause: "… net::ERR_CONNECTION_RESET. The message may have been posted …"
+    expect(r.reason).toMatch(/[.!?] The message may have been posted/);
     expect(r.reason).toMatch(/read_messages before sending again/);
+  });
+
+  it("2.1: the Teams tab closing while the post runs: the outcome is unknown, so the AI is told to check before sending again", async () => {
+    const { hub, fake } = await setup(() => new Promise(() => {}));
+    const call = hub.call("requestSend", SEND, 60_000);
+    const w = await windowOpened(fake);
+    void click(fake, w.id);
+    await vi.waitFor(() => expect(posts(fake)).toBe(1));
+    fake.closeTab(1);
+    const r = (await call) as { sent: boolean; reason: string };
+    expect(r.sent).toBe(false);
+    expect(r.reason).toMatch(/[.!?] The message may have been posted/);
+  });
+
+  it("2.1: creating a new group chat gets no answer: the AI is told the chat may exist (not that the message was posted)", async () => {
+    const SAM = "8:orgid:00000000-0000-4000-8000-00000000000b";
+    const { hub, fake } = await setup(() => timedOut());
+    const call = hub.call("requestSend", { to: [ALEX, SAM], title: "Contoso launch team", text: "Hi both" }, 60_000);
+    const w = await windowOpened(fake);
+    await click(fake, w.id);
+    const r = (await call) as { sent: boolean; reason: string };
+    expect(fake.sent.filter((q) => q.service === "chatsvc" && q.method === "POST").map((q) => q.path)).toEqual(["/v1/threads"]);
+    expect(r.sent).toBe(false);
+    expect(r.reason).toMatch(/chat may have been created/);
+    expect(r.reason).toMatch(/list_chats/);
+    expect(r.reason).not.toMatch(/message may have been posted/);
   });
 
   it("2.1: a post Teams refuses (HTTP error) after the click is a known failure, without that warning", async () => {
