@@ -279,8 +279,10 @@ export type FakeChrome = ReturnType<typeof createFakeChrome>;
 
 /** The service worker's exports (extension/background.js). */
 export interface Worker {
-  handlers: Record<string, (params: any) => Promise<any>>;
-  dispatch: (msg: { type: string; id?: string; method?: string; params?: unknown; timeoutMs?: number }, send: (reply: object) => void) => Promise<void>;
+  /** Each handler; the bridge's requests also pass a request context (see dispatch). */
+  handlers: Record<string, (params: any, ctx?: unknown) => Promise<any>>;
+  /** Runs a request as the bridge sends it ({ timeoutMs, deadline }), or a { type: "cancel", id }. */
+  dispatch: (msg: { type: string; id?: string; method?: string; params?: unknown; timeoutMs?: number; deadline?: number }, send: (reply: object) => void) => Promise<void>;
   registerListeners: () => void;
   /** How many confirmation windows wait for the user's decision. */
   pendingSendCount: () => number;

@@ -7,7 +7,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { registerTools } from "../../src/tools.js";
 import { bridgeHarness, TOKEN, until, type BridgeHarness } from "../helpers/bridgeHarness.js";
-import { connectWorker, createFakeChrome, loadWorker, ME_OID, openedSockets, type FakeChrome, type SentRequest, type Worker } from "../helpers/fakeChrome.js";
+import { connectWorker, createFakeChrome, loadWorker, ME_OID, networkError, openedSockets, reply, timedOut, type FakeChrome, type SentRequest, type Worker } from "../helpers/fakeChrome.js";
 
 const CHAT = "19:contoso-launch@thread.v2";
 const ALEX = "8:orgid:00000000-0000-4000-8000-00000000000a";
@@ -163,6 +163,32 @@ describe("send confirmation window", () => {
     await expect(call).resolves.toMatchObject({ sent: true });
     expect(posts(fake)).toBe(1);
     expect(worker.pendingSendCount()).toBe(0);
+  });
+
+  // A post the user clicked whose answer never came may have reached Teams: saying it failed
+  // would invite a second post (#25: a late click must never post after the AI was told it failed).
+  it.each([
+    ["Teams doesn't answer the post in time", timedOut],
+    ["the post's connection fails", () => networkError("net::ERR_CONNECTION_RESET")],
+  ])("2.1: %s after the click: the outcome is unknown, so the AI is told to check before sending again", async (_, answer) => {
+    const { hub, fake } = await setup(() => answer());
+    const call = hub.call("requestSend", SEND, 60_000);
+    const w = await windowOpened(fake);
+    await click(fake, w.id);
+    const r = (await call) as { sent: boolean; reason: string };
+    expect(r.sent).toBe(false);
+    expect(r.reason).toMatch(/may have been posted/);
+    expect(r.reason).toMatch(/read_messages before sending again/);
+  });
+
+  it("2.1: a post Teams refuses (HTTP error) after the click is a known failure, without that warning", async () => {
+    const { hub, fake } = await setup(() => reply(403, { message: "Forbidden" }));
+    const call = hub.call("requestSend", SEND, 60_000);
+    const w = await windowOpened(fake);
+    await click(fake, w.id);
+    const r = (await call) as { sent: boolean; reason: string };
+    expect(r).toMatchObject({ sent: false, reason: expect.stringMatching(/^Sending failed: Teams HTTP 403/) });
+    expect(r.reason).not.toMatch(/may have been posted/);
   });
 
   it("1.2: a replaced extension connection is told to cancel its pending calls before it closes", async () => {

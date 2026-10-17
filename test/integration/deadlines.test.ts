@@ -63,6 +63,31 @@ describe("deadlines", () => {
     expect(fake.count("csa")).toBe(1);
   });
 
+  it("2.1: a request whose deadline (sent by the server) has already passed sends nothing and says so", async () => {
+    const fake = createFakeChrome({ services: { csa } });
+    const worker = await loadWorker(fake);
+    const replies: any[] = [];
+    await worker.dispatch({ type: "request", id: "r1", method: "listChats", params: {}, timeoutMs: 60_000, deadline: Date.now() - 1 }, (r) => replies.push(r));
+    expect(replies).toEqual([expect.objectContaining({ ok: false, error: expect.stringMatching(/time limit/) })]);
+    expect(fake.sent).toHaveLength(0);
+  });
+
+  it("2.1: the hub passes a peer's deadline on to the extension, not a later one of its own", async () => {
+    h = await bridgeHarness();
+    await h.session();
+    const ext = await h.extension({ silent: true });
+    const peer = await h.session();
+    await until(() => peer.connected, 3_000, "peer sees the extension");
+    // The peer's call has 300 ms left of its 1 s (as if it had waited elsewhere first).
+    const toHub = (peer as unknown as { hub: { send: (data: string) => void } }).hub;
+    const send = toHub.send.bind(toHub);
+    const deadline = Date.now() + 300;
+    toHub.send = (data: string) => send(JSON.stringify({ ...JSON.parse(data), deadline }));
+    peer.call("listChats", {}, 1_000).catch(() => {});
+    await until(() => ext.requests().length === 1, 3_000, "the call reaches the extension");
+    expect((ext.requests()[0] as { deadline?: number }).deadline).toBe(deadline);
+  });
+
   it("2.1: a call to a frozen tab through the hub fails at its timeout; nothing stays in flight and the tab sends nothing on waking", async () => {
     h = await bridgeHarness();
     const hub = await h.session();
