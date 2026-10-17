@@ -147,26 +147,52 @@ describe("2.3: peer heartbeat", () => {
 describe("2.3: slow peers", () => {
   const LIMIT = 1024 * 1024;
 
-  it("2.3: a peer that stops reading is closed (1013) within about 2 ticks", async () => {
-    const keepAliveMs = 1_000;
+  /**
+   * A peer that stops reading while one answer far larger than the kernel's socket buffers is
+   * sent to it (on an empty buffer, so under the hard cap: only the check at the ticks can close
+   * it). The extension answers after `latencyMs`. Returns how long the hub took from when the
+   * backlog showed to dropping the peer, and the code the peer saw.
+   */
+  async function stallPeer(keepAliveMs: number, latencyMs: number) {
     h = await bridgeHarness({ ...FAST, keepAliveMs, maxPeerBufferedBytes: LIMIT });
     const hub = await h.session();
-    // One answer far larger than the kernel's socket buffers, sent while the buffer is empty
-    // (under the hard cap), so only the check at the ticks can close the peer.
     const big = "x".repeat(16 * 1024 * 1024);
-    const ext = await h.extension({ handle: () => big });
+    const ext = await h.extension({ handle: () => big, latencyMs });
     const peer = await rawPeer(h.port);
     (peer.ws as any)._socket.pause();
     peer.ws.send(JSON.stringify({ type: "request", id: "r1", method: "readMessages", params: {}, timeoutMs: 60_000 }));
     await until(() => ext.requests().length === 1, 3_000, "the request to reach the extension");
-    const t0 = Date.now();
+    // From when the backlog shows (Windows may take the whole answer into its loopback buffers,
+    // so it may never show: then from now).
+    let t0 = Date.now();
+    const peerSocket = [...(hub as any).peers][0];
+    await until(() => peerSocket.bufferedAmount > LIMIT || (hub as any).peers.size === 0, latencyMs + 4 * keepAliveMs, "the backlog");
+    if ((hub as any).peers.size) t0 = Date.now();
     await until(() => (hub as any).peers.size === 0, 4 * keepAliveMs, "the hub to drop the stalled peer");
-    expect(Date.now() - t0).toBeLessThanOrEqual(3 * keepAliveMs);
+    const tookMs = Date.now() - t0;
     (peer.ws as any)._socket.resume();
     await until(() => peer.closeCode !== undefined, 10_000, "the stalled peer to see the close");
-    // Windows may take the whole answer into its loopback buffers, so the backlog never shows;
-    // the peer, not reading, then misses a ping and is dropped without a close frame (1006).
-    expect(process.platform === "win32" ? [1006, 1013] : [1013]).toContain(peer.closeCode);
+    return { tookMs, closeCode: peer.closeCode };
+  }
+
+  // Where the backlog never shows (Windows), the peer, not reading, misses a ping instead and is
+  // dropped without a close frame (1006).
+  const SLOW_PEER_CODES = process.platform === "win32" ? [1006, 1013] : [1013];
+
+  it("2.3: a peer that stops reading is closed (1013) within about 2 ticks", async () => {
+    const keepAliveMs = 1_000;
+    const { tookMs, closeCode } = await stallPeer(keepAliveMs, 0);
+    expect(tookMs).toBeLessThanOrEqual(2 * keepAliveMs + 500);
+    expect(SLOW_PEER_CODES).toContain(closeCode);
+  }, 30_000);
+
+  it("2.3: a backlog that starts just after a tick closes the peer as slow (1013), not for the ping stuck behind it", async () => {
+    // The answer lands just after the first tick: at the second, the ping sent at the first is
+    // still queued behind the data, so the peer could not have answered it.
+    const keepAliveMs = 1_000;
+    const { tookMs, closeCode } = await stallPeer(keepAliveMs, 1.1 * keepAliveMs);
+    expect(tookMs).toBeLessThanOrEqual(2 * keepAliveMs + 500);
+    expect(SLOW_PEER_CODES).toContain(closeCode);
   }, 30_000);
 
   it("2.3: over 4x the limit, a peer that doesn't read is closed (1013) at once, between ticks", async () => {
