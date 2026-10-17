@@ -119,11 +119,17 @@ describe("MCP server end to end", () => {
     expect(calls.at(-1)).toEqual({ method: "listChats", params: { query: "bo", unreadOnly: true, limit: 30 } });
   });
 
-  it("reads messages and cuts long texts, replies too", async () => {
+  it("1.4: reads messages, asks the extension to cut long texts, and cuts them itself for an extension that did not", async () => {
     const { data } = await call("read_messages", { conversation: "Engineering/General", max_length: 100, reply_to: "1" });
-    expect(calls.at(-1)?.params).toEqual({ conversation: "Engineering/General", limit: 30, threadId: "1", includeSystem: false });
+    expect(calls.at(-1)?.params).toEqual({ conversation: "Engineering/General", limit: 30, threadId: "1", includeSystem: false, maxLength: 100 });
     expect(data.messages[0]).toMatchObject({ text: `${"x".repeat(100)}…`, truncated: true });
     expect(data.messages[0].replies[0]).toMatchObject({ text: `${"y".repeat(100)}…`, truncated: true });
+  });
+
+  it("1.1: refuses a cursor longer than 4096 characters without asking the extension", async () => {
+    const before = calls.length;
+    expect((await call("read_messages", { conversation: "Engineering/General", cursor: "a".repeat(4097) })).isError).toBe(true);
+    expect(calls.length).toBe(before);
   });
 
   it("returns extension errors as tool errors", async () => {

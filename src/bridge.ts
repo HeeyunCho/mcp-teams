@@ -53,6 +53,10 @@ interface Pending {
   resolve: (value: unknown) => void;
   reject: (err: Error) => void;
   timer: NodeJS.Timeout;
+  /** Told the other side to drop it ({type:"cancel"}); its answer still counts for a moment. */
+  withdrawn?: boolean;
+  /** A send: after it is withdrawn its answer still counts for cancelGraceMs (the user may have clicked). */
+  grace?: boolean;
   /** Hub: the extension connection the request went to. */
   socket?: WebSocket;
 }
@@ -77,6 +81,8 @@ export interface BridgeOptions {
   pickStatusTimeoutMs?: number;
   /** A hub handing over to a newer server waits this long for its own calls to finish. */
   stepDownMaxWaitMs?: number;
+  /** After a call is withdrawn (timeout or cancel), how long its answer still counts. */
+  cancelGraceMs?: number;
 }
 
 export const DEFAULT_BRIDGE_OPTIONS: Readonly<Required<BridgeOptions>> = Object.freeze({
@@ -87,7 +93,10 @@ export const DEFAULT_BRIDGE_OPTIONS: Readonly<Required<BridgeOptions>> = Object.
   authTimeoutMs: 5_000,
   pickStatusTimeoutMs: 3_000,
   stepDownMaxWaitMs: 5 * 60_000,
+  cancelGraceMs: 2_000,
 });
+
+const cancelledError = () => new Error("Cancelled: the request was withdrawn.");
 
 /** True when version a is newer than b (x.y.z; anything else never counts as newer). */
 export function isNewer(a: unknown, b: unknown): boolean {
@@ -120,6 +129,7 @@ export class ExtensionBridge {
   private preferred?: WebSocket; // hub: the extension that last answered a call
   private hub?: WebSocket; // peer: the hub
   private peers = new Set<WebSocket>();
+  private peerCalls = new Map<WebSocket, Map<string, AbortController>>(); // hub: each peer's calls, by the peer's id
   private pending = new Map<string, Pending>();
   private keepAlive?: NodeJS.Timeout;
   private retry?: NodeJS.Timeout;
@@ -150,6 +160,13 @@ export class ExtensionBridge {
 
   private get maxMessageBytes(): number {
     return this.opts.maxMessageBytes;
+  }
+
+  /** Read-only, for tests: calls waiting for an answer, and (hub) peers' calls being run. */
+  get inFlight(): { pending: number; peerCalls: number } {
+    let peerCalls = 0;
+    for (const calls of this.peerCalls.values()) peerCalls += calls.size;
+    return { pending: this.pending.size, peerCalls };
   }
 
   /** Becomes the hub, or a peer of the existing hub. Keeps retrying in the background if neither works. */
@@ -244,6 +261,9 @@ export class ExtensionBridge {
     ws.on("close", () => {
       clearTimeout(authTimer);
       this.peers.delete(ws);
+      // A peer that went away can't be told the outcome of its calls: withdraw them.
+      for (const ac of this.peerCalls.get(ws)?.values() ?? []) ac.abort();
+      this.peerCalls.delete(ws);
       if (this.sockets.delete(ws)) {
         if (this.preferred === ws) this.preferred = undefined;
         this.rejectAll("Browser extension disconnected", ws);
@@ -276,6 +296,16 @@ export class ExtensionBridge {
     const key = (i: ExtensionInfo) => i.instance ?? `${i.origin}|${i.browser}`;
     for (const [s, i] of others) {
       if (key(i) === key(info) || (ours && i.origin !== TRUSTED_EXTENSION_ORIGIN) || (!ours && !i.instance)) {
+        // Its calls fail now (below), before it sees the close: have it drop them first, so an
+        // open confirmation window closes instead of posting on a click in between.
+        for (const [id, p] of this.pending) {
+          if (p.socket !== s || s.readyState !== WebSocket.OPEN) continue;
+          try {
+            s.send(JSON.stringify({ type: "cancel", id }));
+          } catch {
+            // closing anyway
+          }
+        }
         s.close(4000, "replaced");
         // Its close event comes later and no longer finds it, so fail its calls now.
         this.sockets.delete(s);
@@ -381,8 +411,9 @@ export class ExtensionBridge {
     if (msg.type === "response" && typeof msg.id === "string") this.settle(msg);
   }
 
-  /** Runs a peer's call against the extension and sends back the outcome. */
+  /** Runs a peer's call against the extension and sends back the outcome; {type:"cancel", id} withdraws it. */
   private onPeerMessage(ws: WebSocket, msg: any) {
+    if (msg.type === "cancel" && typeof msg.id === "string") return void this.peerCalls.get(ws)?.get(msg.id)?.abort();
     if (msg.type !== "request" || typeof msg.id !== "string") return;
     const reply = (body: object) => {
       try {
@@ -391,10 +422,16 @@ export class ExtensionBridge {
         console.error(`[mcp-teams] could not answer a peer: ${(err as Error).message}`);
       }
     };
-    this.call(String(msg.method), msg.params ?? {}, Number(msg.timeoutMs) || undefined).then(
-      (result) => reply({ ok: true, result }),
-      (err: Error) => reply({ ok: false, error: err.message }),
-    );
+    let calls = this.peerCalls.get(ws);
+    if (!calls) this.peerCalls.set(ws, (calls = new Map()));
+    const ac = new AbortController();
+    calls.set(msg.id, ac);
+    this.call(String(msg.method), msg.params ?? {}, Number(msg.timeoutMs) || undefined, ac.signal)
+      .then(
+        (result) => reply({ ok: true, result }),
+        (err: Error) => reply({ ok: false, error: err.message }),
+      )
+      .finally(() => calls.delete(msg.id));
   }
 
   private broadcastState() {
@@ -501,7 +538,8 @@ export class ExtensionBridge {
 
   // ------------------------------------------------------------------ calls
 
-  async call<T = unknown>(method: string, params: unknown = {}, timeoutMs = 60_000): Promise<T> {
+  /** Calls the extension. Aborting `signal` withdraws the call (see withdraw). */
+  async call<T = unknown>(method: string, params: unknown = {}, timeoutMs = 60_000, signal?: AbortSignal): Promise<T> {
     if (method === "reloadAll" && this.role === "hub") return this.reloadAll(timeoutMs) as Promise<T>;
     const target = this.role === "hub" ? await this.pickExtension() : this.role === "peer" ? this.hub : undefined;
     if (!this.connected || !target) {
@@ -511,7 +549,7 @@ export class ExtensionBridge {
           : "Browser extension is not connected. Open Chrome or Edge with the mcp-teams extension installed (run `mcp-teams setup`).";
       throw new Error(reason);
     }
-    const result = await this.send<T>(target, method, params, timeoutMs);
+    const result = await this.send<T>(target, method, params, timeoutMs, signal);
     if (this.role === "hub" && this.preferred !== target && this.sockets.has(target)) {
       this.preferred = target;
       this.updateExtensions();
@@ -530,18 +568,52 @@ export class ExtensionBridge {
   }
 
   /** Sends one request on a connection (an extension for the hub, the hub for a peer). */
-  private send<T>(target: WebSocket, method: string, params: unknown, timeoutMs: number): Promise<T> {
+  private send<T>(target: WebSocket, method: string, params: unknown, timeoutMs: number, signal?: AbortSignal): Promise<T> {
+    if (signal?.aborted) return Promise.reject(cancelledError());
     const id = randomUUID();
     // A peer waits a little longer than the hub, so the hub's own timeout message wins.
     const wait = this.role === "peer" ? timeoutMs + 5_000 : timeoutMs;
     return new Promise<T>((resolve, reject) => {
-      const timer = setTimeout(() => {
-        this.pending.delete(id);
-        reject(new Error(`Extension call '${method}' timed out`));
-      }, wait);
-      this.pending.set(id, { resolve: resolve as (v: unknown) => void, reject, timer, socket: this.role === "hub" ? target : undefined });
+      const onAbort = () => this.withdraw(id, target, cancelledError());
+      const done = () => signal?.removeEventListener("abort", onAbort);
+      const timer = setTimeout(() => this.withdraw(id, target, new Error(`Extension call '${method}' timed out`)), wait);
+      this.pending.set(id, {
+        resolve: (v) => (done(), resolve(v as T)),
+        reject: (e) => (done(), reject(e)),
+        timer,
+        grace: method === "requestSend",
+        socket: this.role === "hub" ? target : undefined,
+      });
+      signal?.addEventListener("abort", onAbort, { once: true });
       target.send(JSON.stringify({ type: "request", id, method, params, timeoutMs }));
     });
+  }
+
+  /**
+   * Withdraws a call nobody waits for any more (timed out or cancelled): tells the other side
+   * to drop it with {type:"cancel", id} (sides that don't know it ignore it). A send's answer
+   * still counts for cancelGraceMs. So a send the user already clicked reports its real
+   * outcome, and a confirmation window that closed reports "nothing was sent". Without an
+   * answer by then, the call fails with `err`.
+   */
+  private withdraw(id: string, target: WebSocket, err: Error) {
+    const p = this.pending.get(id);
+    if (!p || p.withdrawn) return;
+    p.withdrawn = true;
+    clearTimeout(p.timer);
+    const fail = () => {
+      if (this.pending.get(id) !== p) return;
+      this.pending.delete(id);
+      p.reject(err);
+    };
+    if (target.readyState !== WebSocket.OPEN) return fail();
+    try {
+      target.send(JSON.stringify({ type: "cancel", id }));
+    } catch {
+      return fail();
+    }
+    if (!p.grace) return fail();
+    p.timer = setTimeout(fail, this.opts.cancelGraceMs);
   }
 
   /**

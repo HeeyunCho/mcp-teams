@@ -235,6 +235,7 @@ async function api(service, path, { method = "GET", body, raw = false, withLocat
   if (res.status === 401) {
     // Rejected before running (expired token), so trying once more is safe. A 403 is a
     // real answer (e.g. no longer a member of that chat).
+    meetingSessionsCache.clear(); // the session (maybe the account) is changing
     cap = await refreshSession(service, tab, { quickWaitMs: 0 });
     if (!cap) throw new Error(SERVICE_HELP[service]);
     tab = await findTeamsTab(new URL(cap.base).origin);
@@ -443,8 +444,32 @@ async function resolveMeeting(meeting) {
   return info;
 }
 
-/** The calls held in a meeting chat (see teams.meetingSessions). */
+const SESSIONS_CACHE_MS = 60_000;
+const SESSIONS_CACHE_MAX = 50;
+/** "<chatsvc base>\n<meeting id>" -> { at, sessions }: one tenant's meetings never answer another's. */
+const meetingSessionsCache = new Map();
+const sessionsKey = (cap, id) => (cap ? `${cap.base}\n${id}` : null);
+
+/**
+ * The calls held in a meeting chat (see teams.meetingSessions). Cached for a minute, so
+ * read_transcript's continueFrom pages and get_meeting don't read the whole chat again.
+ */
 async function sessionsOf(info) {
+  const key = sessionsKey(await getCapture("chatsvc"), info.id);
+  const hit = key && meetingSessionsCache.get(key);
+  if (hit && Date.now() - hit.at < SESSIONS_CACHE_MS) return hit.sessions;
+  const sessions = await readSessions(info);
+  // Filed under the base the chat was read from (a 401 on the way may have changed it).
+  const keyNow = sessionsKey(await getCapture("chatsvc"), info.id);
+  if (keyNow) {
+    meetingSessionsCache.delete(keyNow);
+    if (meetingSessionsCache.size >= SESSIONS_CACHE_MAX) meetingSessionsCache.delete(meetingSessionsCache.keys().next().value);
+    meetingSessionsCache.set(keyNow, { at: Date.now(), sessions });
+  }
+  return sessions;
+}
+
+async function readSessions(info) {
   let raw;
   try {
     raw = await fetchMessages(info.id, { limit: 2000, includeSystem: true });
@@ -476,13 +501,13 @@ const messagesTarget = (id, threadId) => (threadId ? `${id};messageid=${threadId
  * fetchMessages with where each message came from: `linkOf` (message id → the link of its
  * page), `first` (the first page's link), `next` (the backward link not followed yet, if
  * any) and `capped` (stopped after MAX_PAGES pages short of `limit`). Starts at the newest
- * page, or at `from` (a link from a cursor, see teams.readMessagesCursor).
+ * page, or at `from` (a link from a cursor, see teams.readMessagesCursor), and takes only
+ * messages older than `olderThan` ({ time, id }, see teams.compareMessageKeys) if given.
  */
-async function fetchMessagePages(id, { limit, before, includeSystem, threadId, from }) {
+async function fetchMessagePages(id, { limit, olderThan, includeSystem, threadId, from }) {
   const target = messagesTarget(id, threadId);
   const first = from ?? `/v1/users/ME/conversations/${encodeURIComponent(target)}/messages?view=${encodeURIComponent(MESSAGES_VIEW)}&pageSize=${Math.min(200, Math.max(20, limit * 2))}&startTime=1`;
   let path = first;
-  const beforeMs = before ? Date.parse(before) : null;
   const raw = [];
   const linkOf = new Map();
   let counted = 0;
@@ -493,8 +518,7 @@ async function fetchMessagePages(id, { limit, before, includeSystem, threadId, f
     pages++;
     const msgs = json?.messages ?? [];
     for (const m of msgs) {
-      const t = Date.parse(m.originalarrivaltime ?? m.composetime ?? "");
-      if (beforeMs && t >= beforeMs) continue;
+      if (olderThan && teams.compareMessageKeys(teams.messageKey(m), olderThan) >= 0) continue;
       raw.push(m);
       linkOf.set(String(m.id ?? m.clientmessageid ?? ""), path);
       if (includeSystem || !/^(ThreadActivity\/|Event\/|Control\/)/i.test(m.messagetype ?? "")) counted++;
@@ -540,26 +564,25 @@ export const handlers = {
     };
   },
 
-  async readMessages({ conversation, limit = 30, before, cursor, includeSystem = false, threadId }) {
+  async readMessages({ conversation, limit = 30, before, cursor, includeSystem = false, threadId, maxLength }) {
     if (cursor && before) throw new Error("Give either cursor or before, not both (cursor already knows where to go on).");
     const conv = await resolve(conversation);
     // A cursor resumes at the page that held the oldest message returned last time, and
-    // only takes what is older than that message.
+    // only takes what is older than that message (by time, then id).
     const from = cursor ? teams.readMessagesCursor(cursor, messagesTarget(conv.id, threadId)) : null;
     if (from) before = from.before ?? undefined;
-    const { raw, linkOf, first, next, capped, pages } = await fetchMessagePages(conv.id, { limit, before, includeSystem, threadId, from: from?.path });
-    let messages = teams.buildConversation(raw, { includeSystem, channel: conv.kind === "channel" && !threadId });
-    // Newest `limit` posts (a post counts once, with its replies).
-    const more = messages.length > limit;
-    messages = messages.slice(-limit);
-    const oldest = messages[0];
+    const mark = from ? { time: from.before, id: from.id } : { time: before ?? null, id: null };
+    const olderThan = mark.time != null || mark.id != null ? mark : null;
+    const { raw, linkOf, first, next, capped, pages } = await fetchMessagePages(conv.id, { limit, olderThan, includeSystem, threadId, from: from?.path });
+    const { messages, more, oldest } = teams.newestEntries(raw, { limit, includeSystem, channel: conv.kind === "channel" && !threadId });
     let olderCursor = null;
-    if (oldest && (more || next)) olderCursor = teams.messagesCursor(linkOf.get(oldest.id) ?? first, oldest.time);
-    else if (!oldest && next) olderCursor = teams.messagesCursor(next, before ?? null);
+    if (oldest && (more || next)) olderCursor = teams.messagesCursor(linkOf.get(oldest.id) ?? first, oldest.time, oldest.id);
+    else if (!oldest && next) olderCursor = teams.messagesCursor(next, olderThan?.time ?? null, olderThan?.id ?? null);
     return {
       conversation: conv,
       count: messages.length,
-      messages,
+      // Cut here, so long texts don't cross the bridge only to be cut by the server.
+      messages: teams.capText(messages, maxLength),
       ...(more || raw.length ? { olderBefore: oldest?.time ?? null } : {}),
       ...(olderCursor ? { olderCursor } : {}),
       ...(capped && messages.length < limit
@@ -665,7 +688,10 @@ export const handlers = {
     const skipped = [];
     let total = 0;
     let shown = 0;
+    let searched = 0;
     for (const info of list) {
+      if (shown >= limit) break; // enough matches; older meetings aren't read
+      searched++;
       let sessions;
       try {
         sessions = (await sessionsOf(info)).filter((s) => s.transcriptUrl);
@@ -690,7 +716,15 @@ export const handlers = {
         }
       }
     }
-    return { query, meetingsSearched: list.length, matches: total, results, ...(skipped.length ? { skipped } : {}) };
+    const notSearched = list.length - searched;
+    return {
+      query,
+      meetingsSearched: searched,
+      matches: total,
+      results,
+      ...(skipped.length ? { skipped } : {}),
+      ...(notSearched ? { notSearched, note: `Stopped at limit: ${notSearched} older meetings with a transcript weren't searched. Raise limit to search them.` } : {}),
+    };
   },
 
   /** Read-only diagnostics for development: a GET on a service, never its headers. */
@@ -723,7 +757,7 @@ export const handlers = {
     return { reloading: true, version: VERSION };
   },
 
-  async requestSend({ conversation, to, title, text, threadId, subject }) {
+  async requestSend({ conversation, to, title, text, threadId, subject }, ctx) {
     if (!String(text ?? "").trim()) throw new Error("The message is empty.");
     if (to?.length) {
       if (conversation) throw new Error("Give either a conversation or people (to), not both.");
@@ -736,7 +770,7 @@ export const handlers = {
       const request = existing
         ? { conversation: { id: existing.id, kind: existing.kind, title: existing.title }, people, text: String(text), existingChat: true }
         : { conversation: null, newChat: { members: people.map((p) => p.mri), title: title ?? null }, people, text: String(text) };
-      return askUserToConfirm(request);
+      return askUserToConfirm(request, ctx);
     }
     const conv = await resolve(conversation);
     if (threadId && conv.kind !== "channel") throw new Error("reply_to is only for channel posts; in a chat, just send the message.");
@@ -747,7 +781,7 @@ export const handlers = {
       replyingTo = root ? teams.parseMessage(root) : { id: threadId };
     }
     const request = { conversation: conv, text: String(text), threadId: threadId ?? null, subject: subject ?? null, replyingTo };
-    return askUserToConfirm(request);
+    return askUserToConfirm(request, ctx);
   },
 };
 
@@ -812,7 +846,25 @@ async function sendMessage({ conversation, newChat, people, text, threadId, subj
  */
 const pendingSends = new Map();
 
-async function askUserToConfirm(request) {
+/** How many confirmation windows wait for the user's decision. */
+export function pendingSendCount() {
+  return pendingSends.size;
+}
+
+const WITHDRAWN = {
+  sent: false,
+  reason: "The request was withdrawn (cancelled, or the server stopped waiting), so the confirmation window was closed; nothing was sent.",
+};
+
+/**
+ * Shows the confirmation window and resolves with the outcome. When the request is
+ * withdrawn while the window is open (ctx: the server cancelled it, or the connection it
+ * came on closed), the window closes and nothing is sent, so a late click can't post after
+ * the AI was told the send failed. Once the user clicked Send, the post runs to the end
+ * and its outcome is the answer.
+ */
+async function askUserToConfirm(request, ctx) {
+  if (ctx?.cancelled) return WITHDRAWN;
   const id = crypto.randomUUID();
   const win = await chrome.windows.create({
     url: chrome.runtime.getURL(`confirm.html?id=${id}`),
@@ -822,16 +874,22 @@ async function askUserToConfirm(request) {
     focused: true,
   });
   return new Promise((resolve) => {
-    const finish = (result) => {
+    let stopWatching = () => {};
+    // fromSend: the outcome of the post the user started; anything else is ignored then.
+    const finish = (result, fromSend = false) => {
       const p = pendingSends.get(id);
-      if (!p) return;
+      if (!p || (p.sending && !fromSend)) return;
       pendingSends.delete(id);
       clearTimeout(p.timer);
+      stopWatching();
       chrome.windows.remove(p.windowId).catch(() => {});
       resolve(result);
     };
     const timer = setTimeout(() => finish({ sent: false, reason: "No decision within 5 minutes; nothing was sent." }), CONFIRM_TIMEOUT_MS);
-    pendingSends.set(id, { request, windowId: win.id, timer, finish });
+    pendingSends.set(id, { request, windowId: win.id, timer, finish, sending: false });
+    // Withdrawn while the window was opening, or later.
+    if (ctx?.cancelled) finish(WITHDRAWN);
+    else if (ctx) stopWatching = ctx.onCancel(() => finish(WITHDRAWN));
   });
 }
 
@@ -855,11 +913,13 @@ function onConfirmMessage(msg, sender, sendResponse) {
         p.finish({ sent: false, reason: "The user declined; nothing was sent." });
         return sendResponse({ ok: true });
       }
+      // From here on the post runs to the end: a withdrawal no longer closes the window.
+      p.sending = true;
       try {
-        p.finish(await sendMessage(p.request));
+        p.finish(await sendMessage(p.request), true);
         sendResponse({ ok: true });
       } catch (err) {
-        p.finish({ sent: false, reason: `Sending failed: ${err.message}` });
+        p.finish({ sent: false, reason: `Sending failed: ${err.message}` }, true);
         sendResponse({ ok: false, error: err.message });
       }
     })();
@@ -979,9 +1039,12 @@ async function connect() {
       }
       return;
     }
-    await dispatch(msg, (reply) => socket.send(JSON.stringify(reply)));
+    await dispatch(msg, (reply) => socket.readyState === WebSocket.OPEN && socket.send(JSON.stringify(reply)), socket);
   };
   socket.onclose = (ev) => {
+    // Nobody can be told the outcome of what came on this connection: withdraw it
+    // (an open confirmation window closes; nothing is sent).
+    withdrawAll(socket);
     if (ws && ws !== socket) return; // replaced by a newer connection (reconnectNow)
     ws = null;
     // When a server session ends, another one takes over the port within a second:
@@ -1006,19 +1069,56 @@ async function connect() {
   };
 }
 
+/** Requests being run, by id, so they can be withdrawn (a cancel from the server, or their connection closed). */
+const running = new Map();
+
+/** What a handler gets besides its params: whether the request was withdrawn, and onCancel(f) (returns a stop function). */
+function requestContext(conn) {
+  const listeners = new Set();
+  const ctx = {
+    conn,
+    cancelled: false,
+    cancel() {
+      if (ctx.cancelled) return;
+      ctx.cancelled = true;
+      for (const f of [...listeners]) f();
+    },
+    onCancel(f) {
+      listeners.add(f);
+      return () => listeners.delete(f);
+    },
+  };
+  return ctx;
+}
+
+/** Withdraws the requests that came on `conn`: their answers can no longer arrive. */
+function withdrawAll(conn) {
+  for (const ctx of running.values()) if (ctx.conn === conn) ctx.cancel();
+}
+
 /**
- * Runs one request from the server with its handler and sends back the response. Anything
- * but a request is ignored.
+ * Runs one request from the server with its handler and sends back the response.
+ * {type:"cancel", id} withdraws a running request that came on the same connection (`conn`);
+ * an unknown one is ignored, as is any other message.
  */
-export async function dispatch(msg, send) {
+export async function dispatch(msg, send, conn = null) {
+  if (msg.type === "cancel") {
+    const ctx = running.get(msg.id);
+    if (ctx?.conn === conn) ctx.cancel();
+    return;
+  }
   if (msg.type !== "request") return;
+  const ctx = requestContext(conn);
+  running.set(msg.id, ctx);
   const handler = Object.hasOwn(handlers, msg.method) ? handlers[msg.method] : null;
   try {
     if (!handler) throw new Error(`Unknown method ${msg.method}`);
-    const result = await handler(msg.params ?? {});
+    const result = await handler(msg.params ?? {}, ctx);
     send({ type: "response", id: msg.id, ok: true, result });
   } catch (err) {
     send({ type: "response", id: msg.id, ok: false, error: err?.message ?? String(err) });
+  } finally {
+    if (running.get(msg.id) === ctx) running.delete(msg.id);
   }
 }
 

@@ -85,13 +85,49 @@ const fromBase64Url = (s) => new TextDecoder().decode(Uint8Array.from(atob(s.rep
 
 /**
  * An opaque read_messages cursor: where to resume (a chatsvc messages link, kept as a path
- * from /v1/ so it goes to whatever base the session uses) and, optionally, the time the
- * next page must be older than.
+ * from /v1/ so it goes to whatever base the session uses) and, optionally, the message the
+ * next page must be older than: its time `before` and its `id` (see compareMessageKeys).
+ * Cursors without an id (made before ids were kept) mean "older than that time".
  */
-export function messagesCursor(link, before) {
+export function messagesCursor(link, before, id = null) {
   const s = String(link);
   const i = s.indexOf("/v1/");
-  return toBase64Url(JSON.stringify({ p: i === -1 ? s : s.slice(i), b: before ?? null }));
+  return toBase64Url(JSON.stringify({ p: i === -1 ? s : s.slice(i), b: before ?? null, ...(id != null ? { i: String(id) } : {}) }));
+}
+
+/** Ids compare as numbers when both are digits (chatsvc's are), else as plain strings. */
+export function compareMessageIds(a, b) {
+  if (/^\d+$/.test(a) && /^\d+$/.test(b)) {
+    const x = BigInt(a);
+    const y = BigInt(b);
+    return x < y ? -1 : x > y ? 1 : 0;
+  }
+  return a < b ? -1 : a > b ? 1 : 0;
+}
+
+/**
+ * When a message was sent, in ms: its time, else its id when that is digits (chatsvc ids
+ * are the arrival time in ms), else -Infinity (oldest).
+ */
+const msOfKey = ({ time, id }) => {
+  const t = time ? Date.parse(time) : NaN;
+  if (!Number.isNaN(t)) return t;
+  return id != null && /^\d{1,16}$/.test(id) ? Number(id) : -Infinity;
+};
+
+/** { time, id } of a raw chatsvc message, as parseMessage reads them. */
+export const messageKey = (m) => ({ time: isoTime(m.originalarrivaltime ?? m.composetime ?? m.composeTime), id: String(m.id ?? m.clientmessageid ?? "") });
+
+/**
+ * Orders messages by { time, id }: by time, then by id. A key `b` without an id stands for
+ * a moment: messages at that time compare equal to it (so "older than b" is strictly older).
+ */
+export function compareMessageKeys(a, b) {
+  const x = msOfKey(a);
+  const y = msOfKey(b);
+  if (x !== y) return x < y ? -1 : 1;
+  if (a.id == null || b.id == null) return 0;
+  return compareMessageIds(a.id, b.id);
 }
 
 /**
@@ -101,14 +137,15 @@ export function messagesCursor(link, before) {
  */
 export function readMessagesCursor(cursor, target) {
   const invalid = () => new Error("Not a valid cursor for this conversation. Pass olderCursor exactly as the previous read_messages call on the same conversation returned it.");
-  let p, b;
+  let p, b, i;
   try {
-    ({ p, b } = JSON.parse(fromBase64Url(String(cursor))));
+    ({ p, b, i } = JSON.parse(fromBase64Url(String(cursor))));
   } catch {
     throw invalid();
   }
-  if (typeof p !== "string" || !p.startsWith("/v1/users/ME/conversations/") || /[\\\s]/.test(p)) throw invalid();
+  if (typeof p !== "string" || !p.startsWith("/v1/users/ME/conversations/") || /[\\\s#]/.test(p)) throw invalid();
   if (b != null && (typeof b !== "string" || Number.isNaN(Date.parse(b)))) throw invalid();
+  if (i != null && (typeof i !== "string" || i.length > 128)) throw invalid();
   let url;
   try {
     url = new URL(p, "https://cursor.invalid");
@@ -125,7 +162,7 @@ export function readMessagesCursor(cursor, target) {
   }
   const ok = url.origin === "https://cursor.invalid" && url.pathname === p.split("?")[0] && segs.length === 7 && segs[6] === "messages" && id === String(target);
   if (!ok) throw invalid();
-  return { path: p, before: b ?? null };
+  return { path: p, before: b ?? null, id: i ?? null };
 }
 
 // ------------------------------------------------------------ bridge pairing
@@ -364,10 +401,50 @@ export function parseMessage(m) {
  * events dropped unless asked for. Channel replies are nested under their post.
  */
 export function buildConversation(raw, { includeSystem = false, channel = false } = {}) {
-  const msgs = raw
+  return group(ordered(raw, includeSystem), channel);
+}
+
+/** Parsed messages, oldest first by compareMessageKeys, each with its channel `root`. */
+const ordered = (raw, includeSystem) =>
+  raw
     .map((m) => ({ ...parseMessage(m), root: threadRootOf(m) }))
     .filter((m) => includeSystem || !m.system)
-    .sort((a, b) => (a.time ?? "").localeCompare(b.time ?? "") || a.id.localeCompare(b.id));
+    .sort(compareMessageKeys);
+
+/**
+ * buildConversation's newest `limit` entries (channel: posts, and replies whose post is
+ * not among them). Cuts the ordered messages so that every message after the cut is
+ * returned and none before it: `oldest` is the { time, id } of the oldest one returned,
+ * and a later page takes exactly what is older (compareMessageKeys). In a channel, a reply
+ * newer than the cut to a post older than it comes as a reply with `replyTo` on this page,
+ * and its post on a later one.
+ */
+export function newestEntries(raw, { limit, includeSystem = false, channel = false }) {
+  const msgs = ordered(raw, includeSystem);
+  let start = Math.max(0, msgs.length - limit);
+  if (channel) {
+    // Entries the messages from i on make: each post and each reply whose post is older
+    // than i. Take the longest run of newest messages that makes at most `limit`.
+    const waiting = new Map(); // post id -> replies after it, counted as entries until the post joins
+    let entries = 0;
+    start = msgs.length;
+    for (let i = msgs.length - 1; i >= 0; i--) {
+      const m = msgs[i];
+      if (m.root && m.root !== m.id) {
+        entries++;
+        waiting.set(m.root, (waiting.get(m.root) ?? 0) + 1);
+      } else {
+        entries += 1 - (waiting.get(m.id) ?? 0);
+        waiting.delete(m.id);
+      }
+      if (entries <= limit) start = i;
+    }
+  }
+  const kept = msgs.slice(start);
+  return { messages: group(kept, channel), more: start > 0, oldest: kept.length ? { time: kept[0].time, id: kept[0].id } : null };
+}
+
+function group(msgs, channel) {
   if (!channel) return msgs.map(({ root, ...m }) => m);
   const posts = [];
   const byId = new Map();
@@ -386,6 +463,25 @@ export function buildConversation(raw, { includeSystem = false, channel = false 
     posts.push(m);
   }
   return posts;
+}
+
+/** The first `n` UTF-16 units of `text`, one fewer if the last would be half a surrogate pair (an emoji). */
+export function cutAt(text, n) {
+  const code = text.charCodeAt(n - 1);
+  return text.slice(0, code >= 0xd800 && code <= 0xdbff ? n - 1 : n);
+}
+
+/**
+ * Cuts each message's text (replies too) to `maxLength` UTF-16 units plus "…", marking it
+ * `truncated`; never through an emoji. The server cuts the same way, for extensions older than this.
+ */
+export function capText(messages, maxLength) {
+  if (!maxLength) return messages;
+  const cut = (m) => {
+    const r = m.text.length > maxLength ? { ...m, text: `${cutAt(m.text, maxLength)}…`, truncated: true } : m;
+    return r.replies ? { ...r, replies: r.replies.map(cut) } : r;
+  };
+  return messages.map(cut);
 }
 
 // ------------------------------------------------------------ teams and chats

@@ -18,11 +18,14 @@ const fail = (err: unknown) => ({
   content: [{ type: "text" as const, text: err instanceof Error ? err.message : String(err) }],
 });
 
+/** Bridge errors for a call that was already sent, so its outcome is unknown (see src/bridge.ts). */
+const OUTCOME_UNKNOWN = /timed out|withdrawn|disconnected|reconnected|restarted|shutting down|connection/i;
+
 /** Wraps a handler so thrown errors become MCP tool errors instead of protocol errors. */
-function safe<A>(fn: (args: A) => Promise<ReturnType<typeof text>>) {
-  return async (args: A) => {
+function safe<A, E = unknown>(fn: (args: A, extra: E) => Promise<ReturnType<typeof text>>) {
+  return async (args: A, extra: E) => {
     try {
-      return await fn(args);
+      return await fn(args, extra);
     } catch (err) {
       return fail(err);
     }
@@ -37,12 +40,22 @@ const conversation = z
     "Which chat or channel: its id from list_chats/list_teams (19:…), 'Team/Channel' (e.g. 'Engineering/General'), a chat title, or a person's name for your 1:1 chat with them. A name must match exactly one conversation, otherwise the matches are listed.",
   );
 
-type Message = { text: string; replies?: Message[] };
+type Message = { text: string; truncated?: boolean; replies?: Message[] };
 
-/** Cuts long message texts (pasted logs, long mails) so a conversation stays readable. */
+/** The first `n` UTF-16 units of `text`, one fewer if the last would be half a surrogate pair (extension/teams.js cutAt). */
+function cutAt(text: string, n: number): string {
+  const code = text.charCodeAt(n - 1);
+  return text.slice(0, code >= 0xd800 && code <= 0xdbff ? n - 1 : n);
+}
+
+/**
+ * Cuts long message texts (pasted logs, long mails) so a conversation stays readable. The
+ * extension cuts them already (maxLength); this cuts for older extensions that don't, and
+ * leaves a text it cut alone.
+ */
 function capText<T extends Message>(messages: T[], maxLength: number): T[] {
   const cut = (m: Message): Message => {
-    const r = m.text.length > maxLength ? { ...m, text: `${m.text.slice(0, maxLength)}…`, truncated: true } : m;
+    const r = !m.truncated && m.text.length > maxLength ? { ...m, text: `${cutAt(m.text, maxLength)}…`, truncated: true } : m;
     return r.replies ? { ...r, replies: r.replies.map(cut) } : r;
   };
   return messages.map(cut) as T[];
@@ -153,11 +166,11 @@ export function registerTools(server: McpServer, bridge: ExtensionBridge, config
     {
       title: "Read a chat or channel",
       description:
-        "Reads the latest messages of a chat or channel, oldest first: sender, time, text (formatting removed), files shared and reactions. In channels, replies are nested under their post. To read further back, pass the returned olderCursor as `cursor` (with the same conversation and reply_to); it is there whenever older history exists, and costs one or two Teams requests per page. `before` (a time) also works but re-reads from the newest message each call; it gives up after 20 pages and then returns `truncated: true` with a note and an olderCursor to go on. Give cursor or before, not both. With reply_to, reads one channel post's whole thread.",
+        "Reads the latest messages of a chat or channel, oldest first: sender, time, text (formatting removed), files shared and reactions. In channels, replies are nested under their post (a reply whose post is on an older page comes on its own, with replyTo). To read further back, pass the returned olderCursor as `cursor` (with the same conversation and reply_to); it is there whenever older history exists, so keep paging while it is returned. A page usually costs one or two Teams requests, but one call reads at most 20 pages of Teams history: it may then return fewer messages than asked, even none, with `truncated: true`, a note and an olderCursor to go on. `before` (a time) also works but re-reads from the newest message each call, so it hits that limit sooner. Give cursor or before, not both. With reply_to, reads one channel post's whole thread.",
       inputSchema: {
         conversation,
         limit: z.number().int().min(1).max(200).default(30).describe("How many messages (channel: posts, each with its replies)"),
-        cursor: z.string().optional().describe("Continue from olderCursor of a previous call on the same conversation (opaque; pass it exactly as returned)"),
+        cursor: z.string().max(4096).optional().describe("Continue from olderCursor of a previous call on the same conversation (opaque; pass it exactly as returned)"),
         before: z.string().optional().describe("Only messages older than this time (ISO 8601, e.g. olderBefore from a previous call). Prefer cursor for paging"),
         reply_to: z.string().optional().describe("Channel only: the id of a post, to read its thread"),
         include_system: z.boolean().default(false).describe("Also return events such as members added or calls started"),
@@ -167,7 +180,7 @@ export function registerTools(server: McpServer, bridge: ExtensionBridge, config
     safe(async ({ conversation, limit, cursor, before, reply_to, include_system, max_length }) => {
       const r = await bridge.call<{ messages: Message[] }>(
         "readMessages",
-        { conversation, limit, cursor, before, threadId: reply_to, includeSystem: include_system },
+        { conversation, limit, cursor, before, threadId: reply_to, includeSystem: include_system, maxLength: max_length },
         READ_TIMEOUT_MS,
       );
       return text({ ...r, messages: capText(r.messages, max_length) });
@@ -292,9 +305,18 @@ export function registerTools(server: McpServer, bridge: ExtensionBridge, config
         subject: z.string().optional().describe("Channel only: a subject for a new post"),
       },
     },
-    safe(async ({ conversation, to, title, text: message, reply_to, subject }) => {
+    // A cancelled call withdraws the send: the confirmation window closes and nothing is sent.
+    safe(async ({ conversation, to, title, text: message, reply_to, subject }, extra: { signal?: AbortSignal }) => {
       if (!conversation === !to) throw new Error("Give either conversation (an existing chat or channel) or to (people to start a chat with).");
-      return text(await bridge.call("requestSend", { conversation, to, title, text: message, threadId: reply_to, subject }, SEND_TIMEOUT_MS));
+      try {
+        return text(await bridge.call("requestSend", { conversation, to, title, text: message, threadId: reply_to, subject }, SEND_TIMEOUT_MS, extra.signal));
+      } catch (err) {
+        const message = (err as Error).message;
+        // The bridge lost the call after it was sent (its own messages, also as relayed by a hub):
+        // the user may have clicked Send just before, so retrying blindly could post twice.
+        if (!OUTCOME_UNKNOWN.test(message)) throw err;
+        throw new Error(`${message} The message may have been posted if the user had just clicked Send: check with read_messages before sending again.`);
+      }
     }),
   );
 }

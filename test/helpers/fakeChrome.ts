@@ -2,7 +2,8 @@
 // tests, shaped like a browser with Teams open. The worker's requests run in a Teams tab
 // through chrome.scripting.executeScript(pageFetch); here they go to scripted fake services
 // (chatsvc, csa, mt, substrate, and SharePoint for transcripts), and the test sees each one.
-import { vi } from "vitest";
+import { expect, vi } from "vitest";
+import WsWebSocket from "ws";
 
 export type Service = "chatsvc" | "csa" | "mt" | "substrate" | "sharepoint";
 export const TEAMS_SERVICES = ["chatsvc", "csa", "mt", "substrate"] as const;
@@ -128,7 +129,11 @@ export function createFakeChrome({ services = {}, captured = [...TEAMS_SERVICES]
 
   const routeOf = (url: string): { service: Service; path: string } | null => {
     if (url.startsWith(`${SHAREPOINT_ORIGIN}/`) || /^https:\/\/[a-z0-9-]+\.sharepoint\.com\//i.test(url)) return { service: "sharepoint", path: url };
-    for (const s of TEAMS_SERVICES) if (url.startsWith(BASES[s])) return { service: s, path: url.slice(BASES[s].length) };
+    for (const s of TEAMS_SERVICES) {
+      // The default base, or whatever base the test captured for the service (another region or tenant).
+      const captured = (session.get(`capture:${s}`) as { base?: string } | undefined)?.base;
+      for (const base of [BASES[s], captured]) if (base && url.startsWith(`${base}/`)) return { service: s, path: url.slice(base.length) };
+    }
     return null;
   };
 
@@ -256,10 +261,30 @@ export interface Worker {
   handlers: Record<string, (params: any) => Promise<any>>;
   dispatch: (msg: { type: string; id?: string; method?: string; params?: unknown }, send: (reply: object) => void) => Promise<void>;
   registerListeners: () => void;
+  /** How many confirmation windows wait for the user's decision. */
+  pendingSendCount: () => number;
 }
 
 /** WebSockets the worker opened while loaded by loadWorker (none expected outside Chrome). */
 export const openedSockets: string[] = [];
+
+/**
+ * The browser WebSocket API, taken before any test stubs it: Node's own (Node 22+), else
+ * the ws package's, which implements the same API (Node 20, as in CI, has no global one).
+ */
+const NativeWebSocket = globalThis.WebSocket ?? (WsWebSocket as unknown as typeof globalThis.WebSocket);
+
+/** Stands in for WebSocket: records the URL and never connects. */
+class InertWebSocket {
+  static CONNECTING = 0;
+  static OPEN = 1;
+  readyState = 0;
+  constructor(url: string) {
+    openedSockets.push(url);
+  }
+  send() {}
+  close() {}
+}
 
 /**
  * Loads a fresh copy of the service worker against `fake` (module state such as caches
@@ -269,19 +294,30 @@ export const openedSockets: string[] = [];
 export async function loadWorker(fake: FakeChrome): Promise<Worker> {
   vi.resetModules();
   vi.stubGlobal("chrome", fake.chrome);
-  vi.stubGlobal(
-    "WebSocket",
-    class {
-      static CONNECTING = 0;
-      static OPEN = 1;
-      readyState = 0;
-      constructor(url: string) {
-        openedSockets.push(url);
-      }
-      send() {}
-      close() {}
-    },
-  );
+  vi.stubGlobal("WebSocket", InertWebSocket);
+  // As in Chrome's service worker; Node 20 (CI) has no navigator, Node 21+ one without brands.
+  vi.stubGlobal("navigator", { userAgentData: { brands: [{ brand: "Google Chrome", version: "130" }] } });
   // @ts-expect-error plain JS service worker without types
   return import("../../extension/background.js");
+}
+
+/**
+ * Connects a loaded worker (listeners registered) to a real bridge hub, as in the browser:
+ * `fake` holds the pairing token and port in chrome.storage.local. Resolves once
+ * `connected()` holds (e.g. () => hub.connected). Call disconnect() before the test ends:
+ * it leaves the worker with a socket that never connects, so it stops retrying.
+ */
+export async function connectWorker(fake: FakeChrome, connected: () => boolean) {
+  vi.stubGlobal("WebSocket", NativeWebSocket);
+  for (const l of fake.chrome.runtime.onStartup.listeners) l();
+  await vi.waitFor(() => expect(connected()).toBe(true), { timeout: 3_000 });
+  return {
+    /** A pairing change makes the worker reconnect, here to a socket that never opens. */
+    async disconnect() {
+      const before = openedSockets.length;
+      vi.stubGlobal("WebSocket", InertWebSocket);
+      await fake.chrome.storage.local.set({ token: `${String(fake.local.get("token"))}-changed` });
+      await vi.waitFor(() => expect(openedSockets.length).toBeGreaterThan(before));
+    },
+  };
 }
