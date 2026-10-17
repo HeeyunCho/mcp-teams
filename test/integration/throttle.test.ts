@@ -3,7 +3,7 @@
 // without the names it couldn't look up says so. The real worker (extension/background.js)
 // runs under a fake chrome; the waits are real (one or two seconds).
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { createFakeChrome, loadWorker, ME_OID, openedSockets, reply, type Worker } from "../helpers/fakeChrome.js";
+import { BASES, createFakeChrome, loadWorker, ME_OID, openedSockets, reply, TEAMS_ORIGIN, type Worker } from "../helpers/fakeChrome.js";
 
 const ALEX = "8:orgid:00000000-0000-4000-8000-000000000002";
 const SAM = "8:orgid:00000000-0000-4000-8000-000000000003";
@@ -159,5 +159,59 @@ describe("throttling (429 with Retry-After)", () => {
     const { reply: r } = await request(worker, "readMessages", { conversation: "Alex Doe" }, 10_000);
     // On its own line, after the lookup's own message (which may end in a list of ids).
     expect(r).toMatchObject({ ok: false, error: expect.stringMatching(/\nChat names missing \(throttled\)/) });
+  });
+
+  it("2.2: names that fail to load for another reason are noted too, with the reason, not as throttled", async () => {
+    const fake = createFakeChrome({ services: { csa, mt: () => reply(500, { message: "Internal error" }) } });
+    const worker = await loadWorker(fake);
+    const { reply: r } = await request(worker, "listChats", {}, 10_000);
+    expect(r).toMatchObject({ ok: true });
+    expect(r.result.note).toMatch(/Chat names missing: .*Teams HTTP 500 \(mt\)/);
+    expect(r.result.note).not.toMatch(/throttled/);
+  });
+
+  it("2.2: a person given by id for a new chat is named after Teams' throttle, not shown as the raw id", async () => {
+    let calls = 0;
+    const fake = createFakeChrome({ services: { csa, mt: (req) => (calls++ === 0 ? throttled("1") : profiles(req)) } });
+    const worker = await loadWorker(fake);
+    worker.registerListeners();
+    void worker.dispatch({ type: "request", id: "s1", method: "requestSend", params: { to: [ALEX], text: "Hi Alex" }, timeoutMs: 60_000 }, () => {});
+    await vi.waitFor(() => expect(fake.spies.windowsCreate).toHaveBeenCalledTimes(1), { timeout: 4_000 });
+    const id = /id=([^&]+)/.exec(fake.spies.windowsCreate.mock.calls[0][0]!.url!)![1];
+    const shown = (await fake.pageMessage(`confirm.html?id=${id}`, { type: "confirm:get", id })) as { request: { people: { name: string }[] } };
+    expect(shown.request.people.map((p) => p.name)).toEqual(["Alex Doe"]);
+  });
+
+  it("2.2: a person given by id whose name can't be looked up before the deadline fails the send as busy (no window with a raw id)", async () => {
+    const fake = createFakeChrome({ services: { csa, mt: () => throttled("5") } });
+    const worker = await loadWorker(fake);
+    const { reply: r } = await request(worker, "requestSend", { to: [ALEX], text: "Hi Alex" }, 2_000);
+    expect(r).toMatchObject({ ok: false, error: expect.stringMatching(/Teams is busy \(throttled\)/) });
+    expect(fake.spies.windowsCreate).not.toHaveBeenCalled();
+  });
+
+  it("2.2: a throttle on one service base doesn't hold calls to another (another region or tenant)", async () => {
+    const other = `${TEAMS_ORIGIN}/api/csa/amer`;
+    const fake = createFakeChrome({ services: { csa: (req) => (req.url.startsWith(`${BASES.csa}/`) ? throttled("5") : csa()), mt: profiles } });
+    const worker = await loadWorker(fake);
+    const first = await request(worker, "listTeams", {}, 1_000);
+    expect(first.reply).toMatchObject({ ok: false, error: expect.stringMatching(/Teams is busy \(throttled\)/) });
+    fake.session.set("capture:csa", { base: other, region: "amer", headers: { authorization: "Bearer fake-other" }, at: 2 });
+    const second = await request(worker, "listTeams", {}, 1_000);
+    expect(second.reply).toMatchObject({ ok: true });
+    expect(fake.sent.filter((q) => q.url.startsWith(`${other}/`))).toHaveLength(1);
+  });
+
+  it("2.2: get_meeting calls a missing organizer name throttled only when its own lookup was throttled", async () => {
+    let throttle = false;
+    // mt doesn't know Sam (no profile), and later throttles a different lookup.
+    const fake = createFakeChrome({ services: { csa, mt: (req) => (throttle ? throttled("5") : profiles(req).filter((p) => p.mri !== SAM)), chatsvc: () => ({ messages: [] }) } });
+    const worker = await loadWorker(fake);
+    await request(worker, "listMeetings", {}, 10_000); // the list (cached for a minute) has no name for Sam: not throttled
+    throttle = true;
+    await request(worker, "requestSend", { to: ["8:orgid:00000000-0000-4000-8000-000000000004"], text: "Hi" }, 1_000); // closes mt's gate
+    const { reply: r } = await request(worker, "getMeeting", { meeting: "Contoso review" }, 10_000);
+    expect(r).toMatchObject({ ok: true, result: { meeting: { organizer: SAM } } });
+    expect(r.result.note ?? "").not.toMatch(/throttled/);
   });
 });
