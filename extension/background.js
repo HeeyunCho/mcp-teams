@@ -196,7 +196,7 @@ async function pageFetch(url, method, headers, body, deadline) {
       body: body == null ? undefined : JSON.stringify(body),
       signal: AbortSignal.timeout(timeoutMs),
     });
-    return { status: res.status, text: await res.text(), location: res.headers.get("location") };
+    return { status: res.status, text: await res.text(), location: res.headers.get("location"), retryAfter: res.headers.get("retry-after") };
   } catch (err) {
     return { status: 0, text: "", error: err?.name === "TimeoutError" ? "timeout" : String(err?.message ?? err) };
   }
@@ -262,11 +262,64 @@ async function runInTab(tab, url, method, headers, body, ctx = null) {
   return res;
 }
 
+// ------------------------------------------------------------ throttling
+
+/** service (chatsvc, csa, mt, substrate, sharepoint) -> when it may be sent to again (ms since 1970), after a 429. */
+const gates = new Map();
+
+/** How long `service` is still throttled, in ms (0: not). */
+function gatedFor(service) {
+  const ms = (gates.get(service) ?? 0) - Date.now();
+  if (ms > 0) return ms;
+  gates.delete(service);
+  return 0;
+}
+
+const busySeconds = (ms) => Math.max(1, Math.ceil(ms / 1000));
+
+function busy(service, ms) {
+  return Object.assign(new Error(`Teams is busy (throttled) for ${busySeconds(ms)} s; try again after that.`), { throttled: true, service });
+}
+
+// A wait that would end this close to the request's deadline leaves no time for the request itself.
+const GATE_MARGIN_MS = 250;
+
+/**
+ * Before anything goes to a throttled service: waits until Teams' Retry-After is over when
+ * `wait` and that fits before the request's deadline, else fails at once as busy.
+ */
+async function passGate(service, ctx, wait) {
+  for (let ms = gatedFor(service); ms > 0; ms = gatedFor(service)) {
+    const deadline = Math.min(ctx?.deadline ?? Infinity, Date.now() + REQUEST_TIMEOUT_MS);
+    if (!wait || Date.now() + ms + GATE_MARGIN_MS > deadline) throw busy(service, ms);
+    await guarded(sleep(ms), ctx);
+  }
+  ctx?.check();
+}
+
+/**
+ * runInTab for `service`, through its gate. A 429 closes the gate for its Retry-After. Teams
+ * refused that request without running it, so a GET goes once more after the wait (when
+ * `wait` and it fits the deadline); otherwise the caller hears that Teams is busy.
+ */
+async function sendTo(service, tab, url, method, headers, body, ctx, wait) {
+  for (let attempt = 0; ; attempt++) {
+    await passGate(service, ctx, wait);
+    const res = await runInTab(tab, url, method, headers, body, ctx);
+    if (res.status !== 429) return res;
+    const until = Date.now() + teams.retryAfterMs(res.retryAfter);
+    gates.set(service, Math.max(gates.get(service) ?? 0, until));
+    if (method !== "GET" || attempt > 0) throw busy(service, gatedFor(service));
+  }
+}
+
 /**
  * One request to a Teams service. `path` is relative to the service's base URL (or a
- * full URL on it). Returns the parsed JSON (null for an empty answer).
+ * full URL on it). Returns the parsed JSON (null for an empty answer). While Teams throttles
+ * the service, the call waits that out if it fits the deadline; `wait: false` (for lookups
+ * that can be done without) fails at once as busy instead.
  */
-async function api(service, path, { method = "GET", body, raw = false, withLocation = false, ctx = null } = {}) {
+async function api(service, path, { method = "GET", body, raw = false, withLocation = false, ctx = null, wait = true } = {}) {
   ctx?.check();
   let cap = await getCapture(service);
   // Opening a tab or waiting for a session can take a minute; a withdrawn request stops waiting.
@@ -276,7 +329,7 @@ async function api(service, path, { method = "GET", body, raw = false, withLocat
     if (!cap) throw new Error(SERVICE_HELP[service]);
   }
   const urlFor = (c) => teams.serviceUrl(path, c.base);
-  let res = await runInTab(tab, urlFor(cap), method, cap.headers, body, ctx);
+  let res = await sendTo(service, tab, urlFor(cap), method, cap.headers, body, ctx, wait);
   if (res.status === 401) {
     // Rejected before running (expired token), so trying once more is safe. A 403 is a
     // real answer (e.g. no longer a member of that chat).
@@ -284,7 +337,7 @@ async function api(service, path, { method = "GET", body, raw = false, withLocat
     cap = await guarded(refreshSession(service, tab, { quickWaitMs: 0 }), ctx);
     if (!cap) throw new Error(SERVICE_HELP[service]);
     tab = await guarded(findTeamsTab(new URL(cap.base).origin), ctx);
-    res = await runInTab(tab, urlFor(cap), method, cap.headers, body, ctx);
+    res = await sendTo(service, tab, urlFor(cap), method, cap.headers, body, ctx, wait);
   }
   if (raw) return res;
   if (res.status >= 400) {
@@ -317,27 +370,42 @@ async function myMri() {
 }
 
 const LIST_CACHE_MS = 60_000;
-let listCache = null; // { at, data: { teams, chats } }
+let listCache = null; // { until, data: { teams, chats, meetings, namesThrottled } }
 
-/** Teams, channels and chats (csa), with names for untitled chats. Cached for a minute. */
+/**
+ * Teams, channels and chats (csa), with names for untitled chats. Cached for a minute, or,
+ * when Teams throttled the name lookups (`namesThrottled`: { chats, organizers }), only
+ * until the throttle is over, so the missing names are looked up again then.
+ */
 async function teamsAndChats(fresh = false, ctx = null) {
-  if (!fresh && listCache && Date.now() - listCache.at < LIST_CACHE_MS) return listCache.data;
+  if (!fresh && listCache && Date.now() < listCache.until) return listCache.data;
   const json = await api("csa", "/api/v1/teams/users/me?isPrefetch=false&enableMembershipSummary=true&enableRC2Fetch=false", { ctx });
   const data = { teams: teams.parseTeams(json), chats: teams.parseCsaChats(json), meetings: teams.parseCsaMeetings(json) };
-  await nameChats(data.chats, ctx);
-  await lookupNames(data.meetings.map((m) => m.organizer), ctx);
+  const chats = await nameChats(data.chats, ctx);
+  const organizers = await lookupNames(data.meetings.map((m) => m.organizer), ctx);
   for (const m of data.meetings) m.organizerName = names.get(m.organizer) ?? null;
-  listCache = { at: Date.now(), data };
+  data.namesThrottled = { chats, organizers };
+  listCache = { until: chats || organizers ? Date.now() + gatedFor("mt") : Date.now() + LIST_CACHE_MS, data };
   return data;
+}
+
+/** A result's note when names are missing because Teams throttled the people lookups. */
+function namesNote(what) {
+  const wait = gatedFor("mt");
+  return `${what} missing (throttled): Teams asked to slow down, so some people couldn't be looked up and are shown without their names.${wait ? ` Try again in ${busySeconds(wait)} s.` : " Try again."}`;
 }
 
 const names = new Map(); // mri -> display name; bounded, starts over when full
 const NAMES_MAX = 5000;
 
-/** Looks up display names for MRIs not seen yet (mt short profiles, 100 at a time). */
+/**
+ * Looks up display names for MRIs not seen yet (mt short profiles, 100 at a time). Returns
+ * true when some were left out because Teams throttles mt (the caller says so), else false.
+ */
 async function lookupNames(mris, ctx = null) {
   const unknown = [...new Set(mris)].filter((m) => m && !names.has(m) && /^8:/.test(m));
-  for (let i = 0; i < unknown.length; i += 100) {
+  let throttled = false;
+  for (let i = 0; i < unknown.length && !throttled; i += 100) {
     // Names that can't be looked up are left out, but a withdrawn request ends here (and isn't cached).
     ctx?.check();
     const batch = unknown.slice(i, i + 100);
@@ -345,20 +413,28 @@ async function lookupNames(mris, ctx = null) {
       method: "POST",
       body: batch,
       ctx,
-    }).catch(() => null);
+      // Names are a nicety: without them now rather than waiting out a throttle.
+      wait: false,
+    }).catch((err) => {
+      if (err?.throttled) throttled = true;
+      return null;
+    });
     if (names.size > NAMES_MAX) names.clear();
     for (const p of teams.parseProfiles(json)) if (p.mri && p.name) names.set(p.mri, p.name);
   }
   ctx?.check();
+  return throttled;
 }
 
+/** Names untitled chats by their members; true when names are missing because mt is throttled. */
 async function nameChats(chats, ctx = null) {
   const me = await myMri();
-  await lookupNames(chats.filter((c) => !c.title).flatMap((c) => c.members), ctx);
+  const throttled = await lookupNames(chats.filter((c) => !c.title).flatMap((c) => c.members), ctx);
   for (const c of chats) {
     c.memberNames = c.members.filter((m) => m !== me).map((m) => names.get(m)).filter(Boolean);
     c.title = teams.chatTitle(c, names, me);
   }
+  return throttled;
 }
 
 async function resolve(conversation, ctx = null) {
@@ -465,7 +541,7 @@ async function sharepointTab(origin) {
 async function sharepointGet(url, ctx = null) {
   if (!SHAREPOINT_URL.test(url)) throw new Error("Not a SharePoint URL");
   ctx?.check();
-  return runInTab(await guarded(sharepointTab(new URL(url).origin), ctx), url, "GET", {}, null, ctx);
+  return sendTo("sharepoint", await guarded(sharepointTab(new URL(url).origin), ctx), url, "GET", {}, null, ctx, true);
 }
 
 const transcripts = new Map(); // transcript URL -> parsed transcript; a finished transcript doesn't change
@@ -605,13 +681,15 @@ export const handlers = {
   },
 
   async listChats({ query, limit = 30, unreadOnly = false }, ctx) {
-    let chats = (await teamsAndChats(true, ctx)).chats;
+    const data = await teamsAndChats(true, ctx);
+    let chats = data.chats;
     if (unreadOnly) chats = chats.filter((c) => c.unread);
     if (query) chats = chats.filter((c) => teams.matchesWords(c.title, query) || c.memberNames?.some((n) => teams.matchesWords(n, query)));
     chats.sort((a, b) => (b.lastMessage?.time ?? "").localeCompare(a.lastMessage?.time ?? ""));
     return {
       total: chats.length,
       chats: chats.slice(0, limit).map(({ members, memberNames, lastFrom, ...c }) => ({ ...c, memberCount: members.length || undefined })),
+      ...(data.namesThrottled.chats ? { note: namesNote("Chat names") } : {}),
     };
   },
 
@@ -673,13 +751,15 @@ export const handlers = {
   },
 
   async listMeetings({ query, limit = 20, transcriptOnly = false }, ctx) {
-    let meetings = (await teamsAndChats(true, ctx)).meetings;
+    const data = await teamsAndChats(true, ctx);
+    let meetings = data.meetings;
     if (query) meetings = meetings.filter((m) => teams.matchesWords(m.title, query) || teams.matchesWords(m.organizerName, query));
     if (transcriptOnly) meetings = meetings.filter((m) => m.hasTranscript);
     meetings = [...meetings].sort((a, b) => (b.lastActivity ?? "").localeCompare(a.lastActivity ?? ""));
     return {
       total: meetings.length,
       meetings: meetings.slice(0, limit).map(({ organizer, organizerName, joinUrl, lastJoinAt, ...m }) => ({ ...m, organizer: organizerName ?? organizer })),
+      ...(data.namesThrottled.organizers ? { note: namesNote("Organizer names") } : {}),
     };
   },
 
@@ -691,6 +771,8 @@ export const handlers = {
       meeting: { ...rest, organizer: organizerName ?? organizer },
       sessionCount: sessions.length,
       sessions: sessions.slice(-limit).reverse().map(({ transcriptUrl, ...s }) => s),
+      // The list it came from is kept only until the throttle is over, so the name comes back then.
+      ...(organizer && !organizerName && gatedFor("mt") ? { note: namesNote("Organizer name") } : {}),
     };
   },
 
