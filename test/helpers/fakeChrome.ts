@@ -325,13 +325,16 @@ export async function loadWorker(fake: FakeChrome): Promise<Worker> {
 /**
  * Connects a loaded worker (listeners registered) to a real bridge hub, as in the browser:
  * `fake` holds the pairing token and port in chrome.storage.local. Resolves once
- * `connected()` holds (e.g. () => hub.connected). Call disconnect() before the test ends:
+ * `connected()` holds (e.g. () => hub.connected) and the worker says it is connected. Call disconnect() before the test ends:
  * it leaves the worker with a socket that never connects, so it stops retrying.
  */
 export async function connectWorker(fake: FakeChrome, connected: () => boolean) {
   vi.stubGlobal("WebSocket", NativeWebSocket);
   for (const l of fake.chrome.runtime.onStartup.listeners) l();
   await vi.waitFor(() => expect(connected()).toBe(true), { timeout: 3_000 });
+  // The hub counts it connected once it sent its welcome; the worker answers requests only after
+  // it checked the welcome's proof (asynchronously), and drops any that come before.
+  await vi.waitFor(async () => expect(await fake.pageMessage("popup.html", { type: "popup:status" })).toMatchObject({ state: "connected" }), { timeout: 3_000 });
   return {
     /** A pairing change makes the worker reconnect, here to a socket that never opens. */
     async disconnect() {
