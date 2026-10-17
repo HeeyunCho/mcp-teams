@@ -120,6 +120,19 @@ describe("send confirmation window", () => {
     await client.close();
   });
 
+  it("1.2: a send refused before any window opened gets no 'may have been posted' warning", async () => {
+    const refused = { call: () => Promise.reject(new Error("No chat or channel matches 'Alex Doe'.")) } as unknown as Parameters<typeof registerTools>[1];
+    const server = new McpServer({ name: "mcp-teams", version: "0.0.0" });
+    registerTools(server, refused, { port: 0, token: TOKEN });
+    const client = new Client({ name: "test", version: "0.0.0" });
+    const [a, b] = InMemoryTransport.createLinkedPair();
+    await Promise.all([server.connect(a), client.connect(b)]);
+    const r = (await client.callTool({ name: "send_message", arguments: SEND })) as { isError?: boolean; content: { text: string }[] };
+    expect(r.isError).toBe(true);
+    expect(r.content[0].text).toBe("No chat or channel matches 'Alex Doe'.");
+    await client.close();
+  });
+
   it("1.2: a click before the withdrawal posts once and the call reports the real outcome", async () => {
     let answer!: (v: unknown) => void;
     const posted = new Promise((r) => (answer = r));
