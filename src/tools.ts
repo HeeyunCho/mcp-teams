@@ -42,6 +42,12 @@ const conversation = z
 
 type Message = { text: string; truncated?: boolean; replies?: Message[] };
 
+/** The first `n` UTF-16 units of `text`, one fewer if the last would be half a surrogate pair (extension/teams.js cutAt). */
+function cutAt(text: string, n: number): string {
+  const code = text.charCodeAt(n - 1);
+  return text.slice(0, code >= 0xd800 && code <= 0xdbff ? n - 1 : n);
+}
+
 /**
  * Cuts long message texts (pasted logs, long mails) so a conversation stays readable. The
  * extension cuts them already (maxLength); this cuts for older extensions that don't, and
@@ -49,7 +55,7 @@ type Message = { text: string; truncated?: boolean; replies?: Message[] };
  */
 function capText<T extends Message>(messages: T[], maxLength: number): T[] {
   const cut = (m: Message): Message => {
-    const r = !m.truncated && m.text.length > maxLength ? { ...m, text: `${m.text.slice(0, maxLength)}…`, truncated: true } : m;
+    const r = !m.truncated && m.text.length > maxLength ? { ...m, text: `${cutAt(m.text, maxLength)}…`, truncated: true } : m;
     return r.replies ? { ...r, replies: r.replies.map(cut) } : r;
   };
   return messages.map(cut) as T[];

@@ -17,7 +17,7 @@ const MAX = 100;
 
 // Texts chosen so a cut at 100 UTF-16 units lands in awkward places.
 const TEXTS = {
-  // 99 ASCII then an emoji: the cut splits its surrogate pair.
+  // 99 ASCII then an emoji across the cut: the emoji is left out whole, never split.
   emojiAtCut: `${"a".repeat(99)}😀 and the rest of a long status update ${"b".repeat(400)}`,
   korean: `회의록 정리했습니다. ${"다음 주 배포 일정과 테스트 결과를 공유드립니다. ".repeat(30)}`,
   mixed: `Build log 🚀✅ ${"단계 ok · ".repeat(20)}${"x".repeat(20_000)}`,
