@@ -299,7 +299,12 @@ export function registerTools(server: McpServer, bridge: ExtensionBridge, config
     // A cancelled call withdraws the send: the confirmation window closes and nothing is sent.
     safe(async ({ conversation, to, title, text: message, reply_to, subject }, extra: { signal?: AbortSignal }) => {
       if (!conversation === !to) throw new Error("Give either conversation (an existing chat or channel) or to (people to start a chat with).");
-      return text(await bridge.call("requestSend", { conversation, to, title, text: message, threadId: reply_to, subject }, SEND_TIMEOUT_MS, extra.signal));
+      try {
+        return text(await bridge.call("requestSend", { conversation, to, title, text: message, threadId: reply_to, subject }, SEND_TIMEOUT_MS, extra.signal));
+      } catch (err) {
+        // No outcome came back: the user may have clicked Send just before. Retrying blindly could post twice.
+        throw new Error(`${(err as Error).message} The message may have been posted if the user had just clicked Send: check with read_messages before sending again.`);
+      }
     }),
   );
 }
