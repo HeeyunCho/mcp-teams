@@ -541,3 +541,21 @@ describe("read_messages cursor", () => {
     expect(teams.readMessagesCursor(old, CHAT)).toEqual({ path: path(CHAT), before: "2026-01-01T00:00:00.000Z", id: null });
   });
 });
+
+describe("capText", () => {
+  const lone = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
+
+  it("never ends a cut text on half an emoji: an emoji across the cut is left out whole", () => {
+    // 99 letters, then 😀 (2 UTF-16 units) at units 99-100: a cut at 100 would split it.
+    const [m] = teams.capText([{ id: "1", text: `${"a".repeat(99)}😀 from Alex Doe` }], 100);
+    expect(m.text).toBe(`${"a".repeat(99)}…`);
+    expect(m.truncated).toBe(true);
+    expect(lone.test(m.text)).toBe(false);
+  });
+
+  it("keeps an emoji that ends exactly at the cut, and cuts replies the same way", () => {
+    const [m] = teams.capText([{ id: "1", text: `${"a".repeat(98)}😀b`, replies: [{ id: "2", text: `${"한".repeat(99)}🎉!` }] }], 100);
+    expect(m.text).toBe(`${"a".repeat(98)}😀…`);
+    expect(m.replies[0].text).toBe(`${"한".repeat(99)}…`);
+  });
+});
