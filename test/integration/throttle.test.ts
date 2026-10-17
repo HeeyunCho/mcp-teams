@@ -46,33 +46,42 @@ async function request(worker: Worker, method: string, params: object, timeoutMs
 describe("throttling (429 with Retry-After)", () => {
   it("2.2: after mt answers 429 with Retry-After: 2, nothing goes to mt for 2 s, and list_chats says names are missing (throttled)", async () => {
     let busy = true;
-    const fake = createFakeChrome({ services: { csa, mt: (req) => (busy ? throttled("2") : profiles(req)) } });
+    const mtAt: number[] = []; // when each mt request was sent
+    const fake = createFakeChrome({
+      services: {
+        csa,
+        mt: (req) => {
+          mtAt.push(Date.now());
+          return busy ? throttled("2") : profiles(req);
+        },
+      },
+    });
     const worker = await loadWorker(fake);
+    const t0 = Date.now(); // the 429 comes after this, so the gate stays shut until t0 + 2 s at least
 
     const first = await request(worker, "listChats", {}, 10_000);
     expect(first.reply).toMatchObject({ ok: true });
     expect(first.reply.result.note).toMatch(/names missing \(throttled\)/i);
-    expect(fake.count("mt")).toBe(1);
-
-    // Within the 2 s: still nothing to mt, and the gap is noted again rather than cached silently.
+    expect(mtAt).toHaveLength(1);
     busy = false;
-    await sleep(1_000);
+
+    // Within the 2 s, about halfway and near the end: the gap is noted again rather than cached silently.
+    await sleep(Math.max(0, t0 + 1_000 - Date.now()));
     const second = await request(worker, "listChats", {}, 10_000);
     expect(second.reply).toMatchObject({ ok: true });
-    expect(second.reply.result.note).toMatch(/names missing \(throttled\)/i);
-    expect(fake.count("mt")).toBe(1);
-
-    // Still inside the 2 s near its end (a shorter gate would have opened by now).
-    await sleep(700);
+    if (Date.now() < t0 + 2_000) expect(second.reply.result.note).toMatch(/names missing \(throttled\)/i);
+    await sleep(Math.max(0, t0 + 1_800 - Date.now()));
     await request(worker, "listChats", {}, 10_000);
-    expect(fake.count("mt")).toBe(1);
 
     // Once the wait is over: names again, and no note.
-    await sleep(600);
+    await sleep(Math.max(0, t0 + 2_300 - Date.now()));
     const third = await request(worker, "listChats", {}, 10_000);
-    expect(fake.count("mt")).toBeGreaterThan(1);
     expect(third.reply.result.note).toBeUndefined();
     expect(third.reply.result.chats.map((c: any) => c.title)).toContain("Alex Doe, Sam Roe");
+
+    // However slow the machine: no mt request until the 2 s were over, then one again.
+    expect(mtAt.length).toBeGreaterThan(1);
+    for (const at of mtAt.slice(1)) expect(at).toBeGreaterThanOrEqual(t0 + 2_000);
   });
 
   it("2.2: list_meetings says organizer names are missing (throttled) when mt is throttled", async () => {
