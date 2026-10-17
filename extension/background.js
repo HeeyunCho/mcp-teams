@@ -394,7 +394,7 @@ async function teamsAndChats(fresh = false, ctx = null) {
   const organizers = await lookupNames(data.meetings.map((m) => m.organizer), ctx);
   for (const m of data.meetings) {
     m.organizerName = names.get(m.organizer) ?? null;
-    if (m.organizer && !m.organizerName && organizers) m.organizerNameMissing = organizers;
+    if (!m.organizerName && organizers?.mris.has(m.organizer)) m.organizerNameMissing = organizers;
   }
   data.namesMissing = { chats, organizers };
   const missing = [chats, organizers].filter(Boolean);
@@ -405,7 +405,7 @@ async function teamsAndChats(fresh = false, ctx = null) {
 
 /** A result's note when names are missing (`missing`, see lookupNames): throttled, or why. */
 function namesNote(what, missing) {
-  if (!missing.throttled) return `${what} missing: some people couldn't be looked up (${missing.error}), so they are shown without their names. Try again.`;
+  if (!missing.throttled) return `${what} missing: some people couldn't be looked up, so they are shown without their names. Try again. The lookup failed with: ${missing.error}`;
   const wait = missing.until - Date.now();
   return `${what} missing (throttled): Teams asked to slow down, so some people couldn't be looked up and are shown without their names.${wait > 0 ? ` Try again in ${busySeconds(wait)} s.` : " Try again."}`;
 }
@@ -416,13 +416,19 @@ const NAMES_MAX = 5000;
 /**
  * Looks up display names for MRIs not seen yet (mt short profiles, 100 at a time). Returns
  * null when it could ask for all of them, else why some were left out (the caller says so):
- * { throttled: true, until } while Teams throttles mt, or { error } for another failure.
+ * { throttled: true, until } while Teams throttles mt, or { error } for another failure, with
+ * `mris`: those it couldn't ask for (the failed batches, and the ones a throttle left out).
  * Names are a nicety, so it doesn't wait out a throttle unless `wait`.
  */
 async function lookupNames(mris, ctx = null, { wait = false } = {}) {
   const unknown = [...new Set(mris)].filter((m) => m && !names.has(m) && /^8:/.test(m));
   let missing = null;
-  for (let i = 0; i < unknown.length && !missing?.throttled; i += 100) {
+  const notAsked = new Set();
+  for (let i = 0; i < unknown.length; i += 100) {
+    if (missing?.throttled) {
+      for (const m of unknown.slice(i)) notAsked.add(m);
+      break;
+    }
     // Names that can't be looked up are left out, but a withdrawn request ends here (and isn't cached).
     ctx?.check();
     const batch = unknown.slice(i, i + 100);
@@ -435,13 +441,14 @@ async function lookupNames(mris, ctx = null, { wait = false } = {}) {
     }).catch((err) => {
       ctx?.check(); // a withdrawn request ends here (and isn't cached)
       missing = err?.throttled ? { throttled: true, until: err.until } : (missing ?? { error: err?.message ?? String(err) });
+      for (const m of batch) notAsked.add(m);
       return null;
     });
     if (names.size > NAMES_MAX) names.clear();
     for (const p of teams.parseProfiles(json)) if (p.mri && p.name) names.set(p.mri, p.name);
   }
   ctx?.check();
-  return missing;
+  return missing && { ...missing, mris: notAsked };
 }
 
 /** Names untitled chats by their members; returns why names are missing, if they are (see lookupNames). */
