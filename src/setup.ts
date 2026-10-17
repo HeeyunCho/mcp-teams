@@ -97,6 +97,19 @@ export function claudeLookupFailure(err: unknown, platform: NodeJS.Platform = pr
   return "not-registered";
 }
 
+/**
+ * Windows: whether `program` (a .exe, .cmd, …) is on PATH. Asked of where.exe, because
+ * cmd's exit code for an unknown command isn't reliable when started with /s /c.
+ */
+export function windowsHas(program: string, env: NodeJS.ProcessEnv = process.env): boolean {
+  try {
+    execFileSync("where.exe", [program], { stdio: "ignore", windowsHide: true, env });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function claude(args: string[], options: ExecFileSyncOptions): string {
   const inv = commandInvocation("claude", args);
   return execFileSync(inv.file, inv.args, { ...inv.options, ...options }) as string;
@@ -104,6 +117,7 @@ function claude(args: string[], options: ExecFileSyncOptions): string {
 
 /** Claude Code is configured through its CLI. */
 function planClaudeCode(cmd: ServerCommand): ClaudeCode | null {
+  if (process.platform === "win32" && !windowsHas("claude")) return null;
   let out: string;
   try {
     out = claude(["mcp", "get", "teams"], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });

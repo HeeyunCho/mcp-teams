@@ -3,7 +3,7 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { claudeLookupFailure, cmdQuote, commandInvocation, openCommand } from "../src/setup.js";
+import { claudeLookupFailure, cmdQuote, commandInvocation, openCommand, windowsHas } from "../src/setup.js";
 
 // Paths cmd.exe would otherwise split (&), expand (%...%) or treat specially (^ ( ) !).
 const tricky = [
@@ -35,7 +35,7 @@ describe("commandInvocation", () => {
   });
 
   it("falls back to cmd.exe without ComSpec", () => {
-    expect(commandInvocation("claude", [], "win32", undefined).file).toBe("cmd.exe");
+    expect(commandInvocation("claude", [], "win32", "").file).toBe("cmd.exe");
   });
 
   it("escapes every argument for cmd: no &, %, ^, ( ) or ! reaches cmd unescaped", () => {
@@ -133,13 +133,8 @@ describe.runIf(process.platform === "win32")("commandInvocation on Windows", () 
     expect(run("node", [script, ...tricky])).toEqual(tricky);
   });
 
-  it("reports a missing program as missing", () => {
-    let err: unknown;
-    try {
-      run("no-such-claude-alex-doe", []);
-    } catch (e) {
-      err = e;
-    }
-    expect(claudeLookupFailure(err, "win32")).toBe("missing");
+  it("finds a .cmd shim on PATH and reports a missing program as missing", () => {
+    expect(windowsHas("fakeclaude", env)).toBe(true);
+    expect(windowsHas("no-such-claude-alex-doe", env)).toBe(false);
   });
 });
