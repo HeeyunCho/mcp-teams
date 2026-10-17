@@ -150,6 +150,40 @@ describe("send confirmation window", () => {
     await client.close();
   });
 
+  /** send_message's answer when the bridge call fails with `message`. */
+  async function sendFailingWith(message: string) {
+    const failing = { call: () => Promise.reject(new Error(message)) } as unknown as Parameters<typeof registerTools>[1];
+    const server = new McpServer({ name: "mcp-teams", version: "0.0.0" });
+    registerTools(server, failing, { port: 0, token: TOKEN });
+    const client = new Client({ name: "test", version: "0.0.0" });
+    const [a, b] = InMemoryTransport.createLinkedPair();
+    await Promise.all([server.connect(a), client.connect(b)]);
+    const r = (await client.callTool({ name: "send_message", arguments: SEND })) as { isError?: boolean; content: { text: string }[] };
+    await client.close();
+    return r;
+  }
+
+  it("2.1: a send the extension refused before any window gets no warning, even when its reason mentions a connection", async () => {
+    // E.g. a chat lookup whose names note quotes a failed people lookup.
+    const refused = 'No chat or channel matches "Alex Doe". Use list_chats or list_teams to find it.\nChat names missing: some people couldn\'t be looked up, so they are shown without their names. Try again. The lookup failed with: Could not reach Teams: net::ERR_CONNECTION_RESET';
+    const r = await sendFailingWith(refused);
+    expect(r.isError).toBe(true);
+    expect(r.content[0].text).toBe(refused);
+  });
+
+  it.each([
+    "Extension call 'requestSend' timed out",
+    "Cancelled: the request was withdrawn.",
+    "Browser extension disconnected",
+    "Browser extension reconnected; try again.",
+    "The mcp-teams hub restarted; try again in a few seconds.",
+    "mcp-teams was updated; try again in a few seconds.",
+    "Bridge connection error: read ECONNRESET",
+  ])("2.1: the bridge losing a sent call (%s) still tells the AI to check before sending again", async (message) => {
+    const r = await sendFailingWith(message);
+    expect(r.content[0].text).toMatch(/may have been posted.*read_messages before sending again/);
+  });
+
   it("1.2: a click before the withdrawal posts once and the call reports the real outcome", async () => {
     let answer!: (v: unknown) => void;
     const posted = new Promise((r) => (answer = r));
