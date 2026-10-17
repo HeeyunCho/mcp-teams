@@ -89,6 +89,22 @@ describe("send confirmation window", () => {
     await expectWithdrawn(fake, worker, w);
   });
 
+  it("1.2: a cancelled send on a peer session is withdrawn through the hub: the window closes; nothing is sent", async () => {
+    const { hub, fake, worker } = await setup();
+    const peer = await h!.session();
+    await until(() => peer.connected, 3_000, "peer sees the extension");
+    const abort = new AbortController();
+    const call = peer.call("requestSend", SEND, 60_000, abort.signal);
+    call.catch(() => {});
+    const w = await windowOpened(fake);
+    expect(hub.inFlight).toEqual({ pending: 1, peerCalls: 1 });
+    abort.abort();
+    await expect(call).resolves.toMatchObject({ sent: false, reason: expect.stringContaining("nothing was sent") });
+    await expectWithdrawn(fake, worker, w);
+    expect(hub.inFlight).toEqual({ pending: 0, peerCalls: 0 });
+    expect(peer.inFlight.pending).toBe(0);
+  });
+
   it("1.2: cancelling send_message (MCP cancellation) closes the window; nothing is sent", async () => {
     const { hub, fake, worker } = await setup();
     const server = new McpServer({ name: "mcp-teams", version: "0.0.0" });

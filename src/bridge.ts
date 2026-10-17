@@ -162,6 +162,13 @@ export class ExtensionBridge {
     return this.opts.maxMessageBytes;
   }
 
+  /** Read-only, for tests: calls waiting for an answer, and (hub) peers' calls being run. */
+  get inFlight(): { pending: number; peerCalls: number } {
+    let peerCalls = 0;
+    for (const calls of this.peerCalls.values()) peerCalls += calls.size;
+    return { pending: this.pending.size, peerCalls };
+  }
+
   /** Becomes the hub, or a peer of the existing hub. Keeps retrying in the background if neither works. */
   async start(): Promise<void> {
     if (this.closed) return;
