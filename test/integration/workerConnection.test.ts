@@ -17,6 +17,7 @@ afterEach(async () => {
   await new Promise<void>((r) => (wss ? wss.close(() => r()) : r()));
   wss = undefined;
   vi.unstubAllGlobals();
+  vi.restoreAllMocks();
   openedSockets.length = 0;
 });
 
@@ -61,6 +62,12 @@ describe("worker connection", () => {
   it("2.1b: a request held while its connection closed is never run (a send opens no window nobody could answer)", async () => {
     const send = { type: "request", id: "s1", method: "requestSend", params: { conversation: "19:contoso-launch@thread.v2", text: "Hi Alex" }, timeoutMs: 60_000 };
     const hub = await scriptedHub([send], { dropAfter: true });
+    // A slow proof check (a busy machine), so the drop always arrives while the welcome is checked.
+    const sign = crypto.subtle.sign.bind(crypto.subtle);
+    vi.spyOn(crypto.subtle, "sign").mockImplementation(async (...args: Parameters<SubtleCrypto["sign"]>) => {
+      await new Promise((r) => setTimeout(r, 100));
+      return sign(...args);
+    });
     const fake = createFakeChrome({ local: { token: TOKEN, port: hub.port } });
     const worker = await loadWorker(fake);
     worker.registerListeners();
@@ -68,8 +75,8 @@ describe("worker connection", () => {
     for (const l of fake.chrome.runtime.onStartup.listeners) l();
     await vi.waitFor(() => expect(hub.closed()).toBe(true), { timeout: 2_000 });
     await new Promise((r) => setTimeout(r, 300));
-    // On a busy machine the check may finish before the drop arrives: then the send ran on an open
-    // connection and its close withdrew it. Either way no window is left that nobody can answer.
+    // Had the check finished first, the send would have run on an open connection and its close
+    // withdrawn it: either way no window may be left that nobody can answer.
     const opened = await Promise.all(fake.spies.windowsCreate.mock.results.map((r) => r.value));
     for (const w of opened) expect(fake.spies.windowsRemove).toHaveBeenCalledWith(w.id);
     expect(worker.pendingSendCount()).toBe(0);
