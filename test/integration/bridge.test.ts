@@ -55,6 +55,20 @@ describe("ExtensionBridge", () => {
     ws.close();
   });
 
+  it("1.2: only a send waits out the cancel grace; any other timed-out call fails at its timeout", async () => {
+    bridge = new ExtensionBridge(PORT, "secret", "0.1.0", { cancelGraceMs: 1_500 });
+    await bridge.start();
+    const ws = connectExt("secret"); // never answers
+    await waitFor(() => bridge!.connected);
+    const t0 = Date.now();
+    await expect(bridge.call("listChats", {}, 200)).rejects.toThrow(/timed out/);
+    expect(Date.now() - t0).toBeLessThan(1_000);
+    const t1 = Date.now();
+    await expect(bridge.call("requestSend", {}, 200)).rejects.toThrow(/timed out/);
+    expect(Date.now() - t1).toBeGreaterThanOrEqual(1_500);
+    ws.close();
+  });
+
   it("rejects a wrong token", async () => {
     bridge = new ExtensionBridge(PORT, "secret", "0.1.0");
     await bridge.start();
