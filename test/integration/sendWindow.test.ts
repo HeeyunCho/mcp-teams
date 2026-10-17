@@ -106,6 +106,20 @@ describe("send confirmation window", () => {
     await client.close();
   });
 
+  it("1.2: a send that fails without an outcome (hub lost) tells the AI to check the chat before retrying", async () => {
+    const lost = { call: () => Promise.reject(new Error("mcp-teams is shutting down")) } as unknown as Parameters<typeof registerTools>[1];
+    const server = new McpServer({ name: "mcp-teams", version: "0.0.0" });
+    registerTools(server, lost, { port: 0, token: TOKEN });
+    const client = new Client({ name: "test", version: "0.0.0" });
+    const [a, b] = InMemoryTransport.createLinkedPair();
+    await Promise.all([server.connect(a), client.connect(b)]);
+    const r = (await client.callTool({ name: "send_message", arguments: SEND })) as { isError?: boolean; content: { text: string }[] };
+    expect(r.isError).toBe(true);
+    expect(r.content[0].text).toMatch(/shutting down/);
+    expect(r.content[0].text).toMatch(/read_messages before sending again/);
+    await client.close();
+  });
+
   it("1.2: a click before the withdrawal posts once and the call reports the real outcome", async () => {
     let answer!: (v: unknown) => void;
     const posted = new Promise((r) => (answer = r));
