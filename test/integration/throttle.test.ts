@@ -168,6 +168,8 @@ describe("throttling (429 with Retry-After)", () => {
     expect(r).toMatchObject({ ok: true });
     expect(r.result.note).toMatch(/Chat names missing: .*Teams HTTP 500 \(mt\)/);
     expect(r.result.note).not.toMatch(/throttled/);
+    // The reason reads on its own, not as a bracket inside a bracket.
+    expect(r.result.note).not.toMatch(/\(Teams HTTP/);
   });
 
   it("2.2: a person given by id for a new chat is named after Teams' throttle, not shown as the raw id", async () => {
@@ -213,5 +215,35 @@ describe("throttling (429 with Retry-After)", () => {
     const { reply: r } = await request(worker, "getMeeting", { meeting: "Contoso review" }, 10_000);
     expect(r).toMatchObject({ ok: true, result: { meeting: { organizer: SAM } } });
     expect(r.result.note ?? "").not.toMatch(/throttled/);
+  });
+
+  it("2.2: with names looked up in batches, only organizers whose own batch was throttled are noted, not one Teams just has no name for", async () => {
+    // 101 meetings, each organized by someone else: two batches of name lookups (100, then 1).
+    const organizer = (n: number) => `8:orgid:00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
+    const meetingId = (n: number) => `19:meeting_contoso-${String(n).padStart(3, "0")}@thread.v2`;
+    const many = () => ({
+      teams: [],
+      chats: Array.from({ length: 101 }, (_, i) => ({
+        id: meetingId(i + 1),
+        chatType: "meeting",
+        title: `Contoso review ${i + 1}`,
+        meetingInformation: { subject: `Contoso review ${i + 1}`, startTime: "2026-09-30T09:00:00Z", organizerId: organizer(i + 1).slice("8:orgid:".length) },
+        members: [],
+      })),
+    });
+    // The first batch works, but Teams has no profile for organizer 1; the second (organizer 101) is
+    // throttled, so the list is kept until the throttle ends and get_meeting reads that same list.
+    const mt = (req: { body: string[] }) =>
+      req.body.includes(organizer(101)) ? throttled("5") : req.body.filter((m) => m !== organizer(1)).map((mri) => ({ mri, displayName: "Contoso User" }));
+    const fake = createFakeChrome({ services: { csa: many, mt, chatsvc: () => ({ messages: [] }) } });
+    const worker = await loadWorker(fake);
+    expect((await request(worker, "listMeetings", { limit: 200 }, 10_000)).reply.result.note).toMatch(/Organizer names missing/);
+    expect(fake.count("mt")).toBe(2);
+
+    const known = (await request(worker, "getMeeting", { meeting: meetingId(1) }, 10_000)).reply;
+    expect(known).toMatchObject({ ok: true });
+    expect(known.result.note).toBeUndefined();
+    const failed = (await request(worker, "getMeeting", { meeting: meetingId(101) }, 10_000)).reply;
+    expect(failed.result.note).toMatch(/Organizer name missing/);
   });
 });
