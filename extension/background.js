@@ -235,6 +235,7 @@ async function api(service, path, { method = "GET", body, raw = false, withLocat
   if (res.status === 401) {
     // Rejected before running (expired token), so trying once more is safe. A 403 is a
     // real answer (e.g. no longer a member of that chat).
+    meetingSessionsCache.clear(); // the session (maybe the account) is changing
     cap = await refreshSession(service, tab, { quickWaitMs: 0 });
     if (!cap) throw new Error(SERVICE_HELP[service]);
     tab = await findTeamsTab(new URL(cap.base).origin);
@@ -443,8 +444,32 @@ async function resolveMeeting(meeting) {
   return info;
 }
 
-/** The calls held in a meeting chat (see teams.meetingSessions). */
+const SESSIONS_CACHE_MS = 60_000;
+const SESSIONS_CACHE_MAX = 50;
+/** "<chatsvc base>\n<meeting id>" -> { at, sessions }: one tenant's meetings never answer another's. */
+const meetingSessionsCache = new Map();
+const sessionsKey = (cap, id) => (cap ? `${cap.base}\n${id}` : null);
+
+/**
+ * The calls held in a meeting chat (see teams.meetingSessions). Cached for a minute, so
+ * read_transcript's continueFrom pages and get_meeting don't read the whole chat again.
+ */
 async function sessionsOf(info) {
+  const key = sessionsKey(await getCapture("chatsvc"), info.id);
+  const hit = key && meetingSessionsCache.get(key);
+  if (hit && Date.now() - hit.at < SESSIONS_CACHE_MS) return hit.sessions;
+  const sessions = await readSessions(info);
+  // Filed under the base the chat was read from (a 401 on the way may have changed it).
+  const keyNow = sessionsKey(await getCapture("chatsvc"), info.id);
+  if (keyNow) {
+    meetingSessionsCache.delete(keyNow);
+    if (meetingSessionsCache.size >= SESSIONS_CACHE_MAX) meetingSessionsCache.delete(meetingSessionsCache.keys().next().value);
+    meetingSessionsCache.set(keyNow, { at: Date.now(), sessions });
+  }
+  return sessions;
+}
+
+async function readSessions(info) {
   let raw;
   try {
     raw = await fetchMessages(info.id, { limit: 2000, includeSystem: true });
@@ -666,7 +691,10 @@ export const handlers = {
     const skipped = [];
     let total = 0;
     let shown = 0;
+    let searched = 0;
     for (const info of list) {
+      if (shown >= limit) break; // enough matches; older meetings aren't read
+      searched++;
       let sessions;
       try {
         sessions = (await sessionsOf(info)).filter((s) => s.transcriptUrl);
@@ -691,7 +719,7 @@ export const handlers = {
         }
       }
     }
-    return { query, meetingsSearched: list.length, matches: total, results, ...(skipped.length ? { skipped } : {}) };
+    return { query, meetingsSearched: searched, matches: total, results, ...(skipped.length ? { skipped } : {}) };
   },
 
   /** Read-only diagnostics for development: a GET on a service, never its headers. */
