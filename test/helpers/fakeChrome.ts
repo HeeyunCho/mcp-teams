@@ -2,7 +2,7 @@
 // tests, shaped like a browser with Teams open. The worker's requests run in a Teams tab
 // through chrome.scripting.executeScript(pageFetch); here they go to scripted fake services
 // (chatsvc, csa, mt, substrate, and SharePoint for transcripts), and the test sees each one.
-import { vi } from "vitest";
+import { expect, vi } from "vitest";
 
 export type Service = "chatsvc" | "csa" | "mt" | "substrate" | "sharepoint";
 export const TEAMS_SERVICES = ["chatsvc", "csa", "mt", "substrate"] as const;
@@ -256,10 +256,27 @@ export interface Worker {
   handlers: Record<string, (params: any) => Promise<any>>;
   dispatch: (msg: { type: string; id?: string; method?: string; params?: unknown }, send: (reply: object) => void) => Promise<void>;
   registerListeners: () => void;
+  /** How many confirmation windows wait for the user's decision. */
+  pendingSendCount: () => number;
 }
 
 /** WebSockets the worker opened while loaded by loadWorker (none expected outside Chrome). */
 export const openedSockets: string[] = [];
+
+/** Node's own WebSocket (the browser API), taken before any test stubs it. */
+const NativeWebSocket = globalThis.WebSocket;
+
+/** Stands in for WebSocket: records the URL and never connects. */
+class InertWebSocket {
+  static CONNECTING = 0;
+  static OPEN = 1;
+  readyState = 0;
+  constructor(url: string) {
+    openedSockets.push(url);
+  }
+  send() {}
+  close() {}
+}
 
 /**
  * Loads a fresh copy of the service worker against `fake` (module state such as caches
@@ -269,19 +286,28 @@ export const openedSockets: string[] = [];
 export async function loadWorker(fake: FakeChrome): Promise<Worker> {
   vi.resetModules();
   vi.stubGlobal("chrome", fake.chrome);
-  vi.stubGlobal(
-    "WebSocket",
-    class {
-      static CONNECTING = 0;
-      static OPEN = 1;
-      readyState = 0;
-      constructor(url: string) {
-        openedSockets.push(url);
-      }
-      send() {}
-      close() {}
-    },
-  );
+  vi.stubGlobal("WebSocket", InertWebSocket);
   // @ts-expect-error plain JS service worker without types
   return import("../../extension/background.js");
+}
+
+/**
+ * Connects a loaded worker (listeners registered) to a real bridge hub, as in the browser:
+ * `fake` holds the pairing token and port in chrome.storage.local. Resolves once
+ * `connected()` holds (e.g. () => hub.connected). Call disconnect() before the test ends:
+ * it leaves the worker with a socket that never connects, so it stops retrying.
+ */
+export async function connectWorker(fake: FakeChrome, connected: () => boolean) {
+  vi.stubGlobal("WebSocket", NativeWebSocket);
+  for (const l of fake.chrome.runtime.onStartup.listeners) l();
+  await vi.waitFor(() => expect(connected()).toBe(true), { timeout: 3_000 });
+  return {
+    /** A pairing change makes the worker reconnect, here to a socket that never opens. */
+    async disconnect() {
+      const before = openedSockets.length;
+      vi.stubGlobal("WebSocket", InertWebSocket);
+      await fake.chrome.storage.local.set({ token: `${String(fake.local.get("token"))}-changed` });
+      await vi.waitFor(() => expect(openedSockets.length).toBeGreaterThan(before));
+    },
+  };
 }
