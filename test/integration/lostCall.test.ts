@@ -47,7 +47,10 @@ describe("lost calls", () => {
     expect(src).toMatch(/const cancelledError = \(\) => new Error\(LOST_CALL\./);
     // Socket errors too (they fail every pending call on that connection).
     const socketErrors = src.slice(src.indexOf("function describeSocketError"), src.indexOf("export class ExtensionBridge"));
-    expect(socketErrors).not.toMatch(/[`"']/);
+    // (It may compare an error code with a string, but builds no message of its own.)
+    expect(socketErrors).not.toMatch(/`/);
+    expect(socketErrors).toMatch(/LOST_CALL\.tooLarge\(/);
+    expect(socketErrors).toMatch(/LOST_CALL\.socketError\(/);
   });
 
   it("2.1: the tools ask the bridge which errors are lost calls (no copy of their own)", () => {
