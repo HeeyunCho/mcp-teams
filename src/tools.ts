@@ -157,11 +157,11 @@ export function registerTools(server: McpServer, bridge: ExtensionBridge, config
     {
       title: "Read a chat or channel",
       description:
-        "Reads the latest messages of a chat or channel, oldest first: sender, time, text (formatting removed), files shared and reactions. In channels, replies are nested under their post. To read further back, pass the returned olderCursor as `cursor` (with the same conversation and reply_to); it is there whenever older history exists, and costs one or two Teams requests per page. `before` (a time) also works but re-reads from the newest message each call; it gives up after 20 pages and then returns `truncated: true` with a note and an olderCursor to go on. Give cursor or before, not both. With reply_to, reads one channel post's whole thread.",
+        "Reads the latest messages of a chat or channel, oldest first: sender, time, text (formatting removed), files shared and reactions. In channels, replies are nested under their post (a reply whose post is on an older page comes on its own, with replyTo). To read further back, pass the returned olderCursor as `cursor` (with the same conversation and reply_to); it is there whenever older history exists, so keep paging while it is returned. A page usually costs one or two Teams requests, but one call reads at most 20 pages of Teams history: it may then return fewer messages than asked, even none, with `truncated: true`, a note and an olderCursor to go on. `before` (a time) also works but re-reads from the newest message each call, so it hits that limit sooner. Give cursor or before, not both. With reply_to, reads one channel post's whole thread.",
       inputSchema: {
         conversation,
         limit: z.number().int().min(1).max(200).default(30).describe("How many messages (channel: posts, each with its replies)"),
-        cursor: z.string().optional().describe("Continue from olderCursor of a previous call on the same conversation (opaque; pass it exactly as returned)"),
+        cursor: z.string().max(4096).optional().describe("Continue from olderCursor of a previous call on the same conversation (opaque; pass it exactly as returned)"),
         before: z.string().optional().describe("Only messages older than this time (ISO 8601, e.g. olderBefore from a previous call). Prefer cursor for paging"),
         reply_to: z.string().optional().describe("Channel only: the id of a post, to read its thread"),
         include_system: z.boolean().default(false).describe("Also return events such as members added or calls started"),
