@@ -1080,9 +1080,10 @@ async function connect() {
   let checking = null;
   socket.onopen = () => (opened = true);
   const refuse = (error) => {
+    socket.close();
+    if (ws !== socket) return; // replaced meanwhile: the newer connection's state stays
     state = "unauthorized";
     lastError = error;
-    socket.close();
   };
   socket.onmessage = async (ev) => {
     let msg;
