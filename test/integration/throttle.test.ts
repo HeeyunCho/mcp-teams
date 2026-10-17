@@ -79,6 +79,14 @@ describe("throttling (429 with Retry-After)", () => {
     expect(fake.count("mt")).toBe(1);
   });
 
+  it("2.2: get_meeting says the organizer's name is missing (throttled) when mt is throttled", async () => {
+    const fake = createFakeChrome({ services: { csa, mt: () => throttled("2"), chatsvc: () => ({ messages: [] }) } });
+    const worker = await loadWorker(fake);
+    const { reply: r } = await request(worker, "getMeeting", { meeting: "Contoso review" }, 10_000);
+    expect(r).toMatchObject({ ok: true, result: { meeting: { organizer: SAM } } });
+    expect(r.result.note).toMatch(/name missing \(throttled\)/i);
+  });
+
   it("2.2: a throttled service fails the call with 'Teams is busy (throttled)', and a call within the wait sends nothing", async () => {
     const fake = createFakeChrome({ services: { csa: () => throttled("2") } });
     const worker = await loadWorker(fake);
