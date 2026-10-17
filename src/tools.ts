@@ -1,6 +1,6 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import type { ExtensionBridge } from "./bridge.js";
+import { isLostCall, type ExtensionBridge } from "./bridge.js";
 import type { Config } from "./config.js";
 import { SERVER_VERSION } from "./config.js";
 
@@ -17,14 +17,6 @@ const fail = (err: unknown) => ({
   isError: true,
   content: [{ type: "text" as const, text: err instanceof Error ? err.message : String(err) }],
 });
-
-/**
- * The bridge's own errors for a call that was already sent, so its outcome is unknown (see
- * src/bridge.ts; a hub relays them to peers word for word). Matched at the start: an error
- * the extension answered with (it refused before any window opened) may quote such words.
- */
-const OUTCOME_UNKNOWN =
-  /^(Extension call '[^']*' timed out|Cancelled: the request was withdrawn|Browser extension (disconnected|reconnected)|The mcp-teams hub restarted|mcp-teams is shutting down|mcp-teams was updated|Bridge connection error|bridge server error|The response was too large)/;
 
 /** What the MCP SDK passes a tool besides its arguments: `signal` aborts when the AI app cancels the call. */
 type Extra = { signal?: AbortSignal };
@@ -330,7 +322,7 @@ export function registerTools(server: McpServer, bridge: ExtensionBridge, config
         const message = (err as Error).message;
         // The bridge lost the call after it was sent (its own messages, also as relayed by a hub):
         // the user may have clicked Send just before, so retrying blindly could post twice.
-        if (!OUTCOME_UNKNOWN.test(message)) throw err;
+        if (!isLostCall(message)) throw err;
         throw new Error(`${message} The message may have been posted if the user had just clicked Send: check with read_messages before sending again.`);
       }
     }),
