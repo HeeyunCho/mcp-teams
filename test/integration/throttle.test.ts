@@ -63,6 +63,7 @@ describe("throttling (429 with Retry-After)", () => {
     expect(first.reply).toMatchObject({ ok: true });
     expect(first.reply.result.note).toMatch(/names missing \(throttled\)/i);
     expect(mtAt).toHaveLength(1);
+    const t1 = Date.now(); // the 429 came before this, so the gate is open again by t1 + 2 s
     busy = false;
 
     // Within the 2 s, about halfway and near the end: the gap is noted again rather than cached silently.
@@ -74,7 +75,7 @@ describe("throttling (429 with Retry-After)", () => {
     await request(worker, "listChats", {}, 10_000);
 
     // Once the wait is over: names again, and no note.
-    await sleep(Math.max(0, t0 + 2_300 - Date.now()));
+    await sleep(Math.max(0, t1 + 2_300 - Date.now()));
     const third = await request(worker, "listChats", {}, 10_000);
     expect(third.reply.result.note).toBeUndefined();
     expect(third.reply.result.chats.map((c: any) => c.title)).toContain("Alex Doe, Sam Roe");
@@ -156,6 +157,7 @@ describe("throttling (429 with Retry-After)", () => {
     const fake = createFakeChrome({ services: { csa, mt: () => throttled("2"), chatsvc: () => ({ messages: [] }) } });
     const worker = await loadWorker(fake);
     const { reply: r } = await request(worker, "readMessages", { conversation: "Alex Doe" }, 10_000);
-    expect(r).toMatchObject({ ok: false, error: expect.stringMatching(/names missing \(throttled\)/i) });
+    // On its own line, after the lookup's own message (which may end in a list of ids).
+    expect(r).toMatchObject({ ok: false, error: expect.stringMatching(/\nChat names missing \(throttled\)/) });
   });
 });
