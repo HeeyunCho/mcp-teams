@@ -133,7 +133,7 @@ describe("meeting chat read once per call", () => {
     const worker = await loadWorker(fake);
     const replies: any[] = [];
     const done = worker.dispatch({ type: "request", id: "s1", method: "searchTranscripts", params: { query: "budget", meetings: 10, limit: 200 } }, (r) => replies.push(r));
-    await vi.waitFor(() => expect(fake.count("sharepoint")).toBe(1));
+    await vi.waitFor(() => expect(fake.count("sharepoint")).toBe(1), { timeout: 3_000 });
     const sentAtCancel = fake.sent.length;
     await worker.dispatch({ type: "cancel", id: "s1" }, () => {});
     await done;

@@ -571,6 +571,8 @@ export class ExtensionBridge {
   private send<T>(target: WebSocket, method: string, params: unknown, timeoutMs: number, signal?: AbortSignal): Promise<T> {
     if (signal?.aborted) return Promise.reject(cancelledError());
     const id = randomUUID();
+    // Taken before the timer starts, so the timer never fires before this deadline.
+    const deadline = Date.now() + timeoutMs;
     // A peer waits a little longer than the hub, so the hub's own timeout message wins.
     const wait = this.role === "peer" ? timeoutMs + 5_000 : timeoutMs;
     return new Promise<T>((resolve, reject) => {
@@ -585,7 +587,9 @@ export class ExtensionBridge {
         socket: this.role === "hub" ? target : undefined,
       });
       signal?.addEventListener("abort", onAbort, { once: true });
-      target.send(JSON.stringify({ type: "request", id, method, params, timeoutMs }));
+      // deadline: when this side stops waiting (same machine, same clock), so the extension
+      // sends nothing to Teams after it, however long the request took to arrive.
+      target.send(JSON.stringify({ type: "request", id, method, params, timeoutMs, deadline }));
     });
   }
 

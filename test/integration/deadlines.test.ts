@@ -71,7 +71,8 @@ describe("deadlines", () => {
     const worker = await loadWorker(fake);
     worker.registerListeners();
     link = await connectWorker(fake, () => hub.connected);
-    await expect(hub.call("listChats", {}, 500)).rejects.toThrow(/timed out/);
+    // The hub's timeout and the worker's deadline are the same moment: either may answer.
+    await expect(hub.call("listChats", {}, 500)).rejects.toThrow(/timed out|time limit/);
     expect(hub.inFlight).toEqual({ pending: 0, peerCalls: 0 });
     fake.wake(1);
     await sleep(100);
