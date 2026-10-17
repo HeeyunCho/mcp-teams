@@ -426,7 +426,8 @@ export class ExtensionBridge {
     if (!calls) this.peerCalls.set(ws, (calls = new Map()));
     const ac = new AbortController();
     calls.set(msg.id, ac);
-    this.call(String(msg.method), msg.params ?? {}, Number(msg.timeoutMs) || undefined, ac.signal)
+    // The peer's deadline stays the call's deadline: the extension must not go on after the peer gave up.
+    this.call(String(msg.method), msg.params ?? {}, Number(msg.timeoutMs) || undefined, ac.signal, Number(msg.deadline) || undefined)
       .then(
         (result) => reply({ ok: true, result }),
         (err: Error) => reply({ ok: false, error: err.message }),
@@ -538,8 +539,11 @@ export class ExtensionBridge {
 
   // ------------------------------------------------------------------ calls
 
-  /** Calls the extension. Aborting `signal` withdraws the call (see withdraw). */
-  async call<T = unknown>(method: string, params: unknown = {}, timeoutMs = 60_000, signal?: AbortSignal): Promise<T> {
+  /**
+   * Calls the extension. Aborting `signal` withdraws the call (see withdraw). `deadline` (ms since
+   * 1970) ends it earlier than timeoutMs, for a call relayed from a peer.
+   */
+  async call<T = unknown>(method: string, params: unknown = {}, timeoutMs = 60_000, signal?: AbortSignal, deadline?: number): Promise<T> {
     if (method === "reloadAll" && this.role === "hub") return this.reloadAll(timeoutMs) as Promise<T>;
     const target = this.role === "hub" ? await this.pickExtension() : this.role === "peer" ? this.hub : undefined;
     if (!this.connected || !target) {
@@ -549,7 +553,7 @@ export class ExtensionBridge {
           : "Browser extension is not connected. Open Chrome or Edge with the mcp-teams extension installed (run `mcp-teams setup`).";
       throw new Error(reason);
     }
-    const result = await this.send<T>(target, method, params, timeoutMs, signal);
+    const result = await this.send<T>(target, method, params, timeoutMs, signal, deadline);
     if (this.role === "hub" && this.preferred !== target && this.sockets.has(target)) {
       this.preferred = target;
       this.updateExtensions();
@@ -568,13 +572,14 @@ export class ExtensionBridge {
   }
 
   /** Sends one request on a connection (an extension for the hub, the hub for a peer). */
-  private send<T>(target: WebSocket, method: string, params: unknown, timeoutMs: number, signal?: AbortSignal): Promise<T> {
+  private send<T>(target: WebSocket, method: string, params: unknown, timeoutMs: number, signal?: AbortSignal, until?: number): Promise<T> {
     if (signal?.aborted) return Promise.reject(cancelledError());
     const id = randomUUID();
     // Taken before the timer starts, so the timer never fires before this deadline.
-    const deadline = Date.now() + timeoutMs;
+    const now = Date.now();
+    const deadline = Math.min(now + timeoutMs, until ?? Infinity);
     // A peer waits a little longer than the hub, so the hub's own timeout message wins.
-    const wait = this.role === "peer" ? timeoutMs + 5_000 : timeoutMs;
+    const wait = Math.max(0, deadline - now) + (this.role === "peer" ? 5_000 : 0);
     return new Promise<T>((resolve, reject) => {
       const onAbort = () => this.withdraw(id, target, cancelledError());
       const done = () => signal?.removeEventListener("abort", onAbort);

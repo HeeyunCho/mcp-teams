@@ -208,6 +208,11 @@ const secondsOf = (ms) => +(ms / 1000).toFixed(1);
 /** How long after its deadline a tab script may take to report back before the tab counts as frozen. */
 const SCRIPT_MARGIN_MS = 1_000;
 
+/** An error after which the request may have reached Teams (no answer came): `outcomeUnknown`. */
+function unanswered(message) {
+  return Object.assign(new Error(message), { outcomeUnknown: true });
+}
+
 /**
  * One fetch in the tab, by REQUEST_TIMEOUT_MS or the request's deadline (ctx), whichever
  * comes first. Nothing starts once the request was withdrawn, and a tab that doesn't run
@@ -219,9 +224,9 @@ async function runInTab(tab, url, method, headers, body, ctx = null) {
   const deadline = Math.min(start + REQUEST_TIMEOUT_MS, ctx?.deadline ?? Infinity);
   const seconds = secondsOf(deadline - start);
   let timer;
-  const frozen = new Promise((_, reject) => {
+  const scriptTimeout = new Promise((_, reject) => {
     timer = setTimeout(
-      () => reject(new Error(`The Teams tab did not run the request within ${seconds} s (it may be frozen or asleep). Reload the Teams tab and try again.`)),
+      () => reject(unanswered(`The Teams tab did not run the request within ${seconds} s (it may be frozen or asleep). Reload the Teams tab and try again.`)),
       deadline - start + SCRIPT_MARGIN_MS,
     );
   });
@@ -234,7 +239,7 @@ async function runInTab(tab, url, method, headers, body, ctx = null) {
   });
   let injection;
   try {
-    [injection] = await guarded(Promise.race([run, frozen]), ctx);
+    [injection] = await guarded(Promise.race([run, scriptTimeout]), ctx);
   } finally {
     clearTimeout(timer);
   }
@@ -242,7 +247,8 @@ async function runInTab(tab, url, method, headers, body, ctx = null) {
   if (!res) throw new Error("Could not run inside the Teams tab. Reload the Teams tab and try again.");
   if (res.status === 0) {
     ctx?.check(); // the deadline passed: say that rather than "Teams did not answer"
-    throw new Error(
+    // A fetch that failed may have been sent already (a reset connection, no answer in time).
+    throw unanswered(
       res.error === "timeout"
         ? `Teams did not answer within ${seconds} s. Reload the Teams tab and try again.`
         : `Could not reach Teams: ${res.error}`,
@@ -962,7 +968,11 @@ function onConfirmMessage(msg, sender, sendResponse) {
         p.finish(await sendMessage(p.request), true);
         sendResponse({ ok: true });
       } catch (err) {
-        p.finish({ sent: false, reason: `Sending failed: ${err.message}` }, true);
+        // Without an answer the post may have gone through: saying it failed would invite a second one.
+        const reason = err.outcomeUnknown
+          ? `Sending did not finish: ${err.message} The message may have been posted: check with read_messages before sending again.`
+          : `Sending failed: ${err.message}`;
+        p.finish({ sent: false, reason }, true);
         sendResponse({ ok: false, error: err.message });
       }
     })();
@@ -1126,6 +1136,7 @@ function requestContext(conn, timeoutMs, sentDeadline) {
   // The server's own deadline when it sends one (newer servers): it stopped waiting then, and the
   // request may have taken a moment to arrive.
   const deadline = timeoutMs > 0 ? Math.min(Date.now() + timeoutMs, sentDeadline > 0 ? sentDeadline : Infinity) : null;
+  const limitReached = () => `The request's time limit (${secondsOf(timeoutMs)} s) passed before Teams answered.`;
   const ctx = {
     conn,
     cancelled: false,
@@ -1143,6 +1154,8 @@ function requestContext(conn, timeoutMs, sentDeadline) {
       return () => listeners.delete(f);
     },
     check() {
+      // The deadline counts even before its timer fired (e.g. a server deadline that passed on the way).
+      if (!ctx.cancelled && deadline !== null && Date.now() >= deadline) ctx.cancel(limitReached());
       if (ctx.cancelled) throw ctx.reason;
     },
     /** The request ended: its deadline no longer matters. */
@@ -1150,7 +1163,7 @@ function requestContext(conn, timeoutMs, sentDeadline) {
       clearTimeout(timer);
     },
   };
-  if (deadline) timer = setTimeout(() => ctx.cancel(`The request's time limit (${secondsOf(timeoutMs)} s) passed before Teams answered.`), Math.max(0, deadline - Date.now()));
+  if (deadline) timer = setTimeout(() => ctx.cancel(limitReached()), Math.max(0, deadline - Date.now()));
   return ctx;
 }
 
