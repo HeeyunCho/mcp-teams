@@ -503,3 +503,31 @@ describe("serviceUrl", () => {
     expect(() => teams.serviceUrl("http://teams.cloud.microsoft/x", base)).toThrow(/Refusing/);
   });
 });
+
+describe("read_messages cursor", () => {
+  const CHAT = "19:contoso-history@thread.v2";
+  const path = (id: string, rest = "/messages?startTime=1&syncState=abc&pageSize=60") => `/v1/users/ME/conversations/${encodeURIComponent(id)}${rest}`;
+  it("1.1: round-trips a chatsvc backward link (as a path on the service) and a time", () => {
+    const c = teams.messagesCursor(`https://emea.ng.msg.teams.microsoft.com${path(CHAT)}`, "2026-01-01T00:00:00.000Z");
+    expect(teams.readMessagesCursor(c, CHAT)).toEqual({ path: path(CHAT), before: "2026-01-01T00:00:00.000Z" });
+    const thread = `${CHAT};messageid=1700000000000`;
+    const t = teams.messagesCursor(path(thread, "/messages?pageSize=20"), null);
+    expect(teams.readMessagesCursor(t, thread)).toEqual({ path: path(thread, "/messages?pageSize=20"), before: null });
+  });
+  it("1.1: rejects cursors for other hosts, paths or conversations", () => {
+    const forge = (p: string, b?: string) => Buffer.from(JSON.stringify({ p, b })).toString("base64url");
+    const bad = [
+      "not a cursor",
+      forge(`https://evil.example${path(CHAT)}`),
+      forge(`//evil.example${path(CHAT)}`),
+      forge(path("19:other@thread.v2")),
+      forge(path(CHAT, "/properties")),
+      forge(path(CHAT, "/messages/../../x/messages")),
+      forge(`/v1/users/ME/conversations/x/../${encodeURIComponent(CHAT)}/messages`),
+      forge(path(`${CHAT}/messages/../x`, "/messages")),
+      forge(path(CHAT, "/messages\\..\\x")),
+      forge(path(CHAT), "not a time"),
+    ];
+    for (const c of bad) expect(() => teams.readMessagesCursor(c, CHAT), c).toThrow(/not a valid cursor/i);
+  });
+});
