@@ -305,7 +305,7 @@ export const openedSockets: string[] = [];
  * The browser WebSocket API, taken before any test stubs it: Node's own (Node 22+), else
  * the ws package's, which implements the same API (Node 20, as in CI, has no global one).
  */
-const NativeWebSocket = globalThis.WebSocket ?? (WsWebSocket as unknown as typeof globalThis.WebSocket);
+export const NativeWebSocket = globalThis.WebSocket ?? (WsWebSocket as unknown as typeof globalThis.WebSocket);
 
 /** Stands in for WebSocket: records the URL and never connects. */
 class InertWebSocket {
