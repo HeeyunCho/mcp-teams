@@ -1,6 +1,6 @@
 // 2.3: the extension's watchdog. The hub sends {type:"ping"} every keep-alive period; when none has
-// come for about 2 periods (the welcome's heartbeatMs, else 45 s) the worker connects again, so a
-// hub that froze is noticed instead of holding the worker's connection open.
+// come for about 2 periods (the welcome's heartbeatMs, else 45 s; never under 2 s) the worker
+// connects again, so a hub that froze is noticed instead of holding the worker's connection open.
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { WebSocketServer, type WebSocket } from "ws";
 import { proof } from "../../src/bridge.js";
@@ -8,7 +8,7 @@ import { FAST, bridgeHarness, freePort, type BridgeHarness } from "../helpers/br
 import { connectWorker, createFakeChrome, loadWorker, NativeWebSocket, openedSockets } from "../helpers/fakeChrome.js";
 
 const TOKEN = "watchdog-token";
-const PERIOD = 200;
+const PERIOD = 1_000;
 
 let wss: WebSocketServer | undefined;
 let h: BridgeHarness | undefined;
@@ -88,10 +88,18 @@ describe("2.3: extension watchdog", () => {
     await vi.waitFor(() => expect(first.closedAt).toBeDefined(), { timeout: 2_000 });
   });
 
+  it("2.3: the watchdog never waits under 2 s, however short the declared period (a busy machine runs timers late)", async () => {
+    // Test hubs ping every 200 ms; 2 periods of silence is a stall of the test machine, not a frozen hub.
+    const hub = await scriptedHub({ heartbeatMs: 200 });
+    await connectedWorker(hub.port, () => hub.connections[0]?.welcomedAt !== undefined);
+    await vi.waitFor(() => expect(hub.connections.length).toBeGreaterThanOrEqual(2), { timeout: 4_000 });
+    expect(hub.connections[1].openedAt - hub.connections[0].welcomedAt!).toBeGreaterThanOrEqual(2_000);
+  });
+
   it("2.3: pings from the hub keep the connection", async () => {
     const hub = await scriptedHub({ heartbeatMs: PERIOD, pingEveryMs: PERIOD });
     await connectedWorker(hub.port, () => hub.connections[0]?.welcomedAt !== undefined);
-    await new Promise((r) => setTimeout(r, 8 * PERIOD));
+    await new Promise((r) => setTimeout(r, 4 * PERIOD));
     expect(hub.connections).toHaveLength(1);
     expect(hub.connections[0].closedAt).toBeUndefined();
   });
@@ -105,7 +113,7 @@ describe("2.3: extension watchdog", () => {
     link = await connectWorker(fake, () => bridge.connected);
     const extensionSocket = () => [...(bridge as any).sockets.keys()][0];
     const before = extensionSocket();
-    await new Promise((r) => setTimeout(r, 8 * PERIOD));
+    await new Promise((r) => setTimeout(r, 4 * PERIOD));
     expect(extensionSocket()).toBe(before);
     expect(await fake.pageMessage("popup.html", { type: "popup:status" })).toMatchObject({ state: "connected" });
   });
