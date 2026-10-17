@@ -1093,6 +1093,8 @@ async function connect() {
     }
     if (!msg || typeof msg !== "object") return;
     if (checking) await checking;
+    // Closed or replaced meanwhile: nobody could be told the outcome (its requests were withdrawn).
+    if (ws !== socket || socket.readyState !== WebSocket.OPEN) return;
     if (!authed) {
       if (msg.type === "challenge" && !challenged && typeof msg.nonce === "string") {
         challenged = true;
@@ -1101,15 +1103,15 @@ async function connect() {
         const proof = await teams.pairingProof(secret, "client", msg.nonce);
         socket.send(JSON.stringify({ type: "hello", proof, nonce, version: VERSION, browser: browserName(), instance }));
       } else if (msg.type === "welcome" && !checking) {
+        const notProven = () => refuse(`The program on port ${port || DEFAULT_PORT} could not prove it is your mcp-teams server, so the extension doesn't answer it.`);
         checking = (async () => {
-          if (!secret || msg.proof !== (await teams.pairingProof(secret, "server", nonce))) {
-            return refuse(`The program on port ${port || DEFAULT_PORT} could not prove it is your mcp-teams server, so the extension doesn't answer it.`);
-          }
+          if (!secret || msg.proof !== (await teams.pairingProof(secret, "server", nonce))) return notProven();
+          if (ws !== socket || socket.readyState !== WebSocket.OPEN) return; // a newer connection's state stays
           authed = true;
           state = "connected";
           lastError = null;
           retryMs = RETRY_MIN_MS;
-        })();
+        })().catch(notProven);
         await checking;
       }
       return;
