@@ -59,7 +59,7 @@ If the AI stops waiting (it cancels, times out or loses its connection) while th
 
 ### When Teams is busy
 
-When Teams asks to slow down (HTTP 429), mcp-teams sends nothing more to that service until Teams' wait is over. A call waits that out if it has time; otherwise it fails with "Teams is busy (throttled) for N s". A list that came back without some people's names says so in a `note`, instead of leaving them out silently.
+When Teams asks to slow down (HTTP 429), mcp-teams sends nothing more to that service, for that region or account, until Teams' wait is over. A call waits that out if it has time; otherwise it fails with "Teams is busy (throttled) for N s". A list that came back without some people's names says so in a `note`, instead of leaving them out silently.
 
 ## Setup
 
