@@ -16,6 +16,8 @@ export interface Reply {
   /** Sent as text as is (e.g. HTML or nothing); otherwise body is sent as JSON. */
   text?: string;
   location?: string | null;
+  /** Response headers (e.g. { "retry-after": "2" }). */
+  headers?: Record<string, string>;
 }
 const REPLY = Symbol("reply");
 export const reply = (status: number, body: unknown = {}, extra: Omit<Reply, "status" | "body"> = {}): Reply => ({ status, body, ...extra, [REPLY]: true }) as Reply;
@@ -152,8 +154,8 @@ export function createFakeChrome({ services = {}, captured = [...TEAMS_SERVICES]
     });
     if (isNoAnswer(r)) throw r.error === "timeout" ? new DOMException("The operation timed out.", "TimeoutError") : new TypeError(r.error);
     if (r === undefined) return new Response("", { status: 404 });
-    const { status, body, text, location = null } = isReply(r) ? r : { status: 200, body: r, text: undefined, location: null };
-    return new Response(text ?? (body === undefined ? "" : JSON.stringify(body)), { status, headers: location ? { location } : {} });
+    const { status, body, text, location = null, headers = {} } = isReply(r) ? r : { status: 200, body: r, text: undefined, location: null, headers: {} };
+    return new Response(text ?? (body === undefined ? "" : JSON.stringify(body)), { status, headers: { ...headers, ...(location ? { location } : {}) } });
   };
   /** Tabs whose scripts wait (a frozen or discarded tab), and the wake-up of each waiting script. */
   const frozen = new Map<number, (() => void)[]>();
