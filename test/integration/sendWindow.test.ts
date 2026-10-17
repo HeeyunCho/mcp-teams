@@ -179,6 +179,9 @@ describe("send confirmation window", () => {
     "The mcp-teams hub restarted; try again in a few seconds.",
     "mcp-teams was updated; try again in a few seconds.",
     "Bridge connection error: read ECONNRESET",
+    "mcp-teams is shutting down",
+    "bridge server error: listen EADDRINUSE",
+    "The response was too large (over 256 MB) and was dropped. The connection is re-established automatically.",
   ])("2.1: the bridge losing a sent call (%s) still tells the AI to check before sending again", async (message) => {
     const r = await sendFailingWith(message);
     expect(r.content[0].text).toMatch(/may have been posted.*read_messages before sending again/);
