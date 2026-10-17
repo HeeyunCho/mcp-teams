@@ -3,6 +3,7 @@
 // through chrome.scripting.executeScript(pageFetch); here they go to scripted fake services
 // (chatsvc, csa, mt, substrate, and SharePoint for transcripts), and the test sees each one.
 import { expect, vi } from "vitest";
+import WsWebSocket from "ws";
 
 export type Service = "chatsvc" | "csa" | "mt" | "substrate" | "sharepoint";
 export const TEAMS_SERVICES = ["chatsvc", "csa", "mt", "substrate"] as const;
@@ -267,8 +268,11 @@ export interface Worker {
 /** WebSockets the worker opened while loaded by loadWorker (none expected outside Chrome). */
 export const openedSockets: string[] = [];
 
-/** Node's own WebSocket (the browser API), taken before any test stubs it. */
-const NativeWebSocket = globalThis.WebSocket;
+/**
+ * The browser WebSocket API, taken before any test stubs it: Node's own (Node 22+), else
+ * the ws package's, which implements the same API (Node 20, as in CI, has no global one).
+ */
+const NativeWebSocket = globalThis.WebSocket ?? (WsWebSocket as unknown as typeof globalThis.WebSocket);
 
 /** Stands in for WebSocket: records the URL and never connects. */
 class InertWebSocket {
