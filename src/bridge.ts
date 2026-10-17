@@ -57,16 +57,37 @@ interface Pending {
   socket?: WebSocket;
 }
 
-/** How long the hub trusts what it learned about which browser has Teams signed in. */
-const PICK_STATUS_TIMEOUT_MS = 3_000;
-
 const EXTENSION_ORIGIN = /^(chrome-extension|extension):\/\/[a-z0-9]+$/i;
-const RETRY_MS = 2_000;
 /** Largest message accepted on the bridge. Attachments travel one per message as base64 (+33%). */
 export const MAX_MESSAGE_BYTES = 256 * 1024 * 1024;
-const JOIN_TIMEOUT_MS = 3_000;
-/** A hub handing over to a newer server waits this long for its own calls to finish. */
-const STEP_DOWN_MAX_WAIT_MS = 5 * 60_000;
+
+/** Sizes and timings of the bridge. Tests shorten them; the server uses the defaults. */
+export interface BridgeOptions {
+  /** Largest message accepted on the bridge. */
+  maxMessageBytes?: number;
+  /** How often the hub pings each extension (also keeps the MV3 service worker alive). */
+  keepAliveMs?: number;
+  /** How long a server that is neither hub nor peer waits before trying again. */
+  retryMs?: number;
+  /** How long joining an existing hub may take. */
+  joinTimeoutMs?: number;
+  /** How long a new connection has to prove the token. */
+  authTimeoutMs?: number;
+  /** How long the hub trusts what it learned about which browser has Teams signed in. */
+  pickStatusTimeoutMs?: number;
+  /** A hub handing over to a newer server waits this long for its own calls to finish. */
+  stepDownMaxWaitMs?: number;
+}
+
+export const DEFAULT_BRIDGE_OPTIONS: Readonly<Required<BridgeOptions>> = Object.freeze({
+  maxMessageBytes: MAX_MESSAGE_BYTES,
+  keepAliveMs: 20_000,
+  retryMs: 2_000,
+  joinTimeoutMs: 3_000,
+  authTimeoutMs: 5_000,
+  pickStatusTimeoutMs: 3_000,
+  stepDownMaxWaitMs: 5 * 60_000,
+});
 
 /** True when version a is newer than b (x.y.z; anything else never counts as newer). */
 export function isNewer(a: unknown, b: unknown): boolean {
@@ -106,13 +127,30 @@ export class ExtensionBridge {
   private steppingDown = false;
   private alive = new WeakSet<WebSocket>(); // hub: extensions that answered the last ping
   private legacyReloaded = false; // hub: an extension of 0.2.0 or older was told to reload
+  private readonly opts: Required<BridgeOptions>;
+  private boundPort?: number; // hub: the port it listens on (port 0 picks a free one)
 
+  /** The 4th argument is the options, or (as before) just the largest message size. */
   constructor(
-    private readonly port: number,
+    private readonly requestedPort: number,
     private readonly token: string,
     private readonly serverVersion: string,
-    private readonly maxMessageBytes = MAX_MESSAGE_BYTES,
-  ) {}
+    options: BridgeOptions | number = {},
+  ) {
+    const given: BridgeOptions = typeof options === "number" ? { maxMessageBytes: options } : options;
+    // A key given as undefined keeps its default (spreading it would overwrite the default).
+    const defined = Object.fromEntries(Object.entries(given).filter(([, v]) => v !== undefined));
+    this.opts = { ...DEFAULT_BRIDGE_OPTIONS, ...defined };
+  }
+
+  /** The bridge's port: the one it listens on as the hub (port 0 picks a free one), else the one it was given. */
+  get port(): number {
+    return this.boundPort ?? this.requestedPort;
+  }
+
+  private get maxMessageBytes(): number {
+    return this.opts.maxMessageBytes;
+  }
 
   /** Becomes the hub, or a peer of the existing hub. Keeps retrying in the background if neither works. */
   async start(): Promise<void> {
@@ -121,7 +159,7 @@ export class ExtensionBridge {
     if (await this.join()) return this.setRole("peer");
     this.role = "none";
     clearTimeout(this.retry);
-    this.retry = setTimeout(() => void this.start(), RETRY_MS);
+    this.retry = setTimeout(() => void this.start(), this.opts.retryMs);
     this.retry.unref();
   }
 
@@ -142,7 +180,7 @@ export class ExtensionBridge {
     return new Promise((resolve) => {
       const wss = new WebSocketServer({
         host: "127.0.0.1",
-        port: this.port,
+        port: this.requestedPort,
         maxPayload: this.maxMessageBytes,
         verifyClient: ({ origin }: { origin?: string; req: IncomingMessage }) => !origin || EXTENSION_ORIGIN.test(origin),
       });
@@ -150,6 +188,7 @@ export class ExtensionBridge {
       wss.once("listening", () => {
         listening = true;
         this.wss = wss;
+        this.boundPort = (wss.address() as { port: number }).port;
         resolve(true);
       });
       wss.on("error", (err: NodeJS.ErrnoException) => {
@@ -164,7 +203,7 @@ export class ExtensionBridge {
 
   private onConnection(ws: WebSocket, origin?: string) {
     let authed = false;
-    const authTimer = setTimeout(() => !authed && ws.close(4401, "auth timeout"), 5000);
+    const authTimer = setTimeout(() => !authed && ws.close(4401, "auth timeout"), this.opts.authTimeoutMs);
     const challenge = newNonce();
     ws.send(JSON.stringify({ type: "challenge", nonce: challenge }));
 
@@ -267,7 +306,7 @@ export class ExtensionBridge {
     if (this.preferred && open.includes(this.preferred)) return this.preferred;
     type Status = { teamsTabs?: number; sessions?: { sessionCaptured?: boolean }[] };
     const statuses = await Promise.all(
-      open.map((s) => this.send<Status>(s, "status", {}, PICK_STATUS_TIMEOUT_MS).catch(() => null)),
+      open.map((s) => this.send<Status>(s, "status", {}, this.opts.pickStatusTimeoutMs).catch(() => null)),
     );
     const score = (st: Status | null) =>
       !st ? -1 : st.sessions?.some((x) => x.sessionCaptured) ? 2 : (st.teamsTabs ?? 0) > 0 ? 1 : 0;
@@ -308,11 +347,11 @@ export class ExtensionBridge {
   private async stepDown(newer: string) {
     if (this.steppingDown || this.role !== "hub") return;
     this.steppingDown = true;
-    const end = Date.now() + STEP_DOWN_MAX_WAIT_MS;
+    const end = Date.now() + this.opts.stepDownMaxWaitMs;
     while (this.pending.size && Date.now() < end && !this.closed) await new Promise((r) => setTimeout(r, 500));
     if (this.closed || this.role !== "hub") return void (this.steppingDown = false);
     console.error(`[mcp-teams ${this.serverVersion}] handing the bridge to mcp-teams ${newer}`);
-    this.restartHub("mcp-teams was updated; try again in a few seconds.", RETRY_MS);
+    this.restartHub("mcp-teams was updated; try again in a few seconds.", this.opts.retryMs);
     this.steppingDown = false;
   }
 
@@ -320,6 +359,7 @@ export class ExtensionBridge {
   private restartHub(reason: string, delayMs = 100 + Math.random() * 400) {
     const wss = this.wss;
     this.wss = undefined;
+    this.boundPort = undefined;
     this.role = "none";
     clearInterval(this.keepAlive);
     this.rejectAll(reason);
@@ -383,7 +423,7 @@ export class ExtensionBridge {
         s.ping();
         s.send(JSON.stringify({ type: "ping" }));
       }
-    }, 20_000);
+    }, this.opts.keepAliveMs);
     this.keepAlive.unref();
   }
 
@@ -396,7 +436,7 @@ export class ExtensionBridge {
       let challenged = false;
       let forged = false;
       const nonce = newNonce();
-      const timer = setTimeout(() => ws.terminate(), JOIN_TIMEOUT_MS);
+      const timer = setTimeout(() => ws.terminate(), this.opts.joinTimeoutMs);
       ws.on("message", (raw) => {
         let msg: any;
         try {

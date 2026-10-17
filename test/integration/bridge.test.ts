@@ -1,8 +1,13 @@
-import { describe, expect, it, afterEach } from "vitest";
+import { describe, expect, it, afterEach, beforeEach } from "vitest";
 import WebSocket from "ws";
-import { ExtensionBridge } from "../src/bridge.js";
+import { DEFAULT_BRIDGE_OPTIONS, ExtensionBridge } from "../../src/bridge.js";
+import { freePort } from "../helpers/bridgeHarness.js";
 
-const PORT = 47599;
+// A free port per test, so test files and worktrees can run side by side.
+let PORT: number;
+beforeEach(async () => {
+  PORT = await freePort();
+});
 const ORIGIN = "chrome-extension://abcdefghijklmnop";
 
 function connectExt(token: string, origin = ORIGIN) {
@@ -191,6 +196,88 @@ describe("ExtensionBridge with several sessions", () => {
     expect(stranger.role).toBe("none");
     expect(stranger.listenError).toMatch(/rejected this server's token/);
     await expect(stranger.call("x")).rejects.toThrow(/rejected/);
+  });
+});
+
+describe("ExtensionBridge options", () => {
+  let bridge: ExtensionBridge | undefined;
+  afterEach(async () => bridge?.close());
+
+  /** An extension on the bridge's port that says hello with the token; pong: false is a frozen browser. */
+  const helloExt = (port: number, pong = true) => {
+    const ws = new WebSocket(`ws://127.0.0.1:${port}`, { origin: ORIGIN, autoPong: pong });
+    ws.on("message", (raw) => {
+      if (JSON.parse(raw.toString()).type === "challenge") ws.send(JSON.stringify({ type: "hello", token: "secret", version: "0.1.0" }));
+    });
+    return ws;
+  };
+
+  it("defaults to the timings it has always used", () => {
+    expect(DEFAULT_BRIDGE_OPTIONS).toEqual({
+      maxMessageBytes: 256 * 1024 * 1024,
+      keepAliveMs: 20_000,
+      retryMs: 2_000,
+      joinTimeoutMs: 3_000,
+      authTimeoutMs: 5_000,
+      pickStatusTimeoutMs: 3_000,
+      stepDownMaxWaitMs: 5 * 60_000,
+    });
+  });
+
+  it("listens on a free port when given port 0, and reports the port it got", async () => {
+    bridge = new ExtensionBridge(0, "secret", "0.1.0");
+    await bridge.start();
+    expect(bridge.role).toBe("hub");
+    expect(bridge.port).toBeGreaterThan(0);
+    const ws = helloExt(bridge.port);
+    await waitFor(() => bridge!.connected);
+    ws.close();
+  });
+
+  it("drops an extension that stops answering pings after the keep-alive interval it was given", async () => {
+    bridge = new ExtensionBridge(0, "secret", "0.1.0", { keepAliveMs: 100 });
+    await bridge.start();
+    const ws = helloExt(bridge.port, false);
+    const closed = new Promise<number>((r) => ws.on("close", (code) => r(code)));
+    await waitFor(() => bridge!.connected);
+    await waitFor(() => !bridge!.connected);
+    expect(await closed).toBe(1006); // terminated, not closed politely
+  });
+
+  it("keeps the defaults for options given as undefined", async () => {
+    bridge = new ExtensionBridge(0, "secret", "0.1.0", {
+      maxMessageBytes: undefined,
+      keepAliveMs: undefined,
+      retryMs: undefined,
+      joinTimeoutMs: undefined,
+      authTimeoutMs: undefined,
+      pickStatusTimeoutMs: undefined,
+      stepDownMaxWaitMs: undefined,
+    });
+    await bridge.start();
+    // A frozen extension (no pongs) and a socket that never authenticates: with the default
+    // 20 s keep-alive and 5 s auth timeout, both are still there 500 ms later.
+    const frozen = helloExt(bridge.port, false);
+    await waitFor(() => bridge!.connected);
+    const silent = new WebSocket(`ws://127.0.0.1:${bridge.port}`, { origin: ORIGIN });
+    let silentClosed = false;
+    silent.on("close", () => (silentClosed = true));
+    await new Promise((r) => silent.on("open", r));
+    await new Promise((r) => setTimeout(r, 500));
+    expect(bridge.connected).toBe(true);
+    expect(silentClosed).toBe(false);
+    frozen.terminate();
+    silent.terminate();
+  });
+
+  it("closes a connection that doesn't authenticate within the auth timeout it was given", async () => {
+    bridge = new ExtensionBridge(0, "secret", "0.1.0", { authTimeoutMs: 100 });
+    await bridge.start();
+    const ws = new WebSocket(`ws://127.0.0.1:${bridge.port}`, { origin: ORIGIN });
+    const started = Date.now();
+    const code = await new Promise<number>((r) => ws.on("close", (c) => r(c)));
+    expect(code).toBe(4401);
+    expect(Date.now() - started).toBeLessThan(2_000);
   });
 });
 
