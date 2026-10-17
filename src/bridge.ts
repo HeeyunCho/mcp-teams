@@ -96,7 +96,38 @@ export const DEFAULT_BRIDGE_OPTIONS: Readonly<Required<BridgeOptions>> = Object.
   cancelGraceMs: 2_000,
 });
 
-const cancelledError = () => new Error("Cancelled: the request was withdrawn.");
+/**
+ * What a call fails with when the bridge lost it after sending it, so its outcome is unknown (a
+ * send may have been posted). A hub relays them to its peers word for word. src/tools.ts tells
+ * the AI to check before sending again on exactly these (isLostCall), so add any new one here.
+ */
+export const LOST_CALL = Object.freeze({
+  timedOut: (method: string) => `Extension call '${method}' timed out`,
+  withdrawn: "Cancelled: the request was withdrawn.",
+  disconnected: "Browser extension disconnected",
+  reconnected: "Browser extension reconnected; try again.",
+  hubRestarted: "The mcp-teams hub restarted; try again in a few seconds.",
+  updated: "mcp-teams was updated; try again in a few seconds.",
+  shuttingDown: "mcp-teams is shutting down",
+  serverError: (detail: string) => `bridge server error: ${detail}`,
+  socketError: (detail: string) => `Bridge connection error: ${detail}`,
+  tooLarge: (limitMb: number) => `The response was too large (over ${limitMb} MB) and was dropped. The connection is re-established automatically.`,
+});
+
+// Each LOST_CALL message as a pattern: its text, with anything in the place of a value.
+const SLOT = "\u0000";
+const escapeRegExp = (t: string) => t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+const LOST_CALL_PATTERNS = Object.values(LOST_CALL).map((m) => {
+  const text = typeof m === "string" ? m : (m as (value: string) => string)(SLOT);
+  return new RegExp(`^${text.split(SLOT).map(escapeRegExp).join(".*")}`, "s");
+});
+
+/** True when `message` is one of LOST_CALL's: the call was sent, and its outcome is unknown. */
+export function isLostCall(message: string): boolean {
+  return LOST_CALL_PATTERNS.some((p) => p.test(message));
+}
+
+const cancelledError = () => new Error(LOST_CALL.withdrawn);
 
 /** True when version a is newer than b (x.y.z; anything else never counts as newer). */
 export function isNewer(a: unknown, b: unknown): boolean {
@@ -109,9 +140,7 @@ export function isNewer(a: unknown, b: unknown): boolean {
 }
 
 function describeSocketError(err: NodeJS.ErrnoException, limit: number): string {
-  return err.code === "WS_ERR_UNSUPPORTED_MESSAGE_LENGTH"
-    ? `The response was too large (over ${Math.round(limit / 1024 / 1024)} MB) and was dropped. The connection is re-established automatically.`
-    : `Bridge connection error: ${err.message}`;
+  return err.code === "WS_ERR_UNSUPPORTED_MESSAGE_LENGTH" ? LOST_CALL.tooLarge(Math.round(limit / 1024 / 1024)) : LOST_CALL.socketError(err.message);
 }
 
 export class ExtensionBridge {
@@ -209,7 +238,7 @@ export class ExtensionBridge {
         resolve(true);
       });
       wss.on("error", (err: NodeJS.ErrnoException) => {
-        if (listening) return this.restartHub(`bridge server error: ${err.message}`);
+        if (listening) return this.restartHub(LOST_CALL.serverError(err.message));
         if (err.code !== "EADDRINUSE") this.listenError = err.message;
         wss.close();
         resolve(false);
@@ -266,7 +295,7 @@ export class ExtensionBridge {
       this.peerCalls.delete(ws);
       if (this.sockets.delete(ws)) {
         if (this.preferred === ws) this.preferred = undefined;
-        this.rejectAll("Browser extension disconnected", ws);
+        this.rejectAll(LOST_CALL.disconnected, ws);
         this.updateExtensions();
         if (!this.sockets.size) clearInterval(this.keepAlive);
       }
@@ -309,7 +338,7 @@ export class ExtensionBridge {
         s.close(4000, "replaced");
         // Its close event comes later and no longer finds it, so fail its calls now.
         this.sockets.delete(s);
-        this.rejectAll("Browser extension reconnected; try again.", s);
+        this.rejectAll(LOST_CALL.reconnected, s);
         if (this.preferred === s) this.preferred = undefined;
       }
     }
@@ -381,7 +410,7 @@ export class ExtensionBridge {
     while (this.pending.size && Date.now() < end && !this.closed) await new Promise((r) => setTimeout(r, 500));
     if (this.closed || this.role !== "hub") return void (this.steppingDown = false);
     console.error(`[mcp-teams ${this.serverVersion}] handing the bridge to mcp-teams ${newer}`);
-    this.restartHub("mcp-teams was updated; try again in a few seconds.", this.opts.retryMs);
+    this.restartHub(LOST_CALL.updated, this.opts.retryMs);
     this.steppingDown = false;
   }
 
@@ -527,7 +556,7 @@ export class ExtensionBridge {
         this.extension = undefined;
         this.extensions = [];
         this.role = "none";
-        this.rejectAll("The mcp-teams hub restarted; try again in a few seconds.");
+        this.rejectAll(LOST_CALL.hubRestarted);
         if (!this.closed) {
           clearTimeout(this.retry);
           this.retry = setTimeout(() => void this.start(), 100 + Math.random() * 400);
@@ -583,7 +612,7 @@ export class ExtensionBridge {
     return new Promise<T>((resolve, reject) => {
       const onAbort = () => this.withdraw(id, target, cancelledError());
       const done = () => signal?.removeEventListener("abort", onAbort);
-      const timer = setTimeout(() => this.withdraw(id, target, new Error(`Extension call '${method}' timed out`)), wait);
+      const timer = setTimeout(() => this.withdraw(id, target, new Error(LOST_CALL.timedOut(method))), wait);
       this.pending.set(id, {
         resolve: (v) => (done(), resolve(v as T)),
         reject: (e) => (done(), reject(e)),
@@ -670,7 +699,7 @@ export class ExtensionBridge {
     this.closed = true;
     clearTimeout(this.retry);
     clearInterval(this.keepAlive);
-    this.rejectAll("mcp-teams is shutting down");
+    this.rejectAll(LOST_CALL.shuttingDown);
     this.hub?.close();
     for (const s of this.sockets.keys()) s.close();
     for (const peer of this.peers) peer.close();
