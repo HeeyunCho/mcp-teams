@@ -187,7 +187,7 @@ describe("read_messages paging at page boundaries", () => {
   });
 
   it("1.1: a channel pages by post with the cursor: every post and reply once, contiguous, at most 2 requests per page", async () => {
-    // 40 posts ten minutes apart; each gets two replies 15 and 25 minutes later, so replies
+    // 40 posts ten minutes apart; each gets two replies 13 and 27 minutes later, so replies
     // arrive after newer posts and a page boundary can fall between a post and its replies.
     const at = (min: number) => new Date(START + min * 60_000).toISOString();
     const channelLink = `https://emea.ng.msg.teams.microsoft.com/v1/users/ME/conversations/${CHANNEL}`;
@@ -196,8 +196,8 @@ describe("read_messages paging at page boundaries", () => {
       const postId = String(START + p * 600_000);
       all.push({ ...message(p), id: postId, content: `<p>Post ${p}</p>`, originalarrivaltime: at(p * 10), conversationLink: channelLink });
       for (const [k, d] of [
-        [1, 15],
-        [2, 25],
+        [1, 13],
+        [2, 27],
       ]) {
         all.push({
           ...message(p),
