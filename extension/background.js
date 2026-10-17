@@ -182,9 +182,12 @@ const SERVICE_HELP = {
 
 /**
  * Runs inside the Teams page (MAIN world) so cookies and origin are the page's own.
- * status 0: no answer (network error or timeoutMs passed).
+ * status 0: no answer (network error, or the deadline passed). `deadline` is absolute
+ * (ms since 1970): a tab that runs this only later (frozen or discarded) sends nothing after it.
  */
-async function pageFetch(url, method, headers, body, timeoutMs) {
+async function pageFetch(url, method, headers, body, deadline) {
+  const timeoutMs = deadline - Date.now();
+  if (timeoutMs <= 0) return { status: 0, text: "", error: "timeout" };
   try {
     const res = await fetch(url, {
       method,
@@ -199,20 +202,60 @@ async function pageFetch(url, method, headers, body, timeoutMs) {
   }
 }
 
-async function runInTab(tab, url, method, headers, body) {
-  const [injection] = await chrome.scripting.executeScript({
-    target: { tabId: tab.id },
-    world: "MAIN",
-    func: pageFetch,
-    // executeScript can't pass undefined.
-    args: [url, method, headers, body ?? null, REQUEST_TIMEOUT_MS],
+/** 60, 0.5: seconds for a message. */
+const secondsOf = (ms) => +(ms / 1000).toFixed(1);
+
+/** How long after its deadline a tab script may take to report back before the tab counts as frozen. */
+const SCRIPT_MARGIN_MS = 1_000;
+
+/** An error after which the request may have reached Teams (no answer came): `outcomeUnknown`. */
+function unanswered(message) {
+  return Object.assign(new Error(message), { outcomeUnknown: true });
+}
+
+/**
+ * One fetch in the tab, by REQUEST_TIMEOUT_MS or the request's deadline (ctx), whichever
+ * comes first. Nothing starts once the request was withdrawn, and a tab that doesn't run
+ * the script in time (frozen, discarded) fails the call instead of holding it.
+ */
+async function runInTab(tab, url, method, headers, body, ctx = null) {
+  ctx?.check();
+  const start = Date.now();
+  const deadline = Math.min(start + REQUEST_TIMEOUT_MS, ctx?.deadline ?? Infinity);
+  const seconds = secondsOf(deadline - start);
+  let timer;
+  const scriptTimeout = new Promise((_, reject) => {
+    timer = setTimeout(
+      () => reject(unanswered(`The Teams tab did not run the request within ${seconds} s (it may be frozen or asleep). Reload the Teams tab and try again.`)),
+      deadline - start + SCRIPT_MARGIN_MS,
+    );
   });
+  const run = chrome.scripting
+    .executeScript({
+      target: { tabId: tab.id },
+      world: "MAIN",
+      func: pageFetch,
+      // executeScript can't pass undefined.
+      args: [url, method, headers, body ?? null, deadline],
+    })
+    // E.g. the tab closed or reloaded while the request ran: it may have reached Teams.
+    .catch((err) => {
+      throw unanswered(String(err?.message ?? err));
+    });
+  let injection;
+  try {
+    [injection] = await guarded(Promise.race([run, scriptTimeout]), ctx);
+  } finally {
+    clearTimeout(timer);
+  }
   const res = injection?.result;
-  if (!res) throw new Error("Could not run inside the Teams tab. Reload the Teams tab and try again.");
+  if (!res) throw unanswered("Could not run inside the Teams tab. Reload the Teams tab and try again.");
   if (res.status === 0) {
-    throw new Error(
+    ctx?.check(); // the deadline passed: say that rather than "Teams did not answer"
+    // A fetch that failed may have been sent already (a reset connection, no answer in time).
+    throw unanswered(
       res.error === "timeout"
-        ? `Teams did not answer within ${REQUEST_TIMEOUT_MS / 1000} s. Reload the Teams tab and try again.`
+        ? `Teams did not answer within ${seconds} s. Reload the Teams tab and try again.`
         : `Could not reach Teams: ${res.error}`,
     );
   }
@@ -223,23 +266,25 @@ async function runInTab(tab, url, method, headers, body) {
  * One request to a Teams service. `path` is relative to the service's base URL (or a
  * full URL on it). Returns the parsed JSON (null for an empty answer).
  */
-async function api(service, path, { method = "GET", body, raw = false, withLocation = false } = {}) {
+async function api(service, path, { method = "GET", body, raw = false, withLocation = false, ctx = null } = {}) {
+  ctx?.check();
   let cap = await getCapture(service);
-  let tab = await findTeamsTab(cap ? new URL(cap.base).origin : null);
+  // Opening a tab or waiting for a session can take a minute; a withdrawn request stops waiting.
+  let tab = await guarded(findTeamsTab(cap ? new URL(cap.base).origin : null), ctx);
   if (!cap) {
-    cap = await refreshSession(service, tab, { quickWaitMs: service === "substrate" ? 2_000 : 4_000 });
+    cap = await guarded(refreshSession(service, tab, { quickWaitMs: service === "substrate" ? 2_000 : 4_000 }), ctx);
     if (!cap) throw new Error(SERVICE_HELP[service]);
   }
   const urlFor = (c) => teams.serviceUrl(path, c.base);
-  let res = await runInTab(tab, urlFor(cap), method, cap.headers, body);
+  let res = await runInTab(tab, urlFor(cap), method, cap.headers, body, ctx);
   if (res.status === 401) {
     // Rejected before running (expired token), so trying once more is safe. A 403 is a
     // real answer (e.g. no longer a member of that chat).
     meetingSessionsCache.clear(); // the session (maybe the account) is changing
-    cap = await refreshSession(service, tab, { quickWaitMs: 0 });
+    cap = await guarded(refreshSession(service, tab, { quickWaitMs: 0 }), ctx);
     if (!cap) throw new Error(SERVICE_HELP[service]);
-    tab = await findTeamsTab(new URL(cap.base).origin);
-    res = await runInTab(tab, urlFor(cap), method, cap.headers, body);
+    tab = await guarded(findTeamsTab(new URL(cap.base).origin), ctx);
+    res = await runInTab(tab, urlFor(cap), method, cap.headers, body, ctx);
   }
   if (raw) return res;
   if (res.status >= 400) {
@@ -275,12 +320,12 @@ const LIST_CACHE_MS = 60_000;
 let listCache = null; // { at, data: { teams, chats } }
 
 /** Teams, channels and chats (csa), with names for untitled chats. Cached for a minute. */
-async function teamsAndChats(fresh = false) {
+async function teamsAndChats(fresh = false, ctx = null) {
   if (!fresh && listCache && Date.now() - listCache.at < LIST_CACHE_MS) return listCache.data;
-  const json = await api("csa", "/api/v1/teams/users/me?isPrefetch=false&enableMembershipSummary=true&enableRC2Fetch=false");
+  const json = await api("csa", "/api/v1/teams/users/me?isPrefetch=false&enableMembershipSummary=true&enableRC2Fetch=false", { ctx });
   const data = { teams: teams.parseTeams(json), chats: teams.parseCsaChats(json), meetings: teams.parseCsaMeetings(json) };
-  await nameChats(data.chats);
-  await lookupNames(data.meetings.map((m) => m.organizer));
+  await nameChats(data.chats, ctx);
+  await lookupNames(data.meetings.map((m) => m.organizer), ctx);
   for (const m of data.meetings) m.organizerName = names.get(m.organizer) ?? null;
   listCache = { at: Date.now(), data };
   return data;
@@ -290,36 +335,41 @@ const names = new Map(); // mri -> display name; bounded, starts over when full
 const NAMES_MAX = 5000;
 
 /** Looks up display names for MRIs not seen yet (mt short profiles, 100 at a time). */
-async function lookupNames(mris) {
+async function lookupNames(mris, ctx = null) {
   const unknown = [...new Set(mris)].filter((m) => m && !names.has(m) && /^8:/.test(m));
   for (let i = 0; i < unknown.length; i += 100) {
+    // Names that can't be looked up are left out, but a withdrawn request ends here (and isn't cached).
+    ctx?.check();
     const batch = unknown.slice(i, i + 100);
     const json = await api("mt", "/beta/users/fetchShortProfile?isMailAddress=false&enableGuest=true&includeIBBarredUsers=true&skypeTeamsInfo=true", {
       method: "POST",
       body: batch,
+      ctx,
     }).catch(() => null);
     if (names.size > NAMES_MAX) names.clear();
     for (const p of teams.parseProfiles(json)) if (p.mri && p.name) names.set(p.mri, p.name);
   }
+  ctx?.check();
 }
 
-async function nameChats(chats) {
+async function nameChats(chats, ctx = null) {
   const me = await myMri();
-  await lookupNames(chats.filter((c) => !c.title).flatMap((c) => c.members));
+  await lookupNames(chats.filter((c) => !c.title).flatMap((c) => c.members), ctx);
   for (const c of chats) {
     c.memberNames = c.members.filter((m) => m !== me).map((m) => names.get(m)).filter(Boolean);
     c.title = teams.chatTitle(c, names, me);
   }
 }
 
-async function resolve(conversation) {
+async function resolve(conversation, ctx = null) {
   const q = String(conversation ?? "").trim();
   if (!q) throw new Error("Say which chat or channel: an id, 'Team/Channel', a chat title or a person's name.");
   if (/^(19|48):/.test(q)) {
-    const data = await teamsAndChats().catch(() => ({ teams: [], chats: [] }));
+    const data = await teamsAndChats(false, ctx).catch(() => ({ teams: [], chats: [] }));
+    ctx?.check();
     return describe(q.split(";messageid=")[0], data);
   }
-  return teams.resolveConversation(q, await teamsAndChats());
+  return teams.resolveConversation(q, await teamsAndChats(false, ctx));
 }
 
 /** What we know about a conversation id from the lists. */
@@ -335,7 +385,7 @@ function describe(id, { teams: ts, chats }) {
 }
 
 /** People search as in Teams' people picker (substrate suggestions). */
-async function searchPeople(query, limit) {
+async function searchPeople(query, limit, ctx = null) {
   const body = {
     EntityRequests: [{ Query: { QueryString: query, DisplayQueryString: query }, EntityType: "People", Size: limit, Fields: ["Id", "MRI", "DisplayName", "EmailAddresses", "PeopleType", "PeopleSubtype", "UserPrincipalName", "GivenName", "Surname", "JobTitle", "Department", "CompanyName", "OfficeLocation", "ExternalDirectoryObjectId"] }],
     cvid: crypto.randomUUID(),
@@ -343,26 +393,26 @@ async function searchPeople(query, limit) {
     AppName: "Microsoft Teams",
     Scenario: { Name: "peoplepicker.newChat" },
   };
-  return teams.parseSuggestions(await api("substrate", "/search/api/v1/suggestions?scenario=peoplepicker.newChat", { method: "POST", body }));
+  return teams.parseSuggestions(await api("substrate", "/search/api/v1/suggestions?scenario=peoplepicker.newChat", { method: "POST", body, ctx }));
 }
 
 /** Each name or address as the one person it means (see teams.pickPerson). */
-async function resolvePeople(queries, me) {
+async function resolvePeople(queries, me, ctx = null) {
   const people = [];
   for (const q of queries) {
     const query = String(q).trim();
     if (/^8:orgid:/i.test(query)) {
-      await lookupNames([query]);
+      await lookupNames([query], ctx);
       people.push({ mri: query, name: names.get(query) ?? query, email: null });
       continue;
     }
-    let found = await searchPeople(query, 10);
+    let found = await searchPeople(query, 10, ctx);
     // People search can miss a full name it would find by one of its words (seen with
     // "KIM MIN JUN" for "김민준(KIM MIN JUN)"): then search each word, keeping exact names.
     const words = query.split(/\s+/).filter((w) => w.length > 1);
     if (!found.length && words.length > 1) {
       for (const w of words) {
-        found = (await searchPeople(w, 25)).filter((p) => teams.sameName(p.name, query));
+        found = (await searchPeople(w, 25, ctx)).filter((p) => teams.sameName(p.name, query));
         if (found.length) break;
       }
     }
@@ -412,20 +462,21 @@ async function sharepointTab(origin) {
 }
 
 /** A GET on SharePoint with the browser's own SharePoint session. */
-async function sharepointGet(url) {
+async function sharepointGet(url, ctx = null) {
   if (!SHAREPOINT_URL.test(url)) throw new Error("Not a SharePoint URL");
-  return runInTab(await sharepointTab(new URL(url).origin), url, "GET", {}, null);
+  ctx?.check();
+  return runInTab(await guarded(sharepointTab(new URL(url).origin), ctx), url, "GET", {}, null, ctx);
 }
 
 const transcripts = new Map(); // transcript URL -> parsed transcript; a finished transcript doesn't change
 const TRANSCRIPTS_MAX = 50;
 
 /** A call's transcript (Stream transcript.json) from the organizer's OneDrive. */
-async function transcriptOf(info, session) {
+async function transcriptOf(info, session, ctx = null) {
   const cached = transcripts.get(session.transcriptUrl);
   if (cached) return cached;
   const url = session.transcriptUrl + (session.transcriptUrl.includes("?") ? "&" : "?") + "format=json";
-  const res = await sharepointGet(url);
+  const res = await sharepointGet(url, ctx);
   if (res.status === 403 || res.status === 404) {
     throw new Error(`The transcript of "${info.title}" (${session.start}) is no longer available to you (HTTP ${res.status}): the organizer may have deleted it or not shared it.`);
   }
@@ -437,9 +488,9 @@ async function transcriptOf(info, session) {
 }
 
 /** A meeting chat by id, title or subject. */
-async function resolveMeeting(meeting) {
-  const conv = await resolve(meeting);
-  const info = (await teamsAndChats()).meetings.find((m) => m.id === conv.id);
+async function resolveMeeting(meeting, ctx = null) {
+  const conv = await resolve(meeting, ctx);
+  const info = (await teamsAndChats(false, ctx)).meetings.find((m) => m.id === conv.id);
   if (!info) throw new Error(`"${conv.title ?? conv.id}" is not a meeting chat. list_meetings lists them.`);
   return info;
 }
@@ -454,11 +505,11 @@ const sessionsKey = (cap, id) => (cap ? `${cap.base}\n${id}` : null);
  * The calls held in a meeting chat (see teams.meetingSessions). Cached for a minute, so
  * read_transcript's continueFrom pages and get_meeting don't read the whole chat again.
  */
-async function sessionsOf(info) {
+async function sessionsOf(info, ctx = null) {
   const key = sessionsKey(await getCapture("chatsvc"), info.id);
   const hit = key && meetingSessionsCache.get(key);
   if (hit && Date.now() - hit.at < SESSIONS_CACHE_MS) return hit.sessions;
-  const sessions = await readSessions(info);
+  const sessions = await readSessions(info, ctx);
   // Filed under the base the chat was read from (a 401 on the way may have changed it).
   const keyNow = sessionsKey(await getCapture("chatsvc"), info.id);
   if (keyNow) {
@@ -469,10 +520,10 @@ async function sessionsOf(info) {
   return sessions;
 }
 
-async function readSessions(info) {
+async function readSessions(info, ctx = null) {
   let raw;
   try {
-    raw = await fetchMessages(info.id, { limit: 2000, includeSystem: true });
+    raw = await fetchMessages(info.id, { limit: 2000, includeSystem: true, ctx });
   } catch (err) {
     if (/HTTP 403/.test(err.message) && info.external) {
       throw new Error(`"${info.title}" was organized by another organization, and Teams no longer lets you read its meeting chat.`);
@@ -504,7 +555,7 @@ const messagesTarget = (id, threadId) => (threadId ? `${id};messageid=${threadId
  * page, or at `from` (a link from a cursor, see teams.readMessagesCursor), and takes only
  * messages older than `olderThan` ({ time, id }, see teams.compareMessageKeys) if given.
  */
-async function fetchMessagePages(id, { limit, olderThan, includeSystem, threadId, from }) {
+async function fetchMessagePages(id, { limit, olderThan, includeSystem, threadId, from, ctx = null }) {
   const target = messagesTarget(id, threadId);
   const first = from ?? `/v1/users/ME/conversations/${encodeURIComponent(target)}/messages?view=${encodeURIComponent(MESSAGES_VIEW)}&pageSize=${Math.min(200, Math.max(20, limit * 2))}&startTime=1`;
   let path = first;
@@ -514,7 +565,7 @@ async function fetchMessagePages(id, { limit, olderThan, includeSystem, threadId
   let pages = 0;
   while (path) {
     if (pages === MAX_PAGES) return { raw, linkOf, first, next: path, capped: true, pages };
-    const json = await api("chatsvc", path);
+    const json = await api("chatsvc", path, { ctx });
     pages++;
     const msgs = json?.messages ?? [];
     for (const m of msgs) {
@@ -549,12 +600,12 @@ export const handlers = {
     };
   },
 
-  async listTeams() {
-    return { teams: (await teamsAndChats(true)).teams };
+  async listTeams(_, ctx) {
+    return { teams: (await teamsAndChats(true, ctx)).teams };
   },
 
-  async listChats({ query, limit = 30, unreadOnly = false }) {
-    let chats = (await teamsAndChats(true)).chats;
+  async listChats({ query, limit = 30, unreadOnly = false }, ctx) {
+    let chats = (await teamsAndChats(true, ctx)).chats;
     if (unreadOnly) chats = chats.filter((c) => c.unread);
     if (query) chats = chats.filter((c) => teams.matchesWords(c.title, query) || c.memberNames?.some((n) => teams.matchesWords(n, query)));
     chats.sort((a, b) => (b.lastMessage?.time ?? "").localeCompare(a.lastMessage?.time ?? ""));
@@ -564,16 +615,16 @@ export const handlers = {
     };
   },
 
-  async readMessages({ conversation, limit = 30, before, cursor, includeSystem = false, threadId, maxLength }) {
+  async readMessages({ conversation, limit = 30, before, cursor, includeSystem = false, threadId, maxLength }, ctx) {
     if (cursor && before) throw new Error("Give either cursor or before, not both (cursor already knows where to go on).");
-    const conv = await resolve(conversation);
+    const conv = await resolve(conversation, ctx);
     // A cursor resumes at the page that held the oldest message returned last time, and
     // only takes what is older than that message (by time, then id).
     const from = cursor ? teams.readMessagesCursor(cursor, messagesTarget(conv.id, threadId)) : null;
     if (from) before = from.before ?? undefined;
     const mark = from ? { time: from.before, id: from.id } : { time: before ?? null, id: null };
     const olderThan = mark.time != null || mark.id != null ? mark : null;
-    const { raw, linkOf, first, next, capped, pages } = await fetchMessagePages(conv.id, { limit, olderThan, includeSystem, threadId, from: from?.path });
+    const { raw, linkOf, first, next, capped, pages } = await fetchMessagePages(conv.id, { limit, olderThan, includeSystem, threadId, from: from?.path, ctx });
     const { messages, more, oldest } = teams.newestEntries(raw, { limit, includeSystem, channel: conv.kind === "channel" && !threadId });
     let olderCursor = null;
     if (oldest && (more || next)) olderCursor = teams.messagesCursor(linkOf.get(oldest.id) ?? first, oldest.time, oldest.id);
@@ -594,7 +645,7 @@ export const handlers = {
     };
   },
 
-  async searchMessages({ query, limit = 25, offset = 0 }) {
+  async searchMessages({ query, limit = 25, offset = 0 }, ctx) {
     const body = {
       entityRequests: [
         {
@@ -612,17 +663,17 @@ export const handlers = {
       logicalId: crypto.randomUUID(),
       scenario: { Dimensions: [{ DimensionName: "QueryType", DimensionValue: "All" }, { DimensionName: "FormFactor", DimensionValue: "general.web.reactSearch" }], Name: "powerbar" },
     };
-    const r = teams.parseSearch(await api("substrate", "/searchservice/api/v2/query", { method: "POST", body }));
+    const r = teams.parseSearch(await api("substrate", "/searchservice/api/v2/query", { method: "POST", body, ctx }));
     return { query, ...r, results: r.results.slice(0, limit) };
   },
 
-  async findPeople({ query, limit = 10 }) {
-    const people = await searchPeople(query, limit);
+  async findPeople({ query, limit = 10 }, ctx) {
+    const people = await searchPeople(query, limit, ctx);
     return { count: people.length, people };
   },
 
-  async listMeetings({ query, limit = 20, transcriptOnly = false }) {
-    let meetings = (await teamsAndChats(true)).meetings;
+  async listMeetings({ query, limit = 20, transcriptOnly = false }, ctx) {
+    let meetings = (await teamsAndChats(true, ctx)).meetings;
     if (query) meetings = meetings.filter((m) => teams.matchesWords(m.title, query) || teams.matchesWords(m.organizerName, query));
     if (transcriptOnly) meetings = meetings.filter((m) => m.hasTranscript);
     meetings = [...meetings].sort((a, b) => (b.lastActivity ?? "").localeCompare(a.lastActivity ?? ""));
@@ -632,9 +683,9 @@ export const handlers = {
     };
   },
 
-  async getMeeting({ meeting, limit = 10 }) {
-    const info = await resolveMeeting(meeting);
-    const sessions = await sessionsOf(info);
+  async getMeeting({ meeting, limit = 10 }, ctx) {
+    const info = await resolveMeeting(meeting, ctx);
+    const sessions = await sessionsOf(info, ctx);
     const { organizer, organizerName, lastJoinAt, ...rest } = info;
     return {
       meeting: { ...rest, organizer: organizerName ?? organizer },
@@ -643,9 +694,9 @@ export const handlers = {
     };
   },
 
-  async readTranscript({ meeting, session, from, maxLength = 40_000 }) {
-    const info = await resolveMeeting(meeting);
-    const all = await sessionsOf(info);
+  async readTranscript({ meeting, session, from, maxLength = 40_000 }, ctx) {
+    const info = await resolveMeeting(meeting, ctx);
+    const all = await sessionsOf(info, ctx);
     const withTranscript = all.filter((s) => s.transcriptUrl);
     if (!withTranscript.length) {
       throw new Error(`"${info.title}" has no transcript${all.length ? ` in its ${all.length} recorded call(s)` : ""}. Teams keeps one only when transcription was turned on in the meeting.`);
@@ -659,7 +710,7 @@ export const handlers = {
       }
       s = matches.at(-1);
     }
-    const json = await transcriptOf(info, s);
+    const json = await transcriptOf(info, s, ctx);
     const fromSeconds = from ? (String(from).split(":").reduce((a, x) => a * 60 + Number(x), 0) || 0) : 0;
     const lines = teams.transcriptLines(json, { fromSeconds });
     let text = "";
@@ -681,8 +732,8 @@ export const handlers = {
     };
   },
 
-  async searchTranscripts({ query, meeting, limit = 30, meetings: maxMeetings = 10 }) {
-    let list = meeting ? [await resolveMeeting(meeting)] : (await teamsAndChats(true)).meetings.filter((m) => m.hasTranscript);
+  async searchTranscripts({ query, meeting, limit = 30, meetings: maxMeetings = 10 }, ctx) {
+    let list = meeting ? [await resolveMeeting(meeting, ctx)] : (await teamsAndChats(true, ctx)).meetings.filter((m) => m.hasTranscript);
     list = [...list].sort((a, b) => (b.lastActivity ?? "").localeCompare(a.lastActivity ?? "")).slice(0, maxMeetings);
     const results = [];
     const skipped = [];
@@ -691,19 +742,22 @@ export const handlers = {
     let searched = 0;
     for (const info of list) {
       if (shown >= limit) break; // enough matches; older meetings aren't read
+      ctx?.check(); // withdrawn: no more meetings are read
       searched++;
       let sessions;
       try {
-        sessions = (await sessionsOf(info)).filter((s) => s.transcriptUrl);
+        sessions = (await sessionsOf(info, ctx)).filter((s) => s.transcriptUrl);
       } catch (err) {
+        ctx?.check();
         skipped.push({ meeting: info.title, reason: err.message });
         continue;
       }
       for (const s of sessions.reverse()) {
         let json;
         try {
-          json = await transcriptOf(info, s);
+          json = await transcriptOf(info, s, ctx);
         } catch (err) {
+          ctx?.check();
           skipped.push({ meeting: info.title, session: s.start, reason: err.message });
           continue;
         }
@@ -728,13 +782,13 @@ export const handlers = {
   },
 
   /** Read-only diagnostics for development: a GET on a service, never its headers. */
-  async probe({ service, path, url }) {
+  async probe({ service, path, url }, ctx) {
     if (url) {
-      const res = await sharepointGet(url);
+      const res = await sharepointGet(url, ctx);
       return { status: res.status, text: res.text.slice(0, 20_000_000) };
     }
     if (!["chatsvc", "csa", "mt", "substrate"].includes(service)) throw new Error("Unknown service");
-    const res = await api(service, path, { raw: true });
+    const res = await api(service, path, { raw: true, ctx });
     return { status: res.status, text: res.text.slice(0, 20_000_000) };
   },
 
@@ -764,20 +818,20 @@ export const handlers = {
       if (threadId || subject) throw new Error("reply_to and subject are for channels; a new chat takes people and an optional title.");
       const me = await myMri();
       if (!me) throw new Error("Teams hasn't shown who is signed in yet. Reload the Teams tab and try again.");
-      const people = await resolvePeople(to, me);
+      const people = await resolvePeople(to, me, ctx);
       if (title && people.length < 2) throw new Error("A title is only for group chats (two or more people besides you).");
-      const existing = teams.findExistingChat((await teamsAndChats(true)).chats, people.map((p) => p.mri), me, title);
+      const existing = teams.findExistingChat((await teamsAndChats(true, ctx)).chats, people.map((p) => p.mri), me, title);
       const request = existing
         ? { conversation: { id: existing.id, kind: existing.kind, title: existing.title }, people, text: String(text), existingChat: true }
         : { conversation: null, newChat: { members: people.map((p) => p.mri), title: title ?? null }, people, text: String(text) };
       return askUserToConfirm(request, ctx);
     }
-    const conv = await resolve(conversation);
+    const conv = await resolve(conversation, ctx);
     if (threadId && conv.kind !== "channel") throw new Error("reply_to is only for channel posts; in a chat, just send the message.");
     if (subject && (conv.kind !== "channel" || threadId)) throw new Error("A subject is only for a new channel post.");
     let replyingTo = null;
     if (threadId) {
-      const root = (await fetchMessages(conv.id, { limit: 1, threadId, includeSystem: false })).find((m) => String(m.id) === String(threadId));
+      const root = (await fetchMessages(conv.id, { limit: 1, threadId, includeSystem: false, ctx })).find((m) => String(m.id) === String(threadId));
       replyingTo = root ? teams.parseMessage(root) : { id: threadId };
     }
     const request = { conversation: conv, text: String(text), threadId: threadId ?? null, subject: subject ?? null, replyingTo };
@@ -810,7 +864,14 @@ async function createChat({ members, title }) {
 
 async function sendMessage({ conversation, newChat, people, text, threadId, subject }) {
   if (newChat) {
-    const id = await createChat(newChat);
+    let id;
+    try {
+      id = await createChat(newChat);
+    } catch (err) {
+      // Without an answer the chat may exist, but the message was never sent.
+      if (err.outcomeUnknown) err.chatMayExist = true;
+      throw err;
+    }
     const title = newChat.title ?? people.map((p) => p.name).join(", ");
     const r = await sendMessage({ conversation: { id, title }, text });
     return { ...r, newChat: true, conversationId: id };
@@ -919,7 +980,14 @@ function onConfirmMessage(msg, sender, sendResponse) {
         p.finish(await sendMessage(p.request), true);
         sendResponse({ ok: true });
       } catch (err) {
-        p.finish({ sent: false, reason: `Sending failed: ${err.message}` }, true);
+        // Without an answer the post may have gone through: saying it failed would invite a second one.
+        const cause = /[.!?]$/.test(err.message) ? err.message : `${err.message}.`;
+        const reason = err.chatMayExist
+          ? `Creating the chat did not finish: ${cause} The chat may have been created, without the message: check with list_chats before trying again.`
+          : err.outcomeUnknown
+            ? `Sending did not finish: ${cause} The message may have been posted: check with read_messages before sending again.`
+            : `Sending failed: ${err.message}`;
+        p.finish({ sent: false, reason }, true);
         sendResponse({ ok: false, error: err.message });
       }
     })();
@@ -1072,23 +1140,56 @@ async function connect() {
 /** Requests being run, by id, so they can be withdrawn (a cancel from the server, or their connection closed). */
 const running = new Map();
 
-/** What a handler gets besides its params: whether the request was withdrawn, and onCancel(f) (returns a stop function). */
-function requestContext(conn) {
+/**
+ * What a handler gets besides its params: whether the request was withdrawn (by the server,
+ * its connection closing, or its deadline passing), onCancel(f) (returns a stop function),
+ * check() (throws once withdrawn) and its absolute `deadline` (null without timeoutMs).
+ */
+function requestContext(conn, timeoutMs, sentDeadline) {
   const listeners = new Set();
+  let timer = null;
+  // The server's own deadline when it sends one (newer servers): it stopped waiting then, and the
+  // request may have taken a moment to arrive.
+  const deadline = timeoutMs > 0 ? Math.min(Date.now() + timeoutMs, sentDeadline > 0 ? sentDeadline : Infinity) : null;
+  const limitReached = () => `The request's time limit (${secondsOf(timeoutMs)} s) passed before Teams answered.`;
   const ctx = {
     conn,
     cancelled: false,
-    cancel() {
+    reason: null,
+    deadline,
+    cancel(reason = "The request was withdrawn.") {
       if (ctx.cancelled) return;
       ctx.cancelled = true;
+      ctx.reason = new Error(reason);
+      clearTimeout(timer);
       for (const f of [...listeners]) f();
     },
     onCancel(f) {
       listeners.add(f);
       return () => listeners.delete(f);
     },
+    check() {
+      // The deadline counts even before its timer fired (e.g. a server deadline that passed on the way).
+      if (!ctx.cancelled && deadline !== null && Date.now() >= deadline) ctx.cancel(limitReached());
+      if (ctx.cancelled) throw ctx.reason;
+    },
+    /** The request ended: its deadline no longer matters. */
+    end() {
+      clearTimeout(timer);
+    },
   };
+  if (deadline) timer = setTimeout(() => ctx.cancel(limitReached()), Math.max(0, deadline - Date.now()));
   return ctx;
+}
+
+/** `promise`, unless the request (ctx) is withdrawn first: then its reason. The promise itself goes on (others may share it). */
+function guarded(promise, ctx) {
+  if (!ctx) return promise;
+  if (ctx.cancelled) return Promise.reject(ctx.reason);
+  return new Promise((resolve, reject) => {
+    const stop = ctx.onCancel(() => reject(ctx.reason));
+    promise.then(resolve, reject).finally(stop);
+  });
 }
 
 /** Withdraws the requests that came on `conn`: their answers can no longer arrive. */
@@ -1108,7 +1209,7 @@ export async function dispatch(msg, send, conn = null) {
     return;
   }
   if (msg.type !== "request") return;
-  const ctx = requestContext(conn);
+  const ctx = requestContext(conn, Number(msg.timeoutMs), Number(msg.deadline));
   running.set(msg.id, ctx);
   const handler = Object.hasOwn(handlers, msg.method) ? handlers[msg.method] : null;
   try {
@@ -1118,6 +1219,7 @@ export async function dispatch(msg, send, conn = null) {
   } catch (err) {
     send({ type: "response", id: msg.id, ok: false, error: err?.message ?? String(err) });
   } finally {
+    ctx.end();
     if (running.get(msg.id) === ctx) running.delete(msg.id);
   }
 }
