@@ -162,6 +162,13 @@ export class ExtensionBridge {
     return this.opts.maxMessageBytes;
   }
 
+  /** Read-only, for tests: calls waiting for an answer, and (hub) peers' calls being run. */
+  get inFlight(): { pending: number; peerCalls: number } {
+    let peerCalls = 0;
+    for (const calls of this.peerCalls.values()) peerCalls += calls.size;
+    return { pending: this.pending.size, peerCalls };
+  }
+
   /** Becomes the hub, or a peer of the existing hub. Keeps retrying in the background if neither works. */
   async start(): Promise<void> {
     if (this.closed) return;
@@ -289,6 +296,16 @@ export class ExtensionBridge {
     const key = (i: ExtensionInfo) => i.instance ?? `${i.origin}|${i.browser}`;
     for (const [s, i] of others) {
       if (key(i) === key(info) || (ours && i.origin !== TRUSTED_EXTENSION_ORIGIN) || (!ours && !i.instance)) {
+        // Its calls fail now (below), before it sees the close: have it drop them first, so an
+        // open confirmation window closes instead of posting on a click in between.
+        for (const [id, p] of this.pending) {
+          if (p.socket !== s || s.readyState !== WebSocket.OPEN) continue;
+          try {
+            s.send(JSON.stringify({ type: "cancel", id }));
+          } catch {
+            // closing anyway
+          }
+        }
         s.close(4000, "replaced");
         // Its close event comes later and no longer finds it, so fail its calls now.
         this.sockets.delete(s);
