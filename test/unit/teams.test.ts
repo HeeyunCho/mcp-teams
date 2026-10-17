@@ -559,3 +559,21 @@ describe("capText", () => {
     expect(m.replies[0].text).toBe(`${"한".repeat(99)}…`);
   });
 });
+
+describe("Retry-After", () => {
+  const now = Date.parse("2026-10-01T09:00:00Z");
+  it("2.2: reads seconds or an HTTP date as the wait in ms", () => {
+    expect(teams.retryAfterMs("2", now)).toBe(2_000);
+    expect(teams.retryAfterMs("1.5", now)).toBe(1_500);
+    expect(teams.retryAfterMs("Thu, 01 Oct 2026 09:00:03 GMT", now)).toBe(3_000);
+  });
+
+  it("2.2: waits 5 s when Retry-After is missing or unreadable, at least 1 s, and at most 60 s", () => {
+    expect(teams.retryAfterMs(null, now)).toBe(5_000);
+    expect(teams.retryAfterMs("", now)).toBe(5_000);
+    expect(teams.retryAfterMs("soon", now)).toBe(5_000);
+    expect(teams.retryAfterMs("0", now)).toBe(1_000);
+    expect(teams.retryAfterMs("Thu, 01 Oct 2026 08:59:00 GMT", now)).toBe(1_000);
+    expect(teams.retryAfterMs("600", now)).toBe(60_000);
+  });
+});
