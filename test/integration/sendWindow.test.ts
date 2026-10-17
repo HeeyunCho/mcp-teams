@@ -164,6 +164,34 @@ describe("send confirmation window", () => {
     expect(worker.pendingSendCount()).toBe(0);
   });
 
+  it("1.2: a replaced extension connection is told to cancel its pending calls before it closes", async () => {
+    h = await bridgeHarness();
+    const hub = await h.session();
+    const old = await h.extension({ instance: "profile-1", reconnect: false, handle: () => new Promise(() => {}) });
+    const call = hub.call("requestSend", SEND, 60_000);
+    call.catch(() => {});
+    await until(() => old.requests().length === 1, 3_000, "the send reaches the extension");
+    const { id } = old.requests()[0];
+    const closed = new Promise((r) => old.ws.once("close", r));
+    await h.extension({ instance: "profile-1" });
+    await closed;
+    // Messages after the close can't arrive: the cancel came before it.
+    expect(old.received.some((m) => m.type === "cancel" && m.id === id)).toBe(true);
+    await expect(call).rejects.toThrow("reconnected");
+    expect(hub.inFlight.pending).toBe(0);
+  });
+
+  it("1.2: the browser reconnecting (connection replaced) closes the window; nothing is sent", async () => {
+    const { hub, fake, worker } = await setup();
+    const call = hub.call("requestSend", SEND, 60_000);
+    call.catch(() => {});
+    const w = await windowOpened(fake);
+    await h!.extension({ instance: String(fake.local.get("instance")), reconnect: false });
+    await expect(call).rejects.toThrow("reconnected");
+    await expectWithdrawn(fake, worker, w);
+    expect(hub.inFlight.pending).toBe(0);
+  });
+
   it("1.2: an extension that doesn't know cancel gets one, ignores it, and keeps working", async () => {
     h = await bridgeHarness();
     const hub = await h.session();
