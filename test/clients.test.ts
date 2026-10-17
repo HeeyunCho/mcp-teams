@@ -1,6 +1,6 @@
 import { mkdirSync, mkdtempSync, readFileSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, posix } from "node:path";
 import { describe, expect, it } from "vitest";
 import { applyPlan, knownClients, planClients, upsertCodexToml, upsertJson } from "../src/clients.js";
 
@@ -74,12 +74,12 @@ describe("upsertCodexToml", () => {
 
 describe("knownClients and planClients", () => {
   it("knows where each app keeps its config on each platform", () => {
-    const mac = Object.fromEntries(knownClients("/Users/a", "darwin", {}).map((c) => [c.name, join(c.dir, c.file)]));
+    const mac = Object.fromEntries(knownClients("/Users/a", "darwin", {}).map((c) => [c.name, posix.join(c.dir, c.file)]));
     expect(mac["Claude Desktop"]).toBe("/Users/a/Library/Application Support/Claude/claude_desktop_config.json");
     expect(mac["VS Code"]).toBe("/Users/a/Library/Application Support/Code/User/mcp.json");
     expect(mac.Codex).toBe("/Users/a/.codex/config.toml");
     const win = Object.fromEntries(knownClients("C:/Users/a", "win32", { APPDATA: "C:/Users/a/AppData/Roaming" }).map((c) => [c.name, c.dir]));
-    expect(win["Claude Desktop"]).toBe(join("C:/Users/a/AppData/Roaming", "Claude"));
+    expect(win["Claude Desktop"]).toBe("C:\\Users\\a\\AppData\\Roaming\\Claude");
   });
 
   it("plans only for installed apps, and applying keeps a backup", () => {
