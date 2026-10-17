@@ -1,7 +1,8 @@
 // A fake `chrome` for running the extension's service worker (extension/background.js) in
 // tests, shaped like a browser with Teams open. The worker's requests run in a Teams tab
-// through chrome.scripting.executeScript(pageFetch); here they go to scripted fake services
-// (chatsvc, csa, mt, substrate, and SharePoint for transcripts), and the test sees each one.
+// through chrome.scripting.executeScript(pageFetch). Here pageFetch runs from its source, as
+// Chrome runs it, with a fetch that goes to scripted fake services (chatsvc, csa, mt,
+// substrate, and SharePoint for transcripts), and the test sees each request.
 import { expect, vi } from "vitest";
 import WsWebSocket from "ws";
 
@@ -33,7 +34,7 @@ export const networkError = (message = "Failed to fetch"): NoAnswer => ({ status
 /** The page's fetch hit its timeout: pageFetch's { status: 0, text: "", error: "timeout" }. */
 export const timedOut = (): NoAnswer => networkError("timeout");
 
-/** A promise that never settles: a tab script that never runs (e.g. a frozen tab). */
+/** A promise that never settles: Teams never answers (the page's fetch waits until its own timeout). */
 export const never = <T = never>() => new Promise<T>(() => {});
 
 /** One request the worker sent to a Teams service. */
@@ -137,13 +138,25 @@ export function createFakeChrome({ services = {}, captured = [...TEAMS_SERVICES]
     return null;
   };
 
-  const toResult = async (x: unknown) => {
-    const r = await x;
-    if (r === undefined) return [{ result: { status: 404, text: "", location: null } }];
-    if (isNoAnswer(r)) return [{ result: { status: 0, text: "", error: r.error } }];
+  /** The page's fetch: sends the request to its fake service, and gives up when `signal` aborts, as fetch does. */
+  const fakeFetch = (tabId: number) => async (url: string, init: { method: string; headers: Record<string, string>; body?: string; signal?: AbortSignal }) => {
+    const route = routeOf(url);
+    if (!route) throw new Error(`fakeChrome: no fake service for ${url}`);
+    init.signal?.throwIfAborted();
+    const req: SentRequest = { ...route, method: init.method, url, body: init.body == null ? null : JSON.parse(init.body), headers: init.headers, tabId };
+    sent.push(req);
+    const answer = services[route.service];
+    const r = await new Promise((resolve, reject) => {
+      init.signal?.addEventListener("abort", () => reject(init.signal!.reason), { once: true });
+      Promise.resolve(answer ? answer(req) : undefined).then(resolve, reject);
+    });
+    if (isNoAnswer(r)) throw r.error === "timeout" ? new DOMException("The operation timed out.", "TimeoutError") : new TypeError(r.error);
+    if (r === undefined) return new Response("", { status: 404 });
     const { status, body, text, location = null } = isReply(r) ? r : { status: 200, body: r, text: undefined, location: null };
-    return [{ result: { status, text: text ?? (body === undefined ? "" : JSON.stringify(body)), location } }];
+    return new Response(text ?? (body === undefined ? "" : JSON.stringify(body)), { status, headers: location ? { location } : {} });
   };
+  /** Tabs whose scripts wait (a frozen or discarded tab), and the wake-up of each waiting script. */
+  const frozen = new Map<number, (() => void)[]>();
 
   const windowRemoved = event<(windowId: number) => void>();
   const runtimeMessage = event<(msg: any, sender: any, sendResponse: (r: unknown) => void) => unknown>();
@@ -155,13 +168,11 @@ export function createFakeChrome({ services = {}, captured = [...TEAMS_SERVICES]
       if (func.name !== "pageFetch") throw new Error(`fakeChrome: unexpected tab script ${func.name}`);
       // Like Chrome: a tab that doesn't exist (or was closed) runs nothing.
       if (!tabs.some((t) => t.id === target.tabId)) throw new Error(`No tab with id: ${target.tabId}.`);
-      const [url, method, headers, body] = args;
-      const route = routeOf(url);
-      if (!route) throw new Error(`fakeChrome: no fake service for ${url}`);
-      const req: SentRequest = { ...route, method, url, body, headers, tabId: target.tabId };
-      sent.push(req);
-      const answer = services[route.service];
-      return toResult(answer ? answer(req) : undefined);
+      const waiting = frozen.get(target.tabId);
+      if (waiting) await new Promise<void>((wake) => waiting.push(wake));
+      // Chrome runs the function from its source in the page, so it can use nothing of the worker.
+      const script = new Function("fetch", `return (${func.toString()})`)(fakeFetch(target.tabId));
+      return [{ result: await script(...args) }];
     }),
     tabsQuery: vi.fn(async ({ url }: { url?: string | string[] } = {}) => {
       const patterns = (url === undefined ? [] : Array.isArray(url) ? url : [url]).map(patternToRegExp);
@@ -223,6 +234,16 @@ export function createFakeChrome({ services = {}, captured = [...TEAMS_SERVICES]
       const i = tabs.findIndex((t) => t.id === tabId);
       if (i >= 0) tabs.splice(i, 1);
     },
+    /** The tab stops running scripts (frozen or discarded): executeScript waits until wake(). */
+    freezeTab(tabId: number) {
+      if (!frozen.has(tabId)) frozen.set(tabId, []);
+    },
+    /** A frozen tab wakes: the scripts that waited run now. */
+    wake(tabId: number) {
+      const waiting = frozen.get(tabId) ?? [];
+      frozen.delete(tabId);
+      for (const w of waiting) w();
+    },
     /** Chrome reports that the user closed a window. */
     closeWindow: (windowId: number) => windowRemoved.listeners.forEach((l) => l(windowId)),
     /** Runs the worker's webRequest listeners whose URL filter matches, as Chrome would. */
@@ -259,7 +280,7 @@ export type FakeChrome = ReturnType<typeof createFakeChrome>;
 /** The service worker's exports (extension/background.js). */
 export interface Worker {
   handlers: Record<string, (params: any) => Promise<any>>;
-  dispatch: (msg: { type: string; id?: string; method?: string; params?: unknown }, send: (reply: object) => void) => Promise<void>;
+  dispatch: (msg: { type: string; id?: string; method?: string; params?: unknown; timeoutMs?: number }, send: (reply: object) => void) => Promise<void>;
   registerListeners: () => void;
   /** How many confirmation windows wait for the user's decision. */
   pendingSendCount: () => number;

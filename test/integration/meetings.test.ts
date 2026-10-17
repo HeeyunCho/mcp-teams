@@ -126,6 +126,22 @@ describe("meeting chat read once per call", () => {
     expect(r.note).toMatch(/47 older meetings/);
   });
 
+  it("2.1: a cancelled search_transcripts makes no further requests", async () => {
+    // Each transcript takes a moment to load, so the cancel comes while the scan is under way.
+    const slow = (req: SentRequest) => new Promise((r) => setTimeout(() => r(sharepoint(req)), 100));
+    const fake = createFakeChrome({ services: { csa: csaWith(10), chatsvc: chatsvcWith(1), sharepoint: slow } });
+    const worker = await loadWorker(fake);
+    const replies: any[] = [];
+    const done = worker.dispatch({ type: "request", id: "s1", method: "searchTranscripts", params: { query: "budget", meetings: 10, limit: 200 } }, (r) => replies.push(r));
+    await vi.waitFor(() => expect(fake.count("sharepoint")).toBe(1));
+    const sentAtCancel = fake.sent.length;
+    await worker.dispatch({ type: "cancel", id: "s1" }, () => {});
+    await done;
+    await new Promise((r) => setTimeout(r, 300));
+    expect(fake.sent.length).toBe(sentAtCancel);
+    expect(replies).toEqual([expect.objectContaining({ id: "s1", ok: false })]);
+  });
+
   it("1.3: the same meeting under another chatsvc base is not served from the cache", async () => {
     const fake = createFakeChrome({ services: { csa: csaWith(1), chatsvc: chatsvcWith(1), sharepoint } });
     const worker = await loadWorker(fake);
