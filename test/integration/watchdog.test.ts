@@ -31,14 +31,14 @@ afterEach(async () => {
 /**
  * A hub that pairs with the worker like the real one. `heartbeatMs`: what its welcome declares
  * (undefined: declares nothing); `pingEveryMs`: how often it sends {type:"ping"} (0: never, a
- * frozen hub). Records when each connection was welcomed and closed.
+ * frozen hub). Records when each connection was opened, welcomed and closed.
  */
 async function scriptedHub({ heartbeatMs, pingEveryMs = 0 }: { heartbeatMs?: number; pingEveryMs?: number }) {
   const port = await freePort();
-  const connections: { welcomedAt?: number; closedAt?: number }[] = [];
+  const connections: { openedAt: number; welcomedAt?: number; closedAt?: number }[] = [];
   wss = new WebSocketServer({ host: "127.0.0.1", port });
   wss.on("connection", (ws: WebSocket) => {
-    const c: (typeof connections)[number] = {};
+    const c: (typeof connections)[number] = { openedAt: Date.now() };
     connections.push(c);
     ws.on("close", () => (c.closedAt = Date.now()));
     ws.send(JSON.stringify({ type: "challenge", nonce: "challenge-1" }));
@@ -80,11 +80,12 @@ describe("2.3: extension watchdog", () => {
     const hub = await scriptedHub({ heartbeatMs: PERIOD });
     await connectedWorker(hub.port, () => hub.connections[0]?.welcomedAt !== undefined);
     await vi.waitFor(() => expect(hub.connections.length).toBeGreaterThanOrEqual(2), { timeout: 10 * PERIOD });
-    const first = hub.connections[0];
-    // The frozen hub's connection is dropped, after about 2 periods of silence, not sooner.
-    expect(first.closedAt).toBeDefined();
-    expect(first.closedAt! - first.welcomedAt!).toBeGreaterThanOrEqual(2 * PERIOD);
-    expect(first.closedAt! - first.welcomedAt!).toBeLessThan(3 * PERIOD + 300);
+    // It gave up on the frozen hub after about 2 periods of silence, not sooner (the new
+    // connection may reach the hub before the old one's close does).
+    const [first, second] = hub.connections;
+    expect(second.openedAt - first.welcomedAt!).toBeGreaterThanOrEqual(2 * PERIOD);
+    expect(second.openedAt - first.welcomedAt!).toBeLessThan(3 * PERIOD + 300);
+    await vi.waitFor(() => expect(first.closedAt).toBeDefined(), { timeout: 2_000 });
   });
 
   it("2.3: pings from the hub keep the connection", async () => {
