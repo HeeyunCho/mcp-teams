@@ -6,7 +6,7 @@
  */
 import { copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, posix, win32 } from "node:path";
 
 export interface ServerCommand {
   command: string;
@@ -80,19 +80,21 @@ export function upsertCodexToml(text: string | null, cmd: ServerCommand): { stat
 
 /** The AI apps with a config file we know, for this platform. */
 export function knownClients(home = homedir(), platform = process.platform, env = process.env): Client[] {
+  // Paths follow the target platform, not the OS this runs on.
+  const p = platform === "win32" ? win32 : posix;
   const appData =
     platform === "darwin"
-      ? join(home, "Library", "Application Support")
+      ? p.join(home, "Library", "Application Support")
       : platform === "win32"
-        ? (env.APPDATA ?? join(home, "AppData", "Roaming"))
-        : join(home, ".config");
+        ? (env.APPDATA ?? p.join(home, "AppData", "Roaming"))
+        : p.join(home, ".config");
   return [
-    { name: "Claude Desktop", dir: join(appData, "Claude"), file: "claude_desktop_config.json", format: "json", section: "mcpServers" },
-    { name: "Cursor", dir: join(home, ".cursor"), file: "mcp.json", format: "json", section: "mcpServers" },
-    { name: "VS Code", dir: join(appData, "Code", "User"), file: "mcp.json", format: "json", section: "servers", extra: { type: "stdio" } },
-    { name: "Windsurf", dir: join(home, ".codeium", "windsurf"), file: "mcp_config.json", format: "json", section: "mcpServers" },
-    { name: "Gemini CLI", dir: join(home, ".gemini"), file: "settings.json", format: "json", section: "mcpServers" },
-    { name: "Codex", dir: join(home, ".codex"), file: "config.toml", format: "toml" },
+    { name: "Claude Desktop", dir: p.join(appData, "Claude"), file: "claude_desktop_config.json", format: "json", section: "mcpServers" },
+    { name: "Cursor", dir: p.join(home, ".cursor"), file: "mcp.json", format: "json", section: "mcpServers" },
+    { name: "VS Code", dir: p.join(appData, "Code", "User"), file: "mcp.json", format: "json", section: "servers", extra: { type: "stdio" } },
+    { name: "Windsurf", dir: p.join(home, ".codeium", "windsurf"), file: "mcp_config.json", format: "json", section: "mcpServers" },
+    { name: "Gemini CLI", dir: p.join(home, ".gemini"), file: "settings.json", format: "json", section: "mcpServers" },
+    { name: "Codex", dir: p.join(home, ".codex"), file: "config.toml", format: "toml" },
   ];
 }
 
