@@ -21,3 +21,19 @@ jobs:
       - run: npm ci
 
       - run: npm test
+
+  # Same tests on Windows. Non-blocking until the first failures are fixed.
+  test-windows:
+    runs-on: windows-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - run: npm ci
+
+      - run: npm test
