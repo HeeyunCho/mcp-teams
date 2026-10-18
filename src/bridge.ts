@@ -556,8 +556,12 @@ export class ExtensionBridge {
             this.closeSlowPeer(p);
             continue;
           }
+          // The last ping may still wait behind the data, so it can't have been answered: the
+          // next tick closes the peer if the backlog lasts, and lets it be if it drained.
           this.backlogged.add(p);
-        } else this.backlogged.delete(p);
+          continue;
+        }
+        this.backlogged.delete(p);
         if (!this.alive.has(p)) {
           p.terminate();
           continue;
