@@ -1,14 +1,15 @@
 // 2.3: liveness between the hub and its peers. The hub pings each peer every keep-alive period
 // and drops one that stops answering; a peer drops a hub that declared its heartbeat but stopped
 // pinging (a suspended or hung server), so its calls fail at once instead of hanging, and the
-// takeover path runs. Real timers, with a 500 ms period so "within 2 periods" is measurable.
+// takeover path runs. Real timers, with a 1 s period so "within 2 periods" is measurable (a peer's
+// watchdog never waits under 2 s).
 import { randomUUID } from "node:crypto";
 import { afterEach, describe, expect, it } from "vitest";
 import WebSocket, { WebSocketServer } from "ws";
 import { LOST_CALL, isLostCall, proof } from "../../src/bridge.js";
 import { FAST, TOKEN, bridgeHarness, until, type BridgeHarness } from "../helpers/bridgeHarness.js";
 
-const PERIOD = 500;
+const PERIOD = 1_000;
 const OPTIONS = { ...FAST, keepAliveMs: PERIOD };
 
 let h: BridgeHarness | undefined;
@@ -95,10 +96,23 @@ describe("2.3: peer heartbeat", () => {
     expect(isLostCall(outcome!.err.message)).toBe(true);
     // The hub went silent at its welcome: no ping ever came.
     const silentFor = outcome!.at - hub.connections[0].welcomedAt!;
-    expect(silentFor).toBeGreaterThanOrEqual(PERIOD);
+    expect(silentFor).toBeGreaterThanOrEqual(2 * PERIOD);
     expect(silentFor).toBeLessThan(2 * PERIOD + 300);
     // The takeover path runs: it pairs again with whoever holds the port.
     await until(() => hub.connections.length >= 2, 3_000, "the peer to join again");
+  });
+
+  it("2.3: a peer's watchdog never waits under 2 s, however short the declared period (a busy machine runs timers late)", async () => {
+    h = await bridgeHarness(OPTIONS);
+    const hub = await frozenHub(h.port, 200);
+    const peer = await h.session();
+    const call = peer.call("listChats", {}, 60_000).then(
+      () => null,
+      (err: Error) => ({ err, at: Date.now() }),
+    );
+    const outcome = await call;
+    expect(outcome?.err.message).toBe(LOST_CALL.hubSilent);
+    expect(outcome!.at - hub.connections[0].welcomedAt!).toBeGreaterThanOrEqual(2_000);
   });
 
   it("2.3: a peer keeps a hub that declares no heartbeat (0.2.13 and older never ping peers)", async () => {
@@ -106,7 +120,7 @@ describe("2.3: peer heartbeat", () => {
     const hub = await frozenHub(h.port);
     const peer = await h.session();
     expect(peer.role).toBe("peer");
-    await new Promise((r) => setTimeout(r, 6 * PERIOD));
+    await new Promise((r) => setTimeout(r, 4 * PERIOD));
     expect(hub.connections).toHaveLength(1);
     expect(hub.connections[0].closedAt).toBeUndefined();
     expect(peer.role).toBe("peer");
@@ -118,7 +132,7 @@ describe("2.3: peer heartbeat", () => {
     await h.extension();
     const peer = await h.session();
     const hubSocket = (peer as any).hub;
-    await new Promise((r) => setTimeout(r, 6 * PERIOD));
+    await new Promise((r) => setTimeout(r, 4 * PERIOD));
     expect(peer.role).toBe("peer");
     expect((peer as any).hub).toBe(hubSocket);
     expect(await peer.call("status", {})).toEqual({ ok: true });
@@ -197,6 +211,36 @@ describe("2.3: slow peers", () => {
     const { tookMs, closeCode } = await stallPeer(keepAliveMs, { afterPing: true });
     expect(tookMs).toBeLessThanOrEqual(2 * keepAliveMs + 500);
     expect(SLOW_PEER_CODES).toContain(closeCode);
+  }, 30_000);
+
+  it("2.3: a peer that reads one large answer slowly keeps its live hub (the hub's pings go on behind the backlog)", async () => {
+    // The answer lands right after a ping, and the peer reads nothing for 1.3 periods: the hub
+    // sees the backlog at exactly one tick, then it drains. Neither side may drop the other.
+    const keepAliveMs = 1_000;
+    h = await bridgeHarness({ ...FAST, keepAliveMs, maxPeerBufferedBytes: LIMIT });
+    const hub = await h.session();
+    const big = "x".repeat(16 * 1024 * 1024);
+    let pinged = false;
+    await h.extension({ handle: async () => (await until(() => pinged, 4 * keepAliveMs, "a ping to the peer"), big) });
+    const peer = await h.session();
+    const peerSocket = [...(hub as any).peers][0];
+    const ping = peerSocket.ping.bind(peerSocket);
+    // Pings after the first go out 150 ms late (a busy hub), so a skipped one is always missed.
+    peerSocket.ping = (...args: unknown[]) => {
+      const late = pinged;
+      pinged = true;
+      setTimeout(() => peerSocket.readyState === 1 && ping(...args), late ? 150 : 0);
+    };
+    const hubSocket = (peer as any).hub;
+    const call = peer.call<string>("readMessages", {}, 60_000);
+    await until(() => peerSocket.bufferedAmount > LIMIT, 4 * keepAliveMs, "the backlog");
+    hubSocket._socket.pause();
+    await new Promise((r) => setTimeout(r, 1.3 * keepAliveMs));
+    hubSocket._socket.resume();
+    expect((await call).length).toBe(big.length);
+    await new Promise((r) => setTimeout(r, 2 * keepAliveMs));
+    expect((peer as any).hub).toBe(hubSocket);
+    expect((hub as any).peers.size).toBe(1);
   }, 30_000);
 
   it("2.3: over 4x the limit, a peer that doesn't read is closed (1013) at once, between ticks", async () => {

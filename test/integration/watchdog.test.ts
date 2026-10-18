@@ -4,7 +4,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { WebSocketServer, type WebSocket } from "ws";
 import { proof } from "../../src/bridge.js";
-import { FAST, bridgeHarness, freePort, type BridgeHarness } from "../helpers/bridgeHarness.js";
+import { FAST, TOKEN as HUB_TOKEN, bridgeHarness, freePort, type BridgeHarness } from "../helpers/bridgeHarness.js";
 import { connectWorker, createFakeChrome, loadWorker, NativeWebSocket, openedSockets } from "../helpers/fakeChrome.js";
 
 const TOKEN = "watchdog-token";
@@ -107,7 +107,7 @@ describe("2.3: extension watchdog", () => {
   it("2.3: a worker on a live hub stays connected across many periods", async () => {
     h = await bridgeHarness({ ...FAST, keepAliveMs: PERIOD });
     const bridge = await h.session();
-    const fake = createFakeChrome({ local: { token: "test-token", port: h.port } });
+    const fake = createFakeChrome({ local: { token: HUB_TOKEN, port: h.port } });
     const worker = await loadWorker(fake);
     worker.registerListeners();
     link = await connectWorker(fake, () => bridge.connected);
