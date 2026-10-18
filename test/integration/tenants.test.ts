@@ -204,6 +204,69 @@ describe("3.3: a send confirmed as one account is never posted as another", () =
     expect(posts(fake, switchedAt)).toEqual([]);
   });
 
+  /** Services where chatsvc takes any post (as Teams would for a chat it knows), and `held` service requests wait. */
+  const sendServices = (held: { service: "chatsvc" | "mt"; path: RegExp; until: Promise<void> }) => ({
+    ...tenantServices,
+    mt: async (req: SentRequest) => {
+      if (held.service === "mt" && held.path.test(req.path) && tenantOf(req) === "a") await held.until;
+      return tenantServices.mt(req);
+    },
+    chatsvc: async (req: SentRequest) => {
+      if (held.service === "chatsvc" && held.path.test(req.path) && tenantOf(req) === "a") await held.until;
+      if (!tenantOf(req)) return reply(401);
+      if (req.method === "POST" && req.path === "/v1/threads") return reply(201, {}, { location: `${BASES.chatsvc}/v1/threads/${encodeURIComponent("19:new@thread.v2")}` });
+      if (req.method === "POST") return { OriginalArrivalTime: Date.parse("2026-10-18T10:00:00Z") };
+      return tenantServices.chatsvc(req);
+    },
+  });
+  const postsAs = (fake: ReturnType<typeof createFakeChrome>, t: Tenant) => posts(fake, 0).filter((r) => tenantOf(r) === t);
+
+  it("3.3: a switch while the new chat is created (as a): the chat exists, but no message goes out as b", async () => {
+    let release = () => {};
+    const until = new Promise<void>((r) => (release = r));
+    const fake = createFakeChrome({ captured: [], services: sendServices({ service: "chatsvc", path: /^\/v1\/threads$/, until }) });
+    const worker = await loadWorker(fake);
+    worker.registerListeners();
+    for (const s of ["csa", "chatsvc", "mt"] as const) await teamsRequest(fake, s, "a");
+    const result = worker.handlers.requestSend({ to: ["8:orgid:00000000-0000-4000-8000-0000000000a2"], text: "Hi Sam" });
+    await vi.waitFor(() => expect(fake.spies.windowsCreate).toHaveBeenCalledTimes(1));
+
+    const clicked = click(fake, windowRequestId(fake));
+    await vi.waitFor(() => expect(posts(fake, 0).map((r) => r.path)).toEqual(["/v1/threads"]));
+    // The chat is being created as a when Teams switches to b.
+    for (const s of ["csa", "chatsvc", "mt"] as const) await teamsRequest(fake, s, "b");
+    release();
+    await clicked;
+
+    const r = await result;
+    expect(postsAs(fake, "b")).toEqual([]);
+    expect(r.sent).toBe(false);
+    expect(r.reason).toMatch(/chat was created/i);
+    expect(r.reason).toMatch(/no message was sent/i);
+    expect(r.reason).toMatch(/list_chats/);
+  });
+
+  it("3.3: a switch during the name lookup before a post into an existing chat: nothing goes out as b", async () => {
+    let release = () => {};
+    const until = new Promise<void>((r) => (release = r));
+    const fake = createFakeChrome({ captured: [], services: sendServices({ service: "mt", path: /fetchShortProfile/, until }) });
+    const worker = await loadWorker(fake);
+    worker.registerListeners();
+    for (const s of ["csa", "chatsvc", "mt"] as const) await teamsRequest(fake, s, "a");
+    const result = worker.handlers.requestSend({ conversation: "Alpha launch", text: "Hi Alex" });
+    await vi.waitFor(() => expect(fake.spies.windowsCreate).toHaveBeenCalledTimes(1));
+
+    const clicked = click(fake, windowRequestId(fake));
+    // The click passed; the post waits for the sender's own name (mt) when Teams switches to b.
+    await vi.waitFor(() => expect(fake.count("mt", /fetchShortProfile/)).toBe(1));
+    for (const s of ["csa", "chatsvc", "mt"] as const) await teamsRequest(fake, s, "b");
+    release();
+    await clicked;
+
+    await expect(result).resolves.toEqual({ sent: false, reason: CHANGED });
+    expect(posts(fake, 0)).toEqual([]);
+  });
+
   it("3.3: a new chat confirmed as tenant a, clicked after the switch to b: no chat is created", async () => {
     const fake = createFakeChrome({ captured: [], services: tenantServices });
     const worker = await loadWorker(fake);
