@@ -86,11 +86,12 @@ describe("3.2: the list tools reuse the one-minute chat list", () => {
     const s = await setup();
     close = s.close;
     const first = await s.tool("list_chats");
+    const namesLookedUp = s.fake.count("mt"); // chat members and meeting organizers, looked up apart
     const second = await s.tool("list_chats");
     expect(second).toEqual(first);
     expect(first.chats.map((c: { title: string }) => c.title)).toContain("Alex Doe");
     expect(s.fake.count("csa")).toBe(1);
-    expect(s.fake.count("mt")).toBe(1);
+    expect(s.fake.count("mt")).toBe(namesLookedUp);
   });
 
   it("3.2: list_chats, list_teams and list_meetings within 60 s share one csa request", async () => {
