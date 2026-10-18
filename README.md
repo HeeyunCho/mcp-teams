@@ -16,12 +16,12 @@ AI app ────stdio(MCP)──► mcp-teams server ──ws://127.0.0.1:473
 |---|---|
 | `get_version` | Server and extension versions, the connection status, and which Teams services have a session |
 | `reload_extension` | Reloads the browser extension from disk after an update and waits until it is back |
-| `list_teams` | Your teams with their channels (`include_ids: true` adds ids) |
-| `list_chats` | Your 1:1, group and meeting chats, most recent first: title (or the other members' names), last message, unread. Filter with `query` or `unread_only`. |
+| `list_teams` | Your teams with their channels (`include_ids: true` adds ids). Up to a minute old unless `refresh: true`. |
+| `list_chats` | Your 1:1, group and meeting chats, most recent first: title (or the other members' names), last message, unread. Filter with `query` or `unread_only`. The list can be up to a minute old; `refresh: true` reads it again (sending a message refreshes it). |
 | `read_messages` | The latest messages of a chat or channel, oldest first: sender, time, text, shared files, reactions. In channels, replies are nested under their post; `reply_to` reads one post's thread; `cursor` (the returned `olderCursor`) pages further back; `before` (a time) still works. |
 | `search_messages` | Searches all chats and channels with Microsoft Search, like the search box in Teams |
 | `find_people` | Looks people up by name or email: name, email, job title, department, office |
-| `list_meetings` | Your meetings (each has a meeting chat), most recent first: subject, scheduled time, organizer, whether there is a transcript, and whether another organization hosted it |
+| `list_meetings` | Your meetings (each has a meeting chat), most recent first: subject, scheduled time, organizer, whether there is a transcript, and whether another organization hosted it. Up to a minute old unless `refresh: true`. |
 | `get_meeting` | The calls held in a meeting (one per occurrence of a recurring one): start, end, who joined, the recording's link, whether there is a transcript |
 | `read_transcript` | What was said: `[hh:mm:ss] Speaker: text` lines and each speaker's talk time. Long transcripts continue with `from`. |
 | `search_transcripts` | Finds lines in the transcripts of your recent meetings that contain all the words of a query, each with the line before it |
