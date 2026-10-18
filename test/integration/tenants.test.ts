@@ -146,3 +146,76 @@ describe("3.3: switching tenants never returns the other tenant's data", () => {
     expect(fake.sent.slice(switchedAt).map(tenantOf)).not.toContain("a");
   });
 });
+
+describe("3.3: a switch that lands while a request runs", () => {
+  it("3.3: a chat list read as tenant a that finishes after the switch isn't kept for tenant b", async () => {
+    let release = () => {};
+    const held = new Promise<void>((r) => (release = r));
+    let hold = true;
+    const fake = createFakeChrome({
+      captured: [],
+      services: {
+        ...tenantServices,
+        // Tenant a's csa answers only once the test lets it (the switch lands meanwhile).
+        csa: async (req) => {
+          if (hold && tenantOf(req) === "a") await held;
+          return tenantServices.csa(req);
+        },
+      },
+    });
+    const worker = await loadWorker(fake);
+    worker.registerListeners();
+    for (const s of ["csa", "chatsvc", "mt"] as const) await teamsRequest(fake, s, "a");
+
+    const first = worker.handlers.readMessages({ conversation: "Alpha launch" }).catch((err: Error) => err);
+    await vi.waitFor(() => expect(fake.count("csa")).toBe(1));
+    // The user switches Teams to tenant b while a's chat list is still being read.
+    for (const s of ["csa", "chatsvc", "mt"] as const) await teamsRequest(fake, s, "b");
+    hold = false;
+    release();
+    await first;
+
+    const switchedAt = fake.sent.length;
+    await expect(worker.handlers.readMessages({ conversation: "Alpha launch" })).rejects.toThrow(/Alpha launch/);
+    expect(fake.count("csa")).toBe(2); // b's own list, read as b
+    expect(fake.sent.slice(switchedAt).filter((r) => messagesOf(r) === encodeURIComponent("19:alpha@thread.v2"))).toEqual([]);
+  });
+});
+
+describe("3.3: a send confirmed as one account is never posted as another", () => {
+  /** The id of the confirmation window opened `n`-th (0 = the first). */
+  const windowRequestId = (fake: ReturnType<typeof createFakeChrome>, n = 0) => /id=([^&]+)/.exec(fake.spies.windowsCreate.mock.calls[n][0]!.url!)![1];
+  const click = (fake: ReturnType<typeof createFakeChrome>, id: string) => fake.pageMessage(`confirm.html?id=${id}`, { type: "confirm:decide", id, approve: true });
+  const posts = (fake: ReturnType<typeof createFakeChrome>, from: number) => fake.sent.slice(from).filter((r) => r.service === "chatsvc" && r.method === "POST");
+  const CHANGED = "The signed-in Teams account changed since this was confirmed; nothing was sent.";
+
+  it("3.3: a message to a chat confirmed as tenant a, clicked after the switch to b: nothing is posted", async () => {
+    const fake = createFakeChrome({ captured: [], services: tenantServices });
+    const worker = await loadWorker(fake);
+    worker.registerListeners();
+    for (const s of ["csa", "chatsvc", "mt"] as const) await teamsRequest(fake, s, "a");
+    const result = worker.handlers.requestSend({ conversation: "Alpha launch", text: "Hi Alex" });
+    await vi.waitFor(() => expect(fake.spies.windowsCreate).toHaveBeenCalledTimes(1));
+
+    for (const s of ["csa", "chatsvc", "mt"] as const) await teamsRequest(fake, s, "b");
+    const switchedAt = fake.sent.length;
+    await click(fake, windowRequestId(fake));
+    await expect(result).resolves.toEqual({ sent: false, reason: CHANGED });
+    expect(posts(fake, switchedAt)).toEqual([]);
+  });
+
+  it("3.3: a new chat confirmed as tenant a, clicked after the switch to b: no chat is created", async () => {
+    const fake = createFakeChrome({ captured: [], services: tenantServices });
+    const worker = await loadWorker(fake);
+    worker.registerListeners();
+    for (const s of ["csa", "chatsvc", "mt"] as const) await teamsRequest(fake, s, "a");
+    const result = worker.handlers.requestSend({ to: ["8:orgid:00000000-0000-4000-8000-0000000000a2"], text: "Hi Sam" });
+    await vi.waitFor(() => expect(fake.spies.windowsCreate).toHaveBeenCalledTimes(1));
+
+    for (const s of ["csa", "chatsvc", "mt"] as const) await teamsRequest(fake, s, "b");
+    const switchedAt = fake.sent.length;
+    await click(fake, windowRequestId(fake));
+    await expect(result).resolves.toEqual({ sent: false, reason: CHANGED });
+    expect(posts(fake, switchedAt)).toEqual([]);
+  });
+});
