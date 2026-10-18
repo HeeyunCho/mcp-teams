@@ -780,12 +780,13 @@ export const handlers = {
     };
   },
 
-  async listTeams(_, ctx) {
-    return { teams: (await teamsAndChats(true, ctx)).teams };
+  // The three lists share teamsAndChats' one-minute cache; `refresh` reads it again first.
+  async listTeams({ refresh = false } = {}, ctx) {
+    return { teams: (await teamsAndChats(refresh === true, ctx)).teams };
   },
 
-  async listChats({ query, limit = 30, unreadOnly = false }, ctx) {
-    const data = await teamsAndChats(true, ctx);
+  async listChats({ query, limit = 30, unreadOnly = false, refresh = false }, ctx) {
+    const data = await teamsAndChats(refresh === true, ctx);
     let chats = data.chats;
     if (unreadOnly) chats = chats.filter((c) => c.unread);
     if (query) chats = chats.filter((c) => teams.matchesWords(c.title, query) || c.memberNames?.some((n) => teams.matchesWords(n, query)));
@@ -854,8 +855,8 @@ export const handlers = {
     return { count: people.length, people };
   },
 
-  async listMeetings({ query, limit = 20, transcriptOnly = false }, ctx) {
-    const data = await teamsAndChats(true, ctx);
+  async listMeetings({ query, limit = 20, transcriptOnly = false, refresh = false }, ctx) {
+    const data = await teamsAndChats(refresh === true, ctx);
     let meetings = data.meetings;
     if (query) meetings = meetings.filter((m) => teams.matchesWords(m.title, query) || teams.matchesWords(m.organizerName, query));
     if (transcriptOnly) meetings = meetings.filter((m) => m.hasTranscript);

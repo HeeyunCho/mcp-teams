@@ -78,7 +78,7 @@
     }
   },
   "list_chats": {
-    "description": "Lists your chats (1:1, group and meeting chats), most recent first, with their title (or the other members' names), the last message and whether it is unread. Returns ids for read_messages and send_message.",
+    "description": "Lists your chats (1:1, group and meeting chats), most recent first, with their title (or the other members' names), the last message and whether it is unread. Returns ids for read_messages and send_message. The list may be up to a minute old, so the last message and unread state can lag; pass refresh: true for the current ones.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -95,13 +95,18 @@
           "type": "integer",
           "minimum": 1,
           "maximum": 200
+        },
+        "refresh": {
+          "default": false,
+          "description": "Read the list from Teams again instead of reusing the one from the last minute: e.g. right after a chat was created or joined elsewhere, or for the current unread state",
+          "type": "boolean"
         }
       },
       "$schema": "http://json-schema.org/draft-07/schema#"
     }
   },
   "list_meetings": {
-    "description": "Lists your Teams meetings (each scheduled meeting or recurring series has a meeting chat), most recent activity first: subject, scheduled time (for a series, its first occurrence), organizer, whether a transcript exists, and whether another organization hosted it (`external`: its chat and recordings are usually no longer readable afterwards). Use get_meeting for the calls held and who attended, read_transcript for what was said, read_messages for the meeting chat.",
+    "description": "Lists your Teams meetings (each scheduled meeting or recurring series has a meeting chat), most recent activity first: subject, scheduled time (for a series, its first occurrence), organizer, whether a transcript exists, and whether another organization hosted it (`external`: its chat and recordings are usually no longer readable afterwards). The list may be up to a minute old (see refresh). Use get_meeting for the calls held and who attended, read_transcript for what was said, read_messages for the meeting chat.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -119,19 +124,29 @@
           "type": "integer",
           "minimum": 1,
           "maximum": 200
+        },
+        "refresh": {
+          "default": false,
+          "description": "Read the list from Teams again instead of reusing the one from the last minute: e.g. right after a chat was created or joined elsewhere, or for the current unread state",
+          "type": "boolean"
         }
       },
       "$schema": "http://json-schema.org/draft-07/schema#"
     }
   },
   "list_teams": {
-    "description": "Lists the teams you are a member of, each with its channels. Use 'Team/Channel' or a channel id as the conversation for read_messages and send_message.",
+    "description": "Lists the teams you are a member of, each with its channels. Use 'Team/Channel' or a channel id as the conversation for read_messages and send_message. The list may be up to a minute old (see refresh).",
     "inputSchema": {
       "type": "object",
       "properties": {
         "include_ids": {
           "default": false,
           "description": "Also return team and channel ids (long; 'Team/Channel' names are enough to address channels)",
+          "type": "boolean"
+        },
+        "refresh": {
+          "default": false,
+          "description": "Read the list from Teams again instead of reusing the one from the last minute: e.g. right after a chat was created or joined elsewhere, or for the current unread state",
           "type": "boolean"
         }
       },
