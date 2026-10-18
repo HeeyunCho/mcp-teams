@@ -42,11 +42,21 @@ let captureQueue = Promise.resolve(); // one capture at a time, so a switch is s
  * another tenant or account) retires the other services' sessions, which belong to the
  * previous one (or to nobody known), and the caches of what that user saw: the next request
  * to those services waits for Teams' own request as the new user.
+ *
+ * The same session again (same base, headers and user: every request Teams, or this worker in
+ * its tab, makes with it) isn't written: it only marks the stored one as seen now (`seenAt`).
  */
 async function storeCapture(service, capture) {
-  const update = { [`capture:${service}`]: capture };
+  const key = `capture:${service}`;
+  const { [key]: held, oid: was } = await chrome.storage.session.get([key, "oid"]);
+  if (sameSession(held, capture) && (!capture.oid || capture.oid === was)) {
+    seenAt.set(service, capture.at);
+    for (const f of [...captureSeen]) f(service);
+    return;
+  }
+  seenAt.delete(service);
+  const update = { [key]: capture };
   if (capture.oid) {
-    const { oid: was } = await chrome.storage.session.get("oid");
     if (was && was !== capture.oid) {
       const others = CAPTURED_SERVICES.filter((s) => s !== service).map((s) => `capture:${s}`);
       const held = await chrome.storage.session.get(others);
@@ -58,6 +68,18 @@ async function storeCapture(service, capture) {
   }
   await chrome.storage.session.set(update);
 }
+
+// service -> when Teams last sent the stored session again (in memory: no storage write for it)
+const seenAt = new Map();
+// Called with the service whenever its stored session is seen again (see waitForCapture).
+const captureSeen = new Set();
+
+const sameHeaders = (a = {}, b = {}) => {
+  const keys = Object.keys(a);
+  return keys.length === Object.keys(b).length && keys.every((k) => a[k] === b[k]);
+};
+/** Whether two captures hold the same session (when they were seen aside). */
+const sameSession = (a, b) => !!a && a.base === b.base && (a.region ?? null) === (b.region ?? null) && (a.oid ?? null) === (b.oid ?? null) && sameHeaders(a.headers, b.headers);
 
 const captureFilter = {
   urls: [
@@ -106,20 +128,43 @@ function recordCompleted(details) {
   updateTraffic((list) => teams.recordStatus(list, key, details.statusCode));
 }
 
+/** The service's captured session; its `at` is when Teams last sent it (stored, or seen again since). */
 async function getCapture(service) {
   const key = `capture:${service}`;
-  return (await chrome.storage.session.get(key))[key] ?? null;
+  const cap = (await chrome.storage.session.get(key))[key] ?? null;
+  const seen = seenAt.get(service);
+  return cap && seen > cap.at ? { ...cap, at: seen } : cap;
 }
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-/** Waits until a session newer than `since` is captured for the service; null on timeout. */
-async function waitForCapture(service, since, timeoutMs) {
-  for (const end = Date.now() + timeoutMs; Date.now() < end; await sleep(250)) {
-    const cap = await getCapture(service);
-    if (cap && cap.at > since) return cap;
-  }
-  return null;
+/**
+ * Waits until Teams sends the service a session after `since` (a new one, or the stored one
+ * again); null on timeout. Listens for the capture instead of asking for it.
+ */
+function waitForCapture(service, since, timeoutMs) {
+  const key = `capture:${service}`;
+  return new Promise((resolve) => {
+    let done = false;
+    const finish = (cap) => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      chrome.storage.onChanged.removeListener(onChanged);
+      captureSeen.delete(onSeen);
+      resolve(cap);
+    };
+    const check = async () => {
+      const cap = await getCapture(service);
+      if (cap && cap.at > since) finish(cap);
+    };
+    const onChanged = (changes, area) => area === "session" && changes[key]?.newValue && check();
+    const onSeen = (s) => s === service && check();
+    const timer = setTimeout(() => finish(null), timeoutMs);
+    chrome.storage.onChanged.addListener(onChanged);
+    captureSeen.add(onSeen);
+    check();
+  });
 }
 
 const OPEN_TAB_WAIT_MS = 60_000;
@@ -154,10 +199,30 @@ function openTeamsTab() {
   return opening;
 }
 
+// The tabs a request can run in: Teams, and SharePoint (transcripts), found with one lookup.
+const TEAMS_TAB = /^https:\/\/(teams\.cloud\.microsoft|teams\.microsoft\.com)\//;
+const TAB_URLS = [...TEAMS_URLS, "https://*.sharepoint.com/*"];
+
+/**
+ * The open Teams and SharePoint tabs. A call (`ctx`) looks them up once and reuses the list
+ * (with the tabs it opened added, see knownTab); without one, every time.
+ */
+function openTabs(ctx) {
+  if (!ctx) return chrome.tabs.query({ url: TAB_URLS });
+  ctx.tabs ??= chrome.tabs.query({ url: TAB_URLS });
+  return ctx.tabs;
+}
+
+/** Adds a tab the call opened (or found ready) to its list, so its next request finds it. */
+function knownTab(ctx, tab) {
+  if (ctx?.tabs) ctx.tabs = ctx.tabs.then((list) => [...list.filter((t) => t.id !== tab.id), tab]);
+  return tab;
+}
+
 /** The Teams tab to run requests in: one on the origin of the service's capture, else any. */
-async function findTeamsTab(origin) {
-  const tabs = await chrome.tabs.query({ url: TEAMS_URLS });
-  if (!tabs.length) return openTeamsTab();
+async function findTeamsTab(origin, ctx = null) {
+  const tabs = (await openTabs(ctx)).filter((t) => TEAMS_TAB.test(t.url ?? ""));
+  if (!tabs.length) return knownTab(ctx, await openTeamsTab());
   const sameOrigin = tabs.filter((t) => origin && t.url?.startsWith(origin));
   const pool = sameOrigin.length ? sameOrigin : tabs;
   return pool.find((t) => !t.discarded && t.status === "complete") ?? pool[0];
@@ -166,12 +231,35 @@ async function findTeamsTab(origin) {
 // Teams keeps routing for a moment after the page has loaded.
 const SETTLE_MS = 1_000;
 
+/**
+ * Waits until the tab is `ready(tab)`, listening for its updates: resolves with the tab, null
+ * once it is closed, or undefined after timeoutMs.
+ */
+function waitForTab(tabId, ready, timeoutMs) {
+  return new Promise((resolve) => {
+    let done = false;
+    const finish = (result) => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      chrome.tabs.onUpdated.removeListener(onUpdated);
+      chrome.tabs.onRemoved.removeListener(onRemoved);
+      resolve(result);
+    };
+    const onUpdated = (id, _change, tab) => id === tabId && ready(tab) && finish(tab);
+    const onRemoved = (id) => id === tabId && finish(null);
+    const timer = setTimeout(() => finish(undefined), timeoutMs);
+    chrome.tabs.onUpdated.addListener(onUpdated);
+    chrome.tabs.onRemoved.addListener(onRemoved);
+    chrome.tabs.get(tabId).then(
+      (t) => ready(t) && finish(t),
+      () => finish(null),
+    );
+  });
+}
+
 async function waitForTabLoaded(tabId, timeoutMs = 30_000) {
-  for (const end = Date.now() + timeoutMs; Date.now() < end; await sleep(250)) {
-    const t = await chrome.tabs.get(tabId).catch(() => null);
-    if (!t) return;
-    if (t.status === "complete") return sleep(SETTLE_MS);
-  }
+  if (await waitForTab(tabId, (t) => t.status === "complete", timeoutMs)) await sleep(SETTLE_MS);
 }
 
 const refreshing = new Map(); // service -> Promise<capture|null>, so parallel calls reload once
@@ -265,6 +353,7 @@ async function runInTab(tab, url, method, headers, body, ctx = null) {
     })
     // E.g. the tab closed or reloaded while the request ran: it may have reached Teams.
     .catch((err) => {
+      if (ctx) ctx.tabs = null; // the call's next request looks the tabs up again
       throw unanswered(String(err?.message ?? err));
     });
   let injection;
@@ -356,7 +445,7 @@ async function api(service, path, { method = "GET", body, raw = false, withLocat
   ctx?.check();
   let cap = await getCapture(service);
   // Opening a tab or waiting for a session can take a minute; a withdrawn request stops waiting.
-  let tab = await guarded(findTeamsTab(cap ? new URL(cap.base).origin : null), ctx);
+  let tab = await guarded(findTeamsTab(cap ? new URL(cap.base).origin : null, ctx), ctx);
   if (!cap) {
     cap = await guarded(refreshSession(service, tab, { quickWaitMs: service === "substrate" ? 2_000 : 4_000 }), ctx);
     if (!cap) throw new Error(SERVICE_HELP[service]);
@@ -372,7 +461,9 @@ async function api(service, path, { method = "GET", body, raw = false, withLocat
     meetingSessionsCache.clear();
     cap = await guarded(refreshSession(service, tab, { quickWaitMs: 0 }), ctx);
     if (!cap) throw new Error(SERVICE_HELP[service]);
-    tab = await guarded(findTeamsTab(new URL(cap.base).origin), ctx);
+    // The tab reloaded (or was closed meanwhile): look the tabs up again.
+    if (ctx) ctx.tabs = null;
+    tab = await guarded(findTeamsTab(new URL(cap.base).origin, ctx), ctx);
     await onCapture?.(cap);
     res = await sendTo(gateKey(service, cap.base), tab, urlFor(cap), method, cap.headers, body, ctx, wait, repeatable);
   }
@@ -616,8 +707,8 @@ const spOpening = new Map(); // origin -> Promise of that tab, so parallel calls
  * organizer's OneDrive, which doesn't answer the Teams page across origins. Opens the
  * origin in a pinned background tab when none is open.
  */
-async function sharepointTab(origin) {
-  const open = (await chrome.tabs.query({ url: `${origin}/*` })).filter((t) => !t.discarded);
+async function sharepointTab(origin, ctx = null) {
+  const open = (await openTabs(ctx)).filter((t) => !t.discarded && t.url?.startsWith(`${origin}/`));
   const ready = open.find((t) => t.status === "complete") ?? open[0];
   if (ready) return ready;
   if (!spOpening.has(origin)) {
@@ -631,16 +722,14 @@ async function sharepointTab(origin) {
         spTabs.set(origin, tab.id);
       }
       // Single sign-on goes through login.microsoftonline.com and comes back.
-      for (const end = Date.now() + OPEN_TAB_WAIT_MS; Date.now() < end; await sleep(500)) {
-        const t = await chrome.tabs.get(tab.id).catch(() => null);
-        if (!t) throw new Error("The SharePoint tab that was opened was closed. Try again.");
-        if (t.status === "complete" && t.url?.startsWith(`${origin}/`)) return t;
-      }
-      throw new Error(`OneDrive (${origin}) was opened in a background tab but isn't signed in yet. Sign in there, then try again.`);
+      const t = await waitForTab(tab.id, (x) => x.status === "complete" && !!x.url?.startsWith(`${origin}/`), OPEN_TAB_WAIT_MS);
+      if (t === null) throw new Error("The SharePoint tab that was opened was closed. Try again.");
+      if (!t) throw new Error(`OneDrive (${origin}) was opened in a background tab but isn't signed in yet. Sign in there, then try again.`);
+      return t;
     })().finally(() => spOpening.delete(origin));
     spOpening.set(origin, p);
   }
-  return spOpening.get(origin);
+  return knownTab(ctx, await spOpening.get(origin));
 }
 
 /** A GET on SharePoint with the browser's own SharePoint session. */
@@ -648,7 +737,7 @@ async function sharepointGet(url, ctx = null) {
   if (!SHAREPOINT_URL.test(url)) throw new Error("Not a SharePoint URL");
   ctx?.check();
   const origin = new URL(url).origin;
-  return sendTo(gateKey("sharepoint", origin), await guarded(sharepointTab(origin), ctx), url, "GET", {}, null, ctx, true);
+  return sendTo(gateKey("sharepoint", origin), await guarded(sharepointTab(origin, ctx), ctx), url, "GET", {}, null, ctx, true);
 }
 
 // "<accountKey of chatsvc>\n<transcript URL>" -> parsed transcript; a finished transcript doesn't

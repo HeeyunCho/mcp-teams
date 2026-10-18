@@ -75,6 +75,16 @@ export interface FakeChromeOptions {
   teamsTab?: boolean;
   /** chrome.storage.local at start (token, port, instance). */
   local?: Record<string, unknown>;
+  /**
+   * The worker's own requests (pageFetch in the Teams tab) reach its webRequest listeners, as in
+   * Chrome, where they are requests of the tab like Teams' own (default false: they don't).
+   */
+  seesOwnRequests?: boolean;
+  /**
+   * A reloaded or newly opened tab is "loading" for this long, then "complete", which
+   * chrome.tabs.onUpdated reports (default: complete at once, no event).
+   */
+  loadMs?: number;
 }
 
 interface Tab {
@@ -92,7 +102,7 @@ const event = <F extends Fn = Fn>() => {
 };
 const patternToRegExp = (p: string) => new RegExp(`^${p.replace(/[.+?^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*")}$`);
 
-export function createFakeChrome({ services = {}, captured = [...TEAMS_SERVICES], teamsTab = true, local: localInit = {} }: FakeChromeOptions = {}) {
+export function createFakeChrome({ services = {}, captured = [...TEAMS_SERVICES], teamsTab = true, local: localInit = {}, seesOwnRequests = false, loadMs }: FakeChromeOptions = {}) {
   const sent: SentRequest[] = [];
   const session = new Map<string, unknown>();
   const local = new Map<string, unknown>(Object.entries(localInit));
@@ -147,6 +157,8 @@ export function createFakeChrome({ services = {}, captured = [...TEAMS_SERVICES]
     init.signal?.throwIfAborted();
     const req: SentRequest = { ...route, method: init.method, url, body: init.body == null ? null : JSON.parse(init.body), headers: init.headers, tabId };
     sent.push(req);
+    // Chrome reports the request to webRequest listeners without waiting for them.
+    if (seesOwnRequests) void fireWebRequest("beforeSendHeaders", { url, method: init.method, requestHeaders: Object.entries(init.headers ?? {}).map(([name, value]) => ({ name, value })) });
     const answer = services[route.service];
     const r = await new Promise((resolve, reject) => {
       init.signal?.addEventListener("abort", () => reject(init.signal!.reason), { once: true });
@@ -166,6 +178,26 @@ export function createFakeChrome({ services = {}, captured = [...TEAMS_SERVICES]
   const runtimeMessage = event<(msg: any, sender: any, sendResponse: (r: unknown) => void) => unknown>();
   const webRequestBefore: { fn: Fn; patterns: RegExp[] }[] = [];
   const webRequestCompleted: { fn: Fn; patterns: RegExp[] }[] = [];
+  type WebRequestDetails = { url: string; method?: string; initiator?: string; requestHeaders?: { name: string; value: string }[]; statusCode?: number };
+  async function fireWebRequest(kind: "beforeSendHeaders" | "completed", details: WebRequestDetails) {
+    const list = kind === "completed" ? webRequestCompleted : webRequestBefore;
+    for (const l of list) if (l.patterns.some((p) => p.test(details.url))) await l.fn({ method: "GET", requestHeaders: [], type: "xmlhttprequest", initiator: TEAMS_ORIGIN, ...details });
+  }
+
+  const tabUpdated = event<(tabId: number, change: { status?: string; url?: string }, tab: Tab) => void>();
+  const tabRemoved = event<(tabId: number, info: { isWindowClosing: boolean }) => void>();
+  /** Sets a tab's status (and url), and reports the change through tabs.onUpdated, later, as Chrome does. */
+  const updateTab = (t: Tab, change: { status?: Tab["status"]; url?: string }) => {
+    Object.assign(t, change);
+    const snapshot = { ...t };
+    void Promise.resolve().then(() => tabUpdated.listeners.forEach((l) => l(t.id, change, snapshot)));
+  };
+  /** With `loadMs`: the tab loads (from now) for that long, then is complete. */
+  const startLoading = (t: Tab) => {
+    if (loadMs === undefined) return;
+    updateTab(t, { status: "loading" });
+    setTimeout(() => tabs.includes(t) && updateTab(t, { status: "complete" }), loadMs);
+  };
 
   const spies = {
     executeScript: vi.fn(async ({ target, func, args }: { target: { tabId: number }; world?: string; func: Function; args: any[] }) => {
@@ -197,12 +229,17 @@ export function createFakeChrome({ services = {}, captured = [...TEAMS_SERVICES]
     tabsCreate: vi.fn(async ({ url, pinned }: { url: string; active?: boolean; pinned?: boolean }) => {
       const t: Tab = { id: nextTabId++, url, status: "complete", pinned };
       tabs.push(t);
+      startLoading(t);
       return { ...t };
     }),
-    tabsReload: vi.fn(async (_id: number) => {}),
+    tabsReload: vi.fn(async (id: number) => {
+      const t = tabs.find((x) => x.id === id);
+      if (t) startLoading(t);
+    }),
     windowsCreate: vi.fn(async ({ url }: { url?: string; type?: string; focused?: boolean } = {}) => {
       const t: Tab = { id: nextTabId++, url: url ?? "about:blank", status: "complete" };
       tabs.push(t);
+      startLoading(t);
       return { id: nextWindowId++, tabs: [{ ...t }] };
     }),
     windowsRemove: vi.fn(async (_id: number) => {}),
@@ -224,7 +261,7 @@ export function createFakeChrome({ services = {}, captured = [...TEAMS_SERVICES]
       onCompleted: { addListener: (fn: Fn, filter: { urls: string[] }) => void webRequestCompleted.push({ fn, patterns: filter.urls.map(patternToRegExp) }) },
     },
     storage: { session: storageArea("session", session), local: storageArea("local", local), onChanged: storageChanged },
-    tabs: { query: spies.tabsQuery, get: spies.tabsGet, create: spies.tabsCreate, reload: spies.tabsReload },
+    tabs: { query: spies.tabsQuery, get: spies.tabsGet, create: spies.tabsCreate, reload: spies.tabsReload, onUpdated: tabUpdated, onRemoved: tabRemoved },
     windows: { create: spies.windowsCreate, remove: spies.windowsRemove, onRemoved: windowRemoved },
     scripting: { executeScript: spies.executeScript },
     alarms: { create: vi.fn(), onAlarm: event() },
@@ -240,10 +277,13 @@ export function createFakeChrome({ services = {}, captured = [...TEAMS_SERVICES]
     spies,
     /** How many requests went to `service` (whose path matches `path`, if given). */
     count: (service: Service, path?: RegExp) => sent.filter((r) => r.service === service && (!path || path.test(r.path))).length,
-    /** The user closes a tab: it is no longer found, a script can't run in it, and one running there fails, as in Chrome. */
+    /** The user closes a tab: it is no longer found, a script can't run in it, one running there fails, and tabs.onRemoved reports it, as in Chrome. */
     closeTab(tabId: number) {
       const i = tabs.findIndex((t) => t.id === tabId);
-      if (i >= 0) tabs.splice(i, 1);
+      if (i >= 0) {
+        tabs.splice(i, 1);
+        void Promise.resolve().then(() => tabRemoved.listeners.forEach((l) => l(tabId, { isWindowClosing: false })));
+      }
       for (const fail of runningScripts.get(tabId) ?? []) fail(new Error("The tab was closed."));
     },
     /** The tab stops running scripts (frozen or discarded): executeScript waits until wake(). */
@@ -259,10 +299,7 @@ export function createFakeChrome({ services = {}, captured = [...TEAMS_SERVICES]
     /** Chrome reports that the user closed a window. */
     closeWindow: (windowId: number) => windowRemoved.listeners.forEach((l) => l(windowId)),
     /** Runs the worker's webRequest listeners whose URL filter matches, as Chrome would. */
-    async fire(kind: "beforeSendHeaders" | "completed", details: { url: string; method?: string; initiator?: string; requestHeaders?: { name: string; value: string }[]; statusCode?: number }) {
-      const list = kind === "completed" ? webRequestCompleted : webRequestBefore;
-      for (const l of list) if (l.patterns.some((p) => p.test(details.url))) await l.fn({ method: "GET", requestHeaders: [], type: "xmlhttprequest", initiator: TEAMS_ORIGIN, ...details });
-    },
+    fire: fireWebRequest,
     /** A message from one of the extension's pages (e.g. "confirm.html?id=…"); resolves with the worker's answer. */
     pageMessage(page: string, msg: object) {
       return new Promise((resolve) => {
