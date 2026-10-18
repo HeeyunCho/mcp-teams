@@ -70,7 +70,7 @@ export const MAX_MESSAGE_BYTES = 256 * 1024 * 1024;
 export interface BridgeOptions {
   /** Largest message accepted on the bridge. */
   maxMessageBytes?: number;
-  /** How often the hub pings each extension (also keeps the MV3 service worker alive). */
+  /** How often the hub pings each extension (also keeps the MV3 service worker alive) and each peer. */
   keepAliveMs?: number;
   /** How long a server that is neither hub nor peer waits before trying again. */
   retryMs?: number;
@@ -84,6 +84,11 @@ export interface BridgeOptions {
   stepDownMaxWaitMs?: number;
   /** After a call is withdrawn (timeout or cancel), how long its answer still counts. */
   cancelGraceMs?: number;
+  /**
+   * Hub: a peer with more than this waiting in its send buffer at two keep-alive ticks in a row
+   * isn't reading its answers and is closed (1013); over 4x this, at once.
+   */
+  maxPeerBufferedBytes?: number;
   /**
    * Hub: calls that run at once on each extension; the rest wait their turn, shared fairly
    * between sessions (the hub's own calls are one session, each peer another; see FairQueue).
@@ -100,6 +105,7 @@ export const DEFAULT_BRIDGE_OPTIONS: Readonly<Required<BridgeOptions>> = Object.
   pickStatusTimeoutMs: 3_000,
   stepDownMaxWaitMs: 5 * 60_000,
   cancelGraceMs: 2_000,
+  maxPeerBufferedBytes: 64 * 1024 * 1024,
   maxConcurrentCalls: 4,
 });
 
@@ -120,6 +126,12 @@ export const NOT_SENT = Object.freeze({
   gone: "The connection to the browser extension closed before this call's turn came; it was not sent. Try again.",
 });
 
+/** A peer's watchdog never waits less for its hub's ping: a busy machine runs timers late. */
+const MIN_HUB_SILENCE_MS = 2_000;
+
+/** Hub: a peer with more than this many times maxPeerBufferedBytes waiting is closed at once. */
+const PEER_BUFFER_HARD_CAP = 4;
+
 /**
  * What a call fails with when the bridge lost it after sending it, so its outcome is unknown (a
  * send may have been posted). A hub relays them to its peers word for word. src/tools.ts tells
@@ -131,6 +143,7 @@ export const LOST_CALL = Object.freeze({
   disconnected: "Browser extension disconnected",
   reconnected: "Browser extension reconnected; try again.",
   hubRestarted: "The mcp-teams hub restarted; try again in a few seconds.",
+  hubSilent: "The mcp-teams hub stopped responding; try again in a few seconds.",
   updated: "mcp-teams was updated; try again in a few seconds.",
   shuttingDown: "mcp-teams is shutting down",
   serverError: (detail: string) => `bridge server error: ${detail}`,
@@ -187,10 +200,12 @@ export class ExtensionBridge {
   private turns = new Map<WebSocket, { queue: FairQueue<WebSocket | null>; waiting: Set<(err: Error) => void> }>();
   private pending = new Map<string, Pending>();
   private keepAlive?: NodeJS.Timeout;
+  private peerBeat?: NodeJS.Timeout; // hub: pings the peers
   private retry?: NodeJS.Timeout;
   private closed = false;
   private steppingDown = false;
-  private alive = new WeakSet<WebSocket>(); // hub: extensions that answered the last ping
+  private alive = new WeakSet<WebSocket>(); // hub: extensions and peers that answered the last ping
+  private backlogged = new WeakSet<WebSocket>(); // hub: peers over maxPeerBufferedBytes at the last tick
   private legacyReloaded = false; // hub: an extension of 0.2.0 or older was told to reload
   private readonly opts: Required<BridgeOptions>;
   private boundPort?: number; // hub: the port it listens on (port 0 picks a free one)
@@ -378,7 +393,8 @@ export class ExtensionBridge {
       }
     }
     this.sockets.set(ws, info);
-    ws.send(JSON.stringify({ type: "welcome", serverVersion: this.serverVersion, ...welcome }));
+    // heartbeatMs: this hub sends {type:"ping"} that often; the extension reconnects when they stop.
+    ws.send(JSON.stringify({ type: "welcome", serverVersion: this.serverVersion, heartbeatMs: this.opts.keepAliveMs, ...welcome }));
     this.startKeepAlive(ws);
     this.updateExtensions();
   }
@@ -424,9 +440,18 @@ export class ExtensionBridge {
 
   private acceptPeer(ws: WebSocket, peerVersion: unknown, welcome: object) {
     this.peers.add(ws);
+    // heartbeatMs: this hub pings the peer that often, so the peer can tell when it stops.
     ws.send(
-      JSON.stringify({ type: "peer-welcome", serverVersion: this.serverVersion, extension: this.extension ?? null, extensions: this.extensions, ...welcome }),
+      JSON.stringify({
+        type: "peer-welcome",
+        serverVersion: this.serverVersion,
+        extension: this.extension ?? null,
+        extensions: this.extensions,
+        heartbeatMs: this.opts.keepAliveMs,
+        ...welcome,
+      }),
     );
+    this.startPeerBeat(ws);
     // A newer server joined: hand the port to it, so its fixes (and what the newer
     // extension expects) take effect without restarting this AI session.
     if (isNewer(peerVersion, this.serverVersion)) void this.stepDown(String(peerVersion));
@@ -456,6 +481,7 @@ export class ExtensionBridge {
     this.boundPort = undefined;
     this.role = "none";
     clearInterval(this.keepAlive);
+    this.stopPeerBeat();
     this.dropTurns();
     this.rejectAll(reason);
     for (const s of this.sockets.keys()) s.close(1012, "restarting");
@@ -482,7 +508,7 @@ export class ExtensionBridge {
     if (msg.type !== "request" || typeof msg.id !== "string") return;
     const reply = (body: object) => {
       try {
-        if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: "response", id: msg.id, ...body }));
+        this.sendToPeer(ws, JSON.stringify({ type: "response", id: msg.id, ...body }));
       } catch (err) {
         console.error(`[mcp-teams] could not answer a peer: ${(err as Error).message}`);
       }
@@ -502,7 +528,28 @@ export class ExtensionBridge {
 
   private broadcastState() {
     const state = JSON.stringify({ type: "ext-state", extension: this.extension ?? null, extensions: this.extensions });
-    for (const peer of this.peers) if (peer.readyState === WebSocket.OPEN) peer.send(state);
+    for (const peer of this.peers) this.sendToPeer(peer, state);
+  }
+
+  /**
+   * Hub: sends to a peer that is open and keeping up. One with over 4x maxPeerBufferedBytes
+   * waiting is closed instead; a smaller backlog only when it lasts (see startPeerBeat), so a
+   * burst of large answers doesn't drop a healthy peer.
+   */
+  private sendToPeer(ws: WebSocket, text: string) {
+    if (ws.readyState !== WebSocket.OPEN) return;
+    if (ws.bufferedAmount > this.opts.maxPeerBufferedBytes * PEER_BUFFER_HARD_CAP) return this.closeSlowPeer(ws);
+    ws.send(text);
+  }
+
+  /** Hub: closes a peer that isn't reading its answers (1013); its calls are withdrawn and it connects again. */
+  private closeSlowPeer(ws: WebSocket) {
+    console.error(`[mcp-teams] closing a peer that doesn't read its answers (${Math.round(ws.bufferedAmount / 1024 / 1024)} MB waiting)`);
+    this.peers.delete(ws);
+    // Its close may wait for the backlog; its calls are withdrawn now (as on close).
+    for (const ac of this.peerCalls.get(ws)?.values() ?? []) ac.abort();
+    this.peerCalls.delete(ws);
+    ws.close(1013, "too slow");
   }
 
   /**
@@ -530,6 +577,46 @@ export class ExtensionBridge {
     this.keepAlive.unref();
   }
 
+  /**
+   * Hub: pings each peer every keepAliveMs; one that didn't answer the previous ping (a
+   * suspended or hung session) is dropped, within 2 periods. The peers in turn drop a hub
+   * that stops pinging them (see join). A peer over maxPeerBufferedBytes at this tick and the
+   * previous one isn't draining its answers and is closed (1013).
+   */
+  private startPeerBeat(ws: WebSocket) {
+    this.alive.add(ws);
+    ws.on("pong", () => this.alive.add(ws));
+    if (this.peerBeat) return;
+    this.peerBeat = setInterval(() => {
+      if (!this.peers.size) return this.stopPeerBeat();
+      for (const p of this.peers) {
+        if (p.readyState !== WebSocket.OPEN) continue;
+        const backlog = p.bufferedAmount > this.opts.maxPeerBufferedBytes;
+        if (backlog && this.backlogged.has(p)) {
+          this.closeSlowPeer(p);
+          continue;
+        }
+        if (backlog) this.backlogged.add(p);
+        else this.backlogged.delete(p);
+        // With a backlog, the last ping may still wait behind the data, so a missing pong says
+        // nothing: the next tick closes the peer if the backlog lasts. It is still pinged (the
+        // ping queues behind the data), so a peer that drains it in time hears from its hub.
+        if (!backlog && !this.alive.has(p)) {
+          p.terminate();
+          continue;
+        }
+        this.alive.delete(p);
+        p.ping();
+      }
+    }, this.opts.keepAliveMs);
+    this.peerBeat.unref();
+  }
+
+  private stopPeerBeat() {
+    clearInterval(this.peerBeat);
+    this.peerBeat = undefined;
+  }
+
   // ------------------------------------------------------------------ peer
 
   private join(): Promise<boolean> {
@@ -540,6 +627,22 @@ export class ExtensionBridge {
       let forged = false;
       const nonce = newNonce();
       const timer = setTimeout(() => ws.terminate(), this.opts.joinTimeoutMs);
+      // A hub that declares heartbeatMs pings that often. When its pings stop for 2 periods, never
+      // under 2 s (a busy machine runs timers late), the hub is suspended or hung: its calls fail
+      // now and the takeover path runs, instead of them hanging until they time out. Hubs of
+      // 0.2.13 and older never ping peers: no watchdog.
+      let watchdog: NodeJS.Timeout | undefined;
+      let heartbeatMs = 0;
+      const watch = () => {
+        clearTimeout(watchdog);
+        watchdog = setTimeout(() => {
+          if (this.hub !== ws) return;
+          this.rejectAll(LOST_CALL.hubSilent);
+          ws.terminate();
+        }, Math.max(MIN_HUB_SILENCE_MS, 2 * heartbeatMs));
+        watchdog.unref();
+      };
+      ws.on("ping", () => heartbeatMs && watch());
       ws.on("message", (raw) => {
         let msg: any;
         try {
@@ -563,6 +666,8 @@ export class ExtensionBridge {
           this.hubVersion = String(msg.serverVersion ?? "unknown");
           this.extension = msg.extension ?? undefined;
           this.extensions = msg.extensions ?? (msg.extension ? [msg.extension] : []);
+          heartbeatMs = Number(msg.heartbeatMs) > 0 ? Number(msg.heartbeatMs) : 0;
+          if (heartbeatMs) watch();
           resolve(true);
         } else if (msg.type === "ext-state") {
           this.extension = msg.extension ?? undefined;
@@ -576,6 +681,7 @@ export class ExtensionBridge {
       });
       ws.on("close", (code) => {
         clearTimeout(timer);
+        clearTimeout(watchdog);
         if (!joined) {
           this.listenError =
             code === 4401
@@ -791,6 +897,7 @@ export class ExtensionBridge {
     this.closed = true;
     clearTimeout(this.retry);
     clearInterval(this.keepAlive);
+    this.stopPeerBeat();
     this.dropTurns();
     this.rejectAll(LOST_CALL.shuttingDown);
     this.hub?.close();

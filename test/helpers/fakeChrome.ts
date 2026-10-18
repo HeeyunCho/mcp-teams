@@ -298,6 +298,8 @@ export interface Worker {
   registerListeners: () => void;
   /** How many confirmation windows wait for the user's decision. */
   pendingSendCount: () => number;
+  /** How long the worker waits for a ping from a hub whose welcome declares no heartbeatMs. */
+  HEARTBEAT_TIMEOUT_MS: number;
 }
 
 /** WebSockets the worker opened while loaded by loadWorker (none expected outside Chrome). */
