@@ -1101,6 +1101,7 @@ async function sendMessage({ conversation, newChat, people, text, threadId, subj
     crossPostChannels: [],
   };
   const r = await api("chatsvc", `/v1/users/ME/conversations/${encodeURIComponent(target)}/messages`, { method: "POST", body, onCapture: asConfirmed(account) });
+  listCache = null; // its last message changed: a list_chats right after must not show the old one
   return { sent: true, conversation: conversation.title ?? conversation.id, time: r?.OriginalArrivalTime ? new Date(r.OriginalArrivalTime).toISOString() : null };
 }
 
