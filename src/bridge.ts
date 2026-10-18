@@ -102,6 +102,9 @@ export const DEFAULT_BRIDGE_OPTIONS: Readonly<Required<BridgeOptions>> = Object.
   maxPeerBufferedBytes: 64 * 1024 * 1024,
 });
 
+/** A peer's watchdog never waits less for its hub's ping: a busy machine runs timers late. */
+const MIN_HUB_SILENCE_MS = 2_000;
+
 /** Hub: a peer with more than this many times maxPeerBufferedBytes waiting is closed at once. */
 const PEER_BUFFER_HARD_CAP = 4;
 
@@ -552,18 +555,17 @@ export class ExtensionBridge {
       if (!this.peers.size) return this.stopPeerBeat();
       for (const p of this.peers) {
         if (p.readyState !== WebSocket.OPEN) continue;
-        if (p.bufferedAmount > this.opts.maxPeerBufferedBytes) {
-          if (this.backlogged.has(p)) {
-            this.closeSlowPeer(p);
-            continue;
-          }
-          // The last ping may still wait behind the data, so it can't have been answered: the
-          // next tick closes the peer if the backlog lasts, and lets it be if it drained.
-          this.backlogged.add(p);
+        const backlog = p.bufferedAmount > this.opts.maxPeerBufferedBytes;
+        if (backlog && this.backlogged.has(p)) {
+          this.closeSlowPeer(p);
           continue;
         }
-        this.backlogged.delete(p);
-        if (!this.alive.has(p)) {
+        if (backlog) this.backlogged.add(p);
+        else this.backlogged.delete(p);
+        // With a backlog, the last ping may still wait behind the data, so a missing pong says
+        // nothing: the next tick closes the peer if the backlog lasts. It is still pinged (the
+        // ping queues behind the data), so a peer that drains it in time hears from its hub.
+        if (!backlog && !this.alive.has(p)) {
           p.terminate();
           continue;
         }
@@ -589,9 +591,10 @@ export class ExtensionBridge {
       let forged = false;
       const nonce = newNonce();
       const timer = setTimeout(() => ws.terminate(), this.opts.joinTimeoutMs);
-      // A hub that declares heartbeatMs pings that often. When its pings stop for 2 periods (a
-      // hub suspended or hung), its calls fail now and the takeover path runs, instead of them
-      // hanging until they time out. Hubs of 0.2.13 and older never ping peers: no watchdog.
+      // A hub that declares heartbeatMs pings that often. When its pings stop for 2 periods, never
+      // under 2 s (a busy machine runs timers late), the hub is suspended or hung: its calls fail
+      // now and the takeover path runs, instead of them hanging until they time out. Hubs of
+      // 0.2.13 and older never ping peers: no watchdog.
       let watchdog: NodeJS.Timeout | undefined;
       let heartbeatMs = 0;
       const watch = () => {
@@ -600,7 +603,7 @@ export class ExtensionBridge {
           if (this.hub !== ws) return;
           this.rejectAll(LOST_CALL.hubSilent);
           ws.terminate();
-        }, 2 * heartbeatMs);
+        }, Math.max(MIN_HUB_SILENCE_MS, 2 * heartbeatMs));
         watchdog.unref();
       };
       ws.on("ping", () => heartbeatMs && watch());
