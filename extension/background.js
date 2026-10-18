@@ -1138,6 +1138,37 @@ const RETRY_MAX_MS = 30_000;
 let retryMs = RETRY_MIN_MS;
 let retryTimer = null;
 
+/**
+ * The hub sends {type:"ping"} every keep-alive period (its welcome's heartbeatMs; 20 s in every
+ * version). When none has come for about 2 periods (this long without heartbeatMs), the hub is
+ * frozen or hung: drop its connection and connect again (or to whoever took the port over).
+ */
+export const HEARTBEAT_TIMEOUT_MS = 45_000;
+/** The watchdog never waits less: a busy machine runs timers late, and that isn't a frozen hub. */
+const MIN_HEARTBEAT_TIMEOUT_MS = 2_000;
+let watchdog = null; // { socket, ms, timer } of the current connection
+
+/** (Re)starts the watchdog of `socket`: no ping within `ms` drops it and connects again. */
+function watchHeartbeat(socket, ms) {
+  clearTimeout(watchdog?.timer);
+  const timer = setTimeout(() => {
+    if (watchdog?.timer !== timer) return;
+    watchdog = null;
+    if (ws !== socket) return;
+    // Its close may never complete: nobody can be told the outcome of what came on it, now.
+    withdrawAll(socket);
+    reconnectNow();
+    connect();
+  }, ms);
+  watchdog = { socket, ms, timer };
+}
+
+function stopWatchdog(socket) {
+  if (watchdog?.socket !== socket) return;
+  clearTimeout(watchdog.timer);
+  watchdog = null;
+}
+
 /** Drops the current connection (even one still closing) and connects again. */
 function reconnectNow() {
   const old = ws;
@@ -1229,9 +1260,15 @@ async function connect() {
           state = "connected";
           lastError = null;
           retryMs = RETRY_MIN_MS;
+          const heartbeatMs = Number(msg.heartbeatMs);
+          watchHeartbeat(socket, heartbeatMs > 0 ? Math.max(MIN_HEARTBEAT_TIMEOUT_MS, Math.round(2.25 * heartbeatMs)) : HEARTBEAT_TIMEOUT_MS);
         })().catch(notProven);
         await checking;
       }
+      return;
+    }
+    if (msg.type === "ping") {
+      if (watchdog?.socket === socket) watchHeartbeat(socket, watchdog.ms);
       return;
     }
     await dispatch(msg, (reply) => socket.readyState === WebSocket.OPEN && socket.send(JSON.stringify(reply)), socket);
@@ -1240,6 +1277,7 @@ async function connect() {
     // Nobody can be told the outcome of what came on this connection: withdraw it
     // (an open confirmation window closes; nothing is sent).
     withdrawAll(socket);
+    stopWatchdog(socket);
     if (ws && ws !== socket) return; // replaced by a newer connection (reconnectNow)
     ws = null;
     // When a server session ends, another one takes over the port within a second:

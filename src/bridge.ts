@@ -355,7 +355,8 @@ export class ExtensionBridge {
       }
     }
     this.sockets.set(ws, info);
-    ws.send(JSON.stringify({ type: "welcome", serverVersion: this.serverVersion, ...welcome }));
+    // heartbeatMs: this hub sends {type:"ping"} that often; the extension reconnects when they stop.
+    ws.send(JSON.stringify({ type: "welcome", serverVersion: this.serverVersion, heartbeatMs: this.opts.keepAliveMs, ...welcome }));
     this.startKeepAlive(ws);
     this.updateExtensions();
   }
