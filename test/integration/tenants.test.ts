@@ -147,6 +147,24 @@ describe("3.3: switching tenants never returns the other tenant's data", () => {
   });
 });
 
+describe("3.2: the cached chat list belongs to the account that read it", () => {
+  it("3.2: list_chats right after a switch reads the new tenant's list rather than serving the cached one", async () => {
+    const fake = createFakeChrome({ captured: [], services: tenantServices });
+    const worker = await loadWorker(fake);
+    worker.registerListeners();
+    for (const s of ["csa", "chatsvc", "mt"] as const) await teamsRequest(fake, s, "a");
+    expect((await worker.handlers.listChats({})).chats.map((c: { id: string }) => c.id)).toEqual(CHATS.a.map(([id]) => id));
+    expect(fake.count("csa")).toBe(1);
+
+    for (const s of ["csa", "chatsvc", "mt"] as const) await teamsRequest(fake, s, "b");
+    expect((await worker.handlers.listChats({})).chats.map((c: { id: string }) => c.id)).toEqual(CHATS.b.map(([id]) => id));
+    expect(fake.count("csa")).toBe(2);
+    // And b's list is then the cached one.
+    await worker.handlers.listChats({});
+    expect(fake.count("csa")).toBe(2);
+  });
+});
+
 describe("3.3: a switch that lands while a request runs", () => {
   it("3.3: a chat list read as tenant a that finishes after the switch isn't kept for tenant b", async () => {
     let release = () => {};
