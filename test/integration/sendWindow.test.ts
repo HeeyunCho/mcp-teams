@@ -7,7 +7,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { registerTools } from "../../src/tools.js";
 import { bridgeHarness, TOKEN, until, type BridgeHarness } from "../helpers/bridgeHarness.js";
-import { connectWorker, createFakeChrome, loadWorker, ME_OID, openedSockets, type FakeChrome, type SentRequest, type Worker } from "../helpers/fakeChrome.js";
+import { connectWorker, createFakeChrome, loadWorker, ME_OID, networkError, openedSockets, reply, timedOut, type FakeChrome, type SentRequest, type Worker } from "../helpers/fakeChrome.js";
 
 const CHAT = "19:contoso-launch@thread.v2";
 const ALEX = "8:orgid:00000000-0000-4000-8000-00000000000a";
@@ -150,6 +150,43 @@ describe("send confirmation window", () => {
     await client.close();
   });
 
+  /** send_message's answer when the bridge call fails with `message`. */
+  async function sendFailingWith(message: string) {
+    const failing = { call: () => Promise.reject(new Error(message)) } as unknown as Parameters<typeof registerTools>[1];
+    const server = new McpServer({ name: "mcp-teams", version: "0.0.0" });
+    registerTools(server, failing, { port: 0, token: TOKEN });
+    const client = new Client({ name: "test", version: "0.0.0" });
+    const [a, b] = InMemoryTransport.createLinkedPair();
+    await Promise.all([server.connect(a), client.connect(b)]);
+    const r = (await client.callTool({ name: "send_message", arguments: SEND })) as { isError?: boolean; content: { text: string }[] };
+    await client.close();
+    return r;
+  }
+
+  it("2.1: a send the extension refused before any window gets no warning, even when its reason mentions a connection", async () => {
+    // E.g. a chat lookup whose names note quotes a failed people lookup.
+    const refused = 'No chat or channel matches "Alex Doe". Use list_chats or list_teams to find it.\nChat names missing: some people couldn\'t be looked up, so they are shown without their names. Try again. The lookup failed with: Could not reach Teams: net::ERR_CONNECTION_RESET';
+    const r = await sendFailingWith(refused);
+    expect(r.isError).toBe(true);
+    expect(r.content[0].text).toBe(refused);
+  });
+
+  it.each([
+    "Extension call 'requestSend' timed out",
+    "Cancelled: the request was withdrawn.",
+    "Browser extension disconnected",
+    "Browser extension reconnected; try again.",
+    "The mcp-teams hub restarted; try again in a few seconds.",
+    "mcp-teams was updated; try again in a few seconds.",
+    "Bridge connection error: read ECONNRESET",
+    "mcp-teams is shutting down",
+    "bridge server error: listen EADDRINUSE",
+    "The response was too large (over 256 MB) and was dropped. The connection is re-established automatically.",
+  ])("2.1: the bridge losing a sent call (%s) still tells the AI to check before sending again", async (message) => {
+    const r = await sendFailingWith(message);
+    expect(r.content[0].text).toMatch(/may have been posted.*read_messages before sending again/);
+  });
+
   it("1.2: a click before the withdrawal posts once and the call reports the real outcome", async () => {
     let answer!: (v: unknown) => void;
     const posted = new Promise((r) => (answer = r));
@@ -163,6 +200,59 @@ describe("send confirmation window", () => {
     await expect(call).resolves.toMatchObject({ sent: true });
     expect(posts(fake)).toBe(1);
     expect(worker.pendingSendCount()).toBe(0);
+  });
+
+  // A post the user clicked whose answer never came may have reached Teams: saying it failed
+  // would invite a second post (#25: a late click must never post after the AI was told it failed).
+  it.each([
+    ["Teams doesn't answer the post in time", timedOut],
+    ["the post's connection fails", () => networkError("net::ERR_CONNECTION_RESET")],
+  ])("2.1: %s after the click: the outcome is unknown, so the AI is told to check before sending again", async (_, answer) => {
+    const { hub, fake } = await setup(() => answer());
+    const call = hub.call("requestSend", SEND, 60_000);
+    const w = await windowOpened(fake);
+    await click(fake, w.id);
+    const r = (await call) as { sent: boolean; reason: string };
+    expect(r.sent).toBe(false);
+    // Its own sentence, after the cause: "… net::ERR_CONNECTION_RESET. The message may have been posted …"
+    expect(r.reason).toMatch(/[.!?] The message may have been posted/);
+    expect(r.reason).toMatch(/read_messages before sending again/);
+  });
+
+  it("2.1: the Teams tab closing while the post runs: the outcome is unknown, so the AI is told to check before sending again", async () => {
+    const { hub, fake } = await setup(() => new Promise(() => {}));
+    const call = hub.call("requestSend", SEND, 60_000);
+    const w = await windowOpened(fake);
+    void click(fake, w.id);
+    await vi.waitFor(() => expect(posts(fake)).toBe(1));
+    fake.closeTab(1);
+    const r = (await call) as { sent: boolean; reason: string };
+    expect(r.sent).toBe(false);
+    expect(r.reason).toMatch(/[.!?] The message may have been posted/);
+  });
+
+  it("2.1: creating a new group chat gets no answer: the AI is told the chat may exist (not that the message was posted)", async () => {
+    const SAM = "8:orgid:00000000-0000-4000-8000-00000000000b";
+    const { hub, fake } = await setup(() => timedOut());
+    const call = hub.call("requestSend", { to: [ALEX, SAM], title: "Contoso launch team", text: "Hi both" }, 60_000);
+    const w = await windowOpened(fake);
+    await click(fake, w.id);
+    const r = (await call) as { sent: boolean; reason: string };
+    expect(fake.sent.filter((q) => q.service === "chatsvc" && q.method === "POST").map((q) => q.path)).toEqual(["/v1/threads"]);
+    expect(r.sent).toBe(false);
+    expect(r.reason).toMatch(/chat may have been created/);
+    expect(r.reason).toMatch(/list_chats/);
+    expect(r.reason).not.toMatch(/message may have been posted/);
+  });
+
+  it("2.1: a post Teams refuses (HTTP error) after the click is a known failure, without that warning", async () => {
+    const { hub, fake } = await setup(() => reply(403, { message: "Forbidden" }));
+    const call = hub.call("requestSend", SEND, 60_000);
+    const w = await windowOpened(fake);
+    await click(fake, w.id);
+    const r = (await call) as { sent: boolean; reason: string };
+    expect(r).toMatchObject({ sent: false, reason: expect.stringMatching(/^Sending failed: Teams HTTP 403/) });
+    expect(r.reason).not.toMatch(/may have been posted/);
   });
 
   it("1.2: a replaced extension connection is told to cancel its pending calls before it closes", async () => {

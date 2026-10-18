@@ -1,7 +1,8 @@
 // A fake `chrome` for running the extension's service worker (extension/background.js) in
 // tests, shaped like a browser with Teams open. The worker's requests run in a Teams tab
-// through chrome.scripting.executeScript(pageFetch); here they go to scripted fake services
-// (chatsvc, csa, mt, substrate, and SharePoint for transcripts), and the test sees each one.
+// through chrome.scripting.executeScript(pageFetch). Here pageFetch runs from its source, as
+// Chrome runs it, with a fetch that goes to scripted fake services (chatsvc, csa, mt,
+// substrate, and SharePoint for transcripts), and the test sees each request.
 import { expect, vi } from "vitest";
 import WsWebSocket from "ws";
 
@@ -15,6 +16,8 @@ export interface Reply {
   /** Sent as text as is (e.g. HTML or nothing); otherwise body is sent as JSON. */
   text?: string;
   location?: string | null;
+  /** Response headers (e.g. { "retry-after": "2" }). */
+  headers?: Record<string, string>;
 }
 const REPLY = Symbol("reply");
 export const reply = (status: number, body: unknown = {}, extra: Omit<Reply, "status" | "body"> = {}): Reply => ({ status, body, ...extra, [REPLY]: true }) as Reply;
@@ -33,7 +36,7 @@ export const networkError = (message = "Failed to fetch"): NoAnswer => ({ status
 /** The page's fetch hit its timeout: pageFetch's { status: 0, text: "", error: "timeout" }. */
 export const timedOut = (): NoAnswer => networkError("timeout");
 
-/** A promise that never settles: a tab script that never runs (e.g. a frozen tab). */
+/** A promise that never settles: Teams never answers (the page's fetch waits until its own timeout). */
 export const never = <T = never>() => new Promise<T>(() => {});
 
 /** One request the worker sent to a Teams service. */
@@ -137,13 +140,27 @@ export function createFakeChrome({ services = {}, captured = [...TEAMS_SERVICES]
     return null;
   };
 
-  const toResult = async (x: unknown) => {
-    const r = await x;
-    if (r === undefined) return [{ result: { status: 404, text: "", location: null } }];
-    if (isNoAnswer(r)) return [{ result: { status: 0, text: "", error: r.error } }];
-    const { status, body, text, location = null } = isReply(r) ? r : { status: 200, body: r, text: undefined, location: null };
-    return [{ result: { status, text: text ?? (body === undefined ? "" : JSON.stringify(body)), location } }];
+  /** The page's fetch: sends the request to its fake service, and gives up when `signal` aborts, as fetch does. */
+  const fakeFetch = (tabId: number) => async (url: string, init: { method: string; headers: Record<string, string>; body?: string; signal?: AbortSignal }) => {
+    const route = routeOf(url);
+    if (!route) throw new Error(`fakeChrome: no fake service for ${url}`);
+    init.signal?.throwIfAborted();
+    const req: SentRequest = { ...route, method: init.method, url, body: init.body == null ? null : JSON.parse(init.body), headers: init.headers, tabId };
+    sent.push(req);
+    const answer = services[route.service];
+    const r = await new Promise((resolve, reject) => {
+      init.signal?.addEventListener("abort", () => reject(init.signal!.reason), { once: true });
+      Promise.resolve(answer ? answer(req) : undefined).then(resolve, reject);
+    });
+    if (isNoAnswer(r)) throw r.error === "timeout" ? new DOMException("The operation timed out.", "TimeoutError") : new TypeError(r.error);
+    if (r === undefined) return new Response("", { status: 404 });
+    const { status, body, text, location = null, headers = {} } = isReply(r) ? r : { status: 200, body: r, text: undefined, location: null, headers: {} };
+    return new Response(text ?? (body === undefined ? "" : JSON.stringify(body)), { status, headers: { ...headers, ...(location ? { location } : {}) } });
   };
+  /** Tabs whose scripts wait (a frozen or discarded tab), and the wake-up of each waiting script. */
+  const frozen = new Map<number, (() => void)[]>();
+  /** Scripts running in each tab, by the function that fails them (the tab closed under them). */
+  const runningScripts = new Map<number, Set<(err: Error) => void>>();
 
   const windowRemoved = event<(windowId: number) => void>();
   const runtimeMessage = event<(msg: any, sender: any, sendResponse: (r: unknown) => void) => unknown>();
@@ -155,13 +172,18 @@ export function createFakeChrome({ services = {}, captured = [...TEAMS_SERVICES]
       if (func.name !== "pageFetch") throw new Error(`fakeChrome: unexpected tab script ${func.name}`);
       // Like Chrome: a tab that doesn't exist (or was closed) runs nothing.
       if (!tabs.some((t) => t.id === target.tabId)) throw new Error(`No tab with id: ${target.tabId}.`);
-      const [url, method, headers, body] = args;
-      const route = routeOf(url);
-      if (!route) throw new Error(`fakeChrome: no fake service for ${url}`);
-      const req: SentRequest = { ...route, method, url, body, headers, tabId: target.tabId };
-      sent.push(req);
-      const answer = services[route.service];
-      return toResult(answer ? answer(req) : undefined);
+      const waiting = frozen.get(target.tabId);
+      if (waiting) await new Promise<void>((wake) => waiting.push(wake));
+      // Chrome runs the function from its source in the page, so it can use nothing of the worker.
+      const script = new Function("fetch", `return (${func.toString()})`)(fakeFetch(target.tabId));
+      const scripts = runningScripts.get(target.tabId) ?? new Set();
+      runningScripts.set(target.tabId, scripts);
+      return new Promise((resolve, reject) => {
+        scripts.add(reject);
+        script(...args)
+          .then((result: unknown) => resolve([{ result }]), reject)
+          .finally(() => scripts.delete(reject));
+      });
     }),
     tabsQuery: vi.fn(async ({ url }: { url?: string | string[] } = {}) => {
       const patterns = (url === undefined ? [] : Array.isArray(url) ? url : [url]).map(patternToRegExp);
@@ -218,10 +240,21 @@ export function createFakeChrome({ services = {}, captured = [...TEAMS_SERVICES]
     spies,
     /** How many requests went to `service` (whose path matches `path`, if given). */
     count: (service: Service, path?: RegExp) => sent.filter((r) => r.service === service && (!path || path.test(r.path))).length,
-    /** The user closes a tab: it is no longer found, and a script can't run in it. */
+    /** The user closes a tab: it is no longer found, a script can't run in it, and one running there fails, as in Chrome. */
     closeTab(tabId: number) {
       const i = tabs.findIndex((t) => t.id === tabId);
       if (i >= 0) tabs.splice(i, 1);
+      for (const fail of runningScripts.get(tabId) ?? []) fail(new Error("The tab was closed."));
+    },
+    /** The tab stops running scripts (frozen or discarded): executeScript waits until wake(). */
+    freezeTab(tabId: number) {
+      if (!frozen.has(tabId)) frozen.set(tabId, []);
+    },
+    /** A frozen tab wakes: the scripts that waited run now. */
+    wake(tabId: number) {
+      const waiting = frozen.get(tabId) ?? [];
+      frozen.delete(tabId);
+      for (const w of waiting) w();
     },
     /** Chrome reports that the user closed a window. */
     closeWindow: (windowId: number) => windowRemoved.listeners.forEach((l) => l(windowId)),
@@ -258,11 +291,15 @@ export type FakeChrome = ReturnType<typeof createFakeChrome>;
 
 /** The service worker's exports (extension/background.js). */
 export interface Worker {
-  handlers: Record<string, (params: any) => Promise<any>>;
-  dispatch: (msg: { type: string; id?: string; method?: string; params?: unknown }, send: (reply: object) => void) => Promise<void>;
+  /** Each handler; the bridge's requests also pass a request context (see dispatch). */
+  handlers: Record<string, (params: any, ctx?: unknown) => Promise<any>>;
+  /** Runs a request as the bridge sends it ({ timeoutMs, deadline }), or a { type: "cancel", id }. */
+  dispatch: (msg: { type: string; id?: string; method?: string; params?: unknown; timeoutMs?: number; deadline?: number }, send: (reply: object) => void) => Promise<void>;
   registerListeners: () => void;
   /** How many confirmation windows wait for the user's decision. */
   pendingSendCount: () => number;
+  /** How long the worker waits for a ping from a hub whose welcome declares no heartbeatMs. */
+  HEARTBEAT_TIMEOUT_MS: number;
 }
 
 /** WebSockets the worker opened while loaded by loadWorker (none expected outside Chrome). */
@@ -272,7 +309,7 @@ export const openedSockets: string[] = [];
  * The browser WebSocket API, taken before any test stubs it: Node's own (Node 22+), else
  * the ws package's, which implements the same API (Node 20, as in CI, has no global one).
  */
-const NativeWebSocket = globalThis.WebSocket ?? (WsWebSocket as unknown as typeof globalThis.WebSocket);
+export const NativeWebSocket = globalThis.WebSocket ?? (WsWebSocket as unknown as typeof globalThis.WebSocket);
 
 /** Stands in for WebSocket: records the URL and never connects. */
 class InertWebSocket {
@@ -304,13 +341,16 @@ export async function loadWorker(fake: FakeChrome): Promise<Worker> {
 /**
  * Connects a loaded worker (listeners registered) to a real bridge hub, as in the browser:
  * `fake` holds the pairing token and port in chrome.storage.local. Resolves once
- * `connected()` holds (e.g. () => hub.connected). Call disconnect() before the test ends:
+ * `connected()` holds (e.g. () => hub.connected) and the worker says it is connected. Call disconnect() before the test ends:
  * it leaves the worker with a socket that never connects, so it stops retrying.
  */
 export async function connectWorker(fake: FakeChrome, connected: () => boolean) {
   vi.stubGlobal("WebSocket", NativeWebSocket);
   for (const l of fake.chrome.runtime.onStartup.listeners) l();
   await vi.waitFor(() => expect(connected()).toBe(true), { timeout: 3_000 });
+  // The hub counts it connected once it sent its welcome; the worker is connected only after
+  // it checked the welcome's proof (asynchronously).
+  await vi.waitFor(async () => expect(await fake.pageMessage("popup.html", { type: "popup:status" })).toMatchObject({ state: "connected" }), { timeout: 3_000 });
   return {
     /** A pairing change makes the worker reconnect, here to a socket that never opens. */
     async disconnect() {

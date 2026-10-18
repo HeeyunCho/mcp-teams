@@ -55,6 +55,16 @@ Teams reports the call's length, not each person's time in it, so attendance lis
 
 The AI can only **request** a send. The extension then opens its own window showing where the message goes (for a new chat: who will be in it, and its title), the post it replies to and the message itself. The message is posted, and a new chat created, only if you click **Send** there. Closing the window, clicking *Don't send*, or waiting 5 minutes all mean nothing is posted.
 
+If the AI stops waiting (it cancels, times out or loses its connection) while the window is open, the window closes and nothing is posted. If you had already clicked *Send* but no answer came back, the AI is told the message may have been posted and to check the chat before sending again, so it doesn't post twice.
+
+### When Teams is busy
+
+When Teams asks to slow down (HTTP 429), mcp-teams sends nothing more to that service, for that region or account, until Teams' wait is over. A call waits that out if it has time; otherwise it fails with "Teams is busy (throttled) for N s". A list that came back without some people's names says so in a `note`, instead of leaving them out silently.
+
+### When something hangs
+
+Several AI sessions share one connection to the browser: the first one runs it, the others go through it. They check on each other every 20 s. If the session running it stops responding (its app is suspended or hung), the others' calls fail within about 40 s with "The mcp-teams hub stopped responding; try again in a few seconds", and one of them takes over. A session that stops reading what it is sent is disconnected and reconnects. The extension reconnects by itself when it hasn't heard from the server for 45 s.
+
 ## Setup
 
 You need [Node.js](https://nodejs.org) 20 or later, and Chrome or Edge. Then, in a terminal:

@@ -1,6 +1,6 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import type { ExtensionBridge } from "./bridge.js";
+import { isLostCall, type ExtensionBridge } from "./bridge.js";
 import type { Config } from "./config.js";
 import { SERVER_VERSION } from "./config.js";
 
@@ -18,11 +18,14 @@ const fail = (err: unknown) => ({
   content: [{ type: "text" as const, text: err instanceof Error ? err.message : String(err) }],
 });
 
-/** Bridge errors for a call that was already sent, so its outcome is unknown (see src/bridge.ts). */
-const OUTCOME_UNKNOWN = /timed out|withdrawn|disconnected|reconnected|restarted|shutting down|connection/i;
+/** What the MCP SDK passes a tool besides its arguments: `signal` aborts when the AI app cancels the call. */
+type Extra = { signal?: AbortSignal };
 
-/** Wraps a handler so thrown errors become MCP tool errors instead of protocol errors. */
-function safe<A, E = unknown>(fn: (args: A, extra: E) => Promise<ReturnType<typeof text>>) {
+/**
+ * Wraps a handler so thrown errors become MCP tool errors instead of protocol errors.
+ * Handlers pass extra.signal to bridge.call, so cancelling a tool withdraws its extension call.
+ */
+function safe<A, E extends Extra = Extra>(fn: (args: A, extra: E) => Promise<ReturnType<typeof text>>) {
   return async (args: A, extra: E) => {
     try {
       return await fn(args, extra);
@@ -70,10 +73,10 @@ export function registerTools(server: McpServer, bridge: ExtensionBridge, config
         "Shows the mcp-teams server version, the browser extension version, and whether Teams is reachable (which of its services have a session).",
       inputSchema: {},
     },
-    safe(async () => {
+    safe(async (_, extra) => {
       let teams: unknown = null;
       if (bridge.connected) {
-        teams = await bridge.call("status").catch((e: Error) => ({ error: e.message }));
+        teams = await bridge.call("status", {}, undefined, extra.signal).catch((e: Error) => ({ error: e.message }));
       }
       return text({
         server: SERVER_VERSION,
@@ -120,7 +123,7 @@ export function registerTools(server: McpServer, bridge: ExtensionBridge, config
         clear: z.boolean().default(false).describe("Clear the recorded traffic after returning it"),
       },
     },
-    safe(async (args) => text(await bridge.call("apiTraffic", args))),
+    safe(async (args, extra) => text(await bridge.call("apiTraffic", args, undefined, extra.signal))),
   );
 
   server.registerTool(
@@ -133,9 +136,9 @@ export function registerTools(server: McpServer, bridge: ExtensionBridge, config
         include_ids: z.boolean().default(false).describe("Also return team and channel ids (long; 'Team/Channel' names are enough to address channels)"),
       },
     },
-    safe(async ({ include_ids }) => {
+    safe(async ({ include_ids }, extra) => {
       type Team = { id: string; name: string; channels: { id: string; name: string }[] };
-      const r = await bridge.call<{ teams: Team[] }>("listTeams", {}, READ_TIMEOUT_MS);
+      const r = await bridge.call<{ teams: Team[] }>("listTeams", {}, READ_TIMEOUT_MS, extra.signal);
       return text(
         include_ids
           ? r
@@ -156,8 +159,8 @@ export function registerTools(server: McpServer, bridge: ExtensionBridge, config
         limit: z.number().int().min(1).max(200).default(30),
       },
     },
-    safe(async ({ query, unread_only, limit }) =>
-      text(await bridge.call("listChats", { query, unreadOnly: unread_only, limit }, READ_TIMEOUT_MS)),
+    safe(async ({ query, unread_only, limit }, extra) =>
+      text(await bridge.call("listChats", { query, unreadOnly: unread_only, limit }, READ_TIMEOUT_MS, extra.signal)),
     ),
   );
 
@@ -177,11 +180,12 @@ export function registerTools(server: McpServer, bridge: ExtensionBridge, config
         max_length: z.number().int().min(100).max(100_000).default(4_000).describe("Maximum length of each message's text"),
       },
     },
-    safe(async ({ conversation, limit, cursor, before, reply_to, include_system, max_length }) => {
+    safe(async ({ conversation, limit, cursor, before, reply_to, include_system, max_length }, extra) => {
       const r = await bridge.call<{ messages: Message[] }>(
         "readMessages",
         { conversation, limit, cursor, before, threadId: reply_to, includeSystem: include_system, maxLength: max_length },
         READ_TIMEOUT_MS,
+        extra.signal,
       );
       return text({ ...r, messages: capText(r.messages, max_length) });
     }),
@@ -205,7 +209,9 @@ export function registerTools(server: McpServer, bridge: ExtensionBridge, config
         limit: z.number().int().min(1).max(200).default(20),
       },
     },
-    safe(async ({ query, transcript_only, limit }) => text(await bridge.call("listMeetings", { query, transcriptOnly: transcript_only, limit }, READ_TIMEOUT_MS))),
+    safe(async ({ query, transcript_only, limit }, extra) =>
+      text(await bridge.call("listMeetings", { query, transcriptOnly: transcript_only, limit }, READ_TIMEOUT_MS, extra.signal)),
+    ),
   );
 
   server.registerTool(
@@ -219,7 +225,7 @@ export function registerTools(server: McpServer, bridge: ExtensionBridge, config
         limit: z.number().int().min(1).max(100).default(10).describe("Most recent calls to return"),
       },
     },
-    safe(async (args) => text(await bridge.call("getMeeting", args, READ_TIMEOUT_MS))),
+    safe(async (args, extra) => text(await bridge.call("getMeeting", args, READ_TIMEOUT_MS, extra.signal))),
   );
 
   server.registerTool(
@@ -235,7 +241,9 @@ export function registerTools(server: McpServer, bridge: ExtensionBridge, config
         max_length: z.number().int().min(1000).max(200_000).default(40_000).describe("Most characters of transcript to return"),
       },
     },
-    safe(async ({ meeting, session, from, max_length }) => text(await bridge.call("readTranscript", { meeting, session, from, maxLength: max_length }, READ_TIMEOUT_MS))),
+    safe(async ({ meeting, session, from, max_length }, extra) =>
+      text(await bridge.call("readTranscript", { meeting, session, from, maxLength: max_length }, READ_TIMEOUT_MS, extra.signal)),
+    ),
   );
 
   server.registerTool(
@@ -251,7 +259,7 @@ export function registerTools(server: McpServer, bridge: ExtensionBridge, config
         limit: z.number().int().min(1).max(200).default(30).describe("Most matching lines to return"),
       },
     },
-    safe(async (args) => text(await bridge.call("searchTranscripts", args, 300_000))),
+    safe(async (args, extra) => text(await bridge.call("searchTranscripts", args, 300_000, extra.signal))),
   );
 
   server.registerTool(
@@ -266,7 +274,7 @@ export function registerTools(server: McpServer, bridge: ExtensionBridge, config
         offset: z.number().int().min(0).default(0),
       },
     },
-    safe(async (args) => text(await bridge.call("searchMessages", args, READ_TIMEOUT_MS))),
+    safe(async (args, extra) => text(await bridge.call("searchMessages", args, READ_TIMEOUT_MS, extra.signal))),
   );
 
   server.registerTool(
@@ -280,7 +288,7 @@ export function registerTools(server: McpServer, bridge: ExtensionBridge, config
         limit: z.number().int().min(1).max(50).default(10),
       },
     },
-    safe(async (args) => text(await bridge.call("findPeople", args, READ_TIMEOUT_MS))),
+    safe(async (args, extra) => text(await bridge.call("findPeople", args, READ_TIMEOUT_MS, extra.signal))),
   );
 
   server.registerTool(
@@ -306,7 +314,7 @@ export function registerTools(server: McpServer, bridge: ExtensionBridge, config
       },
     },
     // A cancelled call withdraws the send: the confirmation window closes and nothing is sent.
-    safe(async ({ conversation, to, title, text: message, reply_to, subject }, extra: { signal?: AbortSignal }) => {
+    safe(async ({ conversation, to, title, text: message, reply_to, subject }, extra) => {
       if (!conversation === !to) throw new Error("Give either conversation (an existing chat or channel) or to (people to start a chat with).");
       try {
         return text(await bridge.call("requestSend", { conversation, to, title, text: message, threadId: reply_to, subject }, SEND_TIMEOUT_MS, extra.signal));
@@ -314,7 +322,7 @@ export function registerTools(server: McpServer, bridge: ExtensionBridge, config
         const message = (err as Error).message;
         // The bridge lost the call after it was sent (its own messages, also as relayed by a hub):
         // the user may have clicked Send just before, so retrying blindly could post twice.
-        if (!OUTCOME_UNKNOWN.test(message)) throw err;
+        if (!isLostCall(message)) throw err;
         throw new Error(`${message} The message may have been posted if the user had just clicked Send: check with read_messages before sending again.`);
       }
     }),

@@ -78,6 +78,24 @@ export function serviceUrl(path, base) {
   return url;
 }
 
+// ------------------------------------------------------------ throttling
+
+const RETRY_AFTER_DEFAULT_MS = 5_000;
+const RETRY_AFTER_MIN_MS = 1_000;
+const RETRY_AFTER_MAX_MS = 60_000;
+
+/**
+ * How long to leave a service alone after a 429, from its Retry-After header: seconds or an
+ * HTTP date. 5 s when it's missing or unreadable, at least 1 s, at most 60 s (a request's own limit).
+ */
+export function retryAfterMs(value, now = Date.now()) {
+  const v = String(value ?? "").trim();
+  let ms = RETRY_AFTER_DEFAULT_MS;
+  if (/^\d+(\.\d+)?$/.test(v)) ms = Number(v) * 1000;
+  else if (v && !Number.isNaN(Date.parse(v))) ms = Date.parse(v) - now;
+  return Math.min(RETRY_AFTER_MAX_MS, Math.max(RETRY_AFTER_MIN_MS, Math.round(ms)));
+}
+
 // ------------------------------------------------------------ read_messages cursor
 
 const toBase64Url = (s) => btoa(String.fromCharCode(...new TextEncoder().encode(s))).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
