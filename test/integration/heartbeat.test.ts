@@ -229,7 +229,8 @@ describe("2.3: slow peers", () => {
     }
   }, 30_000);
 
-  it("2.3: a peer that reads one large answer slowly keeps its live hub (the hub's pings go on behind the backlog)", async () => {
+  // Windows takes the whole answer into its loopback buffers, so the hub never sees a backlog here.
+  it.skipIf(process.platform === "win32")("2.3: a peer that reads one large answer slowly keeps its live hub (the hub's pings go on behind the backlog)", async () => {
     // The answer lands right after a ping, and the peer reads nothing until the hub has seen the
     // backlog at one tick; then it drains well before the next. Neither side may drop the other.
     const keepAliveMs = 1_000;
