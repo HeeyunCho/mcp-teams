@@ -28,10 +28,35 @@ function captureSession(details) {
   if (!svc) return;
   const headers = teams.pickHeaders(details.requestHeaders);
   if (!headers) return;
-  const capture = { base: svc.base, region: svc.region ?? null, headers, at: Date.now() };
-  const update = { [`capture:${svc.service}`]: capture };
-  if (svc.oid) update.oid = svc.oid;
-  chrome.storage.session.set(update);
+  // Whose session it is: the user its token was issued to (an object id is one tenant's).
+  const oid = teams.tokenOid(headers) ?? svc.oid ?? null;
+  const capture = { base: svc.base, region: svc.region ?? null, headers, at: Date.now(), oid };
+  return (captureQueue = captureQueue.then(() => storeCapture(svc.service, capture)).catch(() => {}));
+}
+
+const CAPTURED_SERVICES = ["chatsvc", "csa", "mt", "substrate"];
+let captureQueue = Promise.resolve(); // one capture at a time, so a switch is seen in order
+
+/**
+ * Stores a capture. One from another user than the signed-in one (the user switched Teams to
+ * another tenant or account) retires the other services' sessions, which belong to the
+ * previous one (or to nobody known), and the caches of what that user saw: the next request
+ * to those services waits for Teams' own request as the new user.
+ */
+async function storeCapture(service, capture) {
+  const update = { [`capture:${service}`]: capture };
+  if (capture.oid) {
+    const { oid: was } = await chrome.storage.session.get("oid");
+    if (was && was !== capture.oid) {
+      const others = CAPTURED_SERVICES.filter((s) => s !== service).map((s) => `capture:${s}`);
+      const held = await chrome.storage.session.get(others);
+      const stale = others.filter((k) => held[k] && held[k].oid !== capture.oid);
+      if (stale.length) await chrome.storage.session.remove(stale);
+      forgetAccount();
+    }
+    update.oid = capture.oid;
+  }
+  await chrome.storage.session.set(update);
 }
 
 const captureFilter = {
@@ -327,7 +352,7 @@ async function sendTo(key, tab, url, method, headers, body, ctx, wait, repeatabl
  * that can be done without) fails at once as busy instead. `repeatable`: a POST that only
  * reads (a search, a profile lookup), sent again after a 429 like a GET.
  */
-async function api(service, path, { method = "GET", body, raw = false, withLocation = false, ctx = null, wait = true, repeatable = method === "GET" } = {}) {
+async function api(service, path, { method = "GET", body, raw = false, withLocation = false, ctx = null, wait = true, repeatable = method === "GET", onCapture } = {}) {
   ctx?.check();
   let cap = await getCapture(service);
   // Opening a tab or waiting for a session can take a minute; a withdrawn request stops waiting.
@@ -337,14 +362,18 @@ async function api(service, path, { method = "GET", body, raw = false, withLocat
     if (!cap) throw new Error(SERVICE_HELP[service]);
   }
   const urlFor = (c) => teams.serviceUrl(path, c.base);
+  await onCapture?.(cap); // may refuse the session (it throws), before anything is sent
   let res = await sendTo(gateKey(service, cap.base), tab, urlFor(cap), method, cap.headers, body, ctx, wait, repeatable);
   if (res.status === 401) {
     // Rejected before running (expired token), so trying once more is safe. A 403 is a
     // real answer (e.g. no longer a member of that chat).
-    meetingSessionsCache.clear(); // the session (maybe the account) is changing
+    // The session (maybe the account) is changing: lists read with it are read again.
+    listCache = null;
+    meetingSessionsCache.clear();
     cap = await guarded(refreshSession(service, tab, { quickWaitMs: 0 }), ctx);
     if (!cap) throw new Error(SERVICE_HELP[service]);
     tab = await guarded(findTeamsTab(new URL(cap.base).origin), ctx);
+    await onCapture?.(cap);
     res = await sendTo(gateKey(service, cap.base), tab, urlFor(cap), method, cap.headers, body, ctx, wait, repeatable);
   }
   if (raw) return res;
@@ -377,18 +406,41 @@ async function myMri() {
   return oid ? `8:orgid:${oid}` : null;
 }
 
-const LIST_CACHE_MS = 60_000;
-let listCache = null; // { until, data: { teams, chats, meetings, namesMissing } }
+/**
+ * Whose data a capture reads: "<base>\n<oid>", the service's base (origin and region) and the
+ * user its token was issued to. An object id is one tenant's, so two tenants (or accounts) in
+ * the same region still get different keys. null without a capture.
+ */
+const accountKey = (cap) => (cap ? `${cap.base}\n${cap.oid ?? ""}` : null);
 
 /**
- * Teams, channels and chats (csa), with names for untitled chats. Cached for a minute, but
+ * The user switched Teams to another account or tenant: forget what the previous one saw.
+ * (Throttle gates stay: they are Teams' limits per service and base, not anyone's data.)
+ */
+function forgetAccount() {
+  listCache = null;
+  names.clear();
+  transcripts.clear();
+  meetingSessionsCache.clear();
+}
+
+/** A read that a switch of the signed-in Teams account overtook: what it read, and what a retry reads. */
+const ACCOUNT_CHANGED_WHILE = (what, retry) => `The signed-in Teams account changed while ${what}; it's now signed in as another account, so a retry ${retry}.`;
+
+const LIST_CACHE_MS = 60_000;
+let listCache = null; // { key: accountKey of csa, until, data: { teams, chats, meetings, namesMissing } }
+
+/**
+ * Teams, channels and chats (csa), with names for untitled chats. Cached for a minute for the
+ * account it was read as (a 401 empties it), but
  * when names are missing (`namesMissing`: { chats, organizers }, see lookupNames) only until
  * Teams' throttle is over, or not at all after another failure, so they are looked up again.
  * A meeting whose organizer's name is missing that way has `organizerNameMissing`.
  */
 async function teamsAndChats(fresh = false, ctx = null) {
-  if (!fresh && listCache && Date.now() < listCache.until) return listCache.data;
-  const json = await api("csa", "/api/v1/teams/users/me?isPrefetch=false&enableMembershipSummary=true&enableRC2Fetch=false", { ctx });
+  if (!fresh && listCache && Date.now() < listCache.until && listCache.key === accountKey(await getCapture("csa"))) return listCache.data;
+  let readAs = null; // the session the list was read with
+  const json = await api("csa", "/api/v1/teams/users/me?isPrefetch=false&enableMembershipSummary=true&enableRC2Fetch=false", { ctx, onCapture: (c) => (readAs = c) });
   const data = { teams: teams.parseTeams(json), chats: teams.parseCsaChats(json), meetings: teams.parseCsaMeetings(json) };
   const chats = await nameChats(data.chats, ctx);
   const organizers = await lookupNames(data.meetings.map((m) => m.organizer), ctx);
@@ -399,7 +451,11 @@ async function teamsAndChats(fresh = false, ctx = null) {
   data.namesMissing = { chats, organizers };
   const missing = [chats, organizers].filter(Boolean);
   const until = missing.some((x) => !x.throttled) ? 0 : missing.length ? Math.max(...missing.map((x) => x.until)) : Date.now() + LIST_CACHE_MS;
-  listCache = { until, data };
+  // Filed under the account it was read as. A switch while it was read leaves nothing of the
+  // old account for the new one: not cached, and not used (its chats aren't the new account's).
+  const key = accountKey(readAs);
+  if (key !== accountKey(await getCapture("csa"))) throw new Error(ACCOUNT_CHANGED_WHILE("the chat list was read", "reads that account's chats"));
+  listCache = { key, until, data };
   return data;
 }
 
@@ -432,18 +488,26 @@ async function lookupNames(mris, ctx = null, { wait = false } = {}) {
     // Names that can't be looked up are left out, but a withdrawn request ends here (and isn't cached).
     ctx?.check();
     const batch = unknown.slice(i, i + 100);
+    let readAs = null; // the session the names were looked up with
     const json = await api("mt", "/beta/users/fetchShortProfile?isMailAddress=false&enableGuest=true&includeIBBarredUsers=true&skypeTeamsInfo=true", {
       method: "POST",
       body: batch,
       ctx,
       wait,
       repeatable: true,
+      onCapture: (c) => (readAs = c),
     }).catch((err) => {
       ctx?.check(); // a withdrawn request ends here (and isn't cached)
       missing = err?.throttled ? { throttled: true, until: err.until } : (missing ?? { error: err?.message ?? String(err) });
       for (const m of batch) notAsked.add(m);
       return null;
     });
+    // Names looked up as an account that is no longer signed in aren't kept.
+    if (json && accountKey(readAs) !== accountKey(await getCapture("mt"))) {
+      missing ??= { error: ACCOUNT_CHANGED_WHILE("names were looked up", "looks them up as that account") };
+      for (const m of batch) notAsked.add(m);
+      continue;
+    }
     if (names.size > NAMES_MAX) names.clear();
     for (const p of teams.parseProfiles(json)) if (p.mri && p.name) names.set(p.mri, p.name);
   }
@@ -579,12 +643,15 @@ async function sharepointGet(url, ctx = null) {
   return sendTo(gateKey("sharepoint", origin), await guarded(sharepointTab(origin), ctx), url, "GET", {}, null, ctx, true);
 }
 
-const transcripts = new Map(); // transcript URL -> parsed transcript; a finished transcript doesn't change
+// "<accountKey of chatsvc>\n<transcript URL>" -> parsed transcript; a finished transcript doesn't
+// change, but what one user may read isn't another's.
+const transcripts = new Map();
 const TRANSCRIPTS_MAX = 50;
 
 /** A call's transcript (Stream transcript.json) from the organizer's OneDrive. */
 async function transcriptOf(info, session, ctx = null) {
-  const cached = transcripts.get(session.transcriptUrl);
+  const key = `${accountKey(await getCapture("chatsvc")) ?? ""}\n${session.transcriptUrl}`;
+  const cached = transcripts.get(key);
   if (cached) return cached;
   const url = session.transcriptUrl + (session.transcriptUrl.includes("?") ? "&" : "?") + "format=json";
   const res = await sharepointGet(url, ctx);
@@ -593,8 +660,10 @@ async function transcriptOf(info, session, ctx = null) {
   }
   if (res.status >= 400) throw new Error(`OneDrive HTTP ${res.status} while reading the transcript.`);
   const json = JSON.parse(res.text);
+  // Not kept for an account that signed in while it was read.
+  if (key !== `${accountKey(await getCapture("chatsvc")) ?? ""}\n${session.transcriptUrl}`) return json;
   if (transcripts.size >= TRANSCRIPTS_MAX) transcripts.delete(transcripts.keys().next().value);
-  transcripts.set(session.transcriptUrl, json);
+  transcripts.set(key, json);
   return json;
 }
 
@@ -608,9 +677,9 @@ async function resolveMeeting(meeting, ctx = null) {
 
 const SESSIONS_CACHE_MS = 60_000;
 const SESSIONS_CACHE_MAX = 50;
-/** "<chatsvc base>\n<meeting id>" -> { at, sessions }: one tenant's meetings never answer another's. */
+/** "<accountKey of chatsvc>\n<meeting id>" -> { at, sessions }: one tenant's meetings never answer another's. */
 const meetingSessionsCache = new Map();
-const sessionsKey = (cap, id) => (cap ? `${cap.base}\n${id}` : null);
+const sessionsKey = (cap, id) => (cap ? `${accountKey(cap)}\n${id}` : null);
 
 /**
  * The calls held in a meeting chat (see teams.meetingSessions). Cached for a minute, so
@@ -621,12 +690,12 @@ async function sessionsOf(info, ctx = null) {
   const hit = key && meetingSessionsCache.get(key);
   if (hit && Date.now() - hit.at < SESSIONS_CACHE_MS) return hit.sessions;
   const sessions = await readSessions(info, ctx);
-  // Filed under the base the chat was read from (a 401 on the way may have changed it).
-  const keyNow = sessionsKey(await getCapture("chatsvc"), info.id);
-  if (keyNow) {
-    meetingSessionsCache.delete(keyNow);
+  // Kept only when the chat was read as the account it is filed under: a session that changed
+  // meanwhile (a switch, or a 401 that brought another base) may have read part of it.
+  if (key && key === sessionsKey(await getCapture("chatsvc"), info.id)) {
+    meetingSessionsCache.delete(key);
     if (meetingSessionsCache.size >= SESSIONS_CACHE_MAX) meetingSessionsCache.delete(meetingSessionsCache.keys().next().value);
-    meetingSessionsCache.set(keyNow, { at: Date.now(), sessions });
+    meetingSessionsCache.set(key, { at: Date.now(), sessions });
   }
   return sessions;
 }
@@ -930,6 +999,8 @@ export const handlers = {
 
   async requestSend({ conversation, to, title, text, threadId, subject }, ctx) {
     if (!String(text ?? "").trim()) throw new Error("The message is empty.");
+    // Who the window confirms for: taken before anything is looked up for it.
+    const account = await signedInAccount();
     if (to?.length) {
       if (conversation) throw new Error("Give either a conversation or people (to), not both.");
       if (threadId || subject) throw new Error("reply_to and subject are for channels; a new chat takes people and an optional title.");
@@ -941,7 +1012,7 @@ export const handlers = {
       const request = existing
         ? { conversation: { id: existing.id, kind: existing.kind, title: existing.title }, people, text: String(text), existingChat: true }
         : { conversation: null, newChat: { members: people.map((p) => p.mri), title: title ?? null }, people, text: String(text) };
-      return askUserToConfirm(request, ctx);
+      return askUserToConfirm(request, ctx, account);
     }
     const conv = await resolve(conversation, ctx);
     if (threadId && conv.kind !== "channel") throw new Error("reply_to is only for channel posts; in a chat, just send the message.");
@@ -952,7 +1023,7 @@ export const handlers = {
       replyingTo = root ? teams.parseMessage(root) : { id: threadId };
     }
     const request = { conversation: conv, text: String(text), threadId: threadId ?? null, subject: subject ?? null, replyingTo };
-    return askUserToConfirm(request, ctx);
+    return askUserToConfirm(request, ctx, account);
   },
 };
 
@@ -960,7 +1031,7 @@ export const handlers = {
  * Creates a chat with these members and me (called only after the user clicked Send).
  * A 1:1 chat that already exists on Teams' side comes back as that chat.
  */
-async function createChat({ members, title }) {
+async function createChat({ members, title }, account = null) {
   const me = await myMri();
   const oneOnOne = members.length === 1;
   const body = {
@@ -972,25 +1043,41 @@ async function createChat({ members, title }) {
       ...(title ? { topic: title } : {}),
     },
   };
-  const { json, location } = await api("chatsvc", "/v1/threads", { method: "POST", body, withLocation: true });
+  const { json, location } = await api("chatsvc", "/v1/threads", { method: "POST", body, withLocation: true, onCapture: asConfirmed(account) });
   const id = teams.threadIdFrom(location, json) ?? (oneOnOne ? teams.oneOnOneId(me, members[0]) : null);
   if (!id) throw new Error("Teams created no chat (its answer had no chat id).");
   listCache = null; // the chat list changed
   return id;
 }
 
-async function sendMessage({ conversation, newChat, people, text, threadId, subject }) {
+/**
+ * An onCapture check for a post confirmed as `account` (an oid, or null when Teams hadn't shown
+ * who was signed in): fails before anything is sent when the session it would go out with is
+ * another account's (Teams switched since the click).
+ */
+const asConfirmed = (account) => async (cap) => {
+  if (account && (cap.oid ?? (await signedInAccount())) !== account) throw Object.assign(new Error(ACCOUNT_CHANGED), { accountChanged: true });
+};
+
+/** Posts a confirmed message; `account`: who confirmed it (see asConfirmed). */
+async function sendMessage({ conversation, newChat, people, text, threadId, subject }, account = null) {
   if (newChat) {
     let id;
     try {
-      id = await createChat(newChat);
+      id = await createChat(newChat, account);
     } catch (err) {
       // Without an answer the chat may exist, but the message was never sent.
       if (err.outcomeUnknown) err.chatMayExist = true;
       throw err;
     }
     const title = newChat.title ?? people.map((p) => p.name).join(", ");
-    const r = await sendMessage({ conversation: { id, title }, text });
+    let r;
+    try {
+      r = await sendMessage({ conversation: { id, title }, text }, account);
+    } catch (err) {
+      if (err.accountChanged) err.chatCreated = true;
+      throw err;
+    }
     return { ...r, newChat: true, conversationId: id };
   }
   const target = threadId ? `${conversation.id};messageid=${threadId}` : conversation.id;
@@ -1012,7 +1099,7 @@ async function sendMessage({ conversation, newChat, people, text, threadId, subj
     postType: "Standard",
     crossPostChannels: [],
   };
-  const r = await api("chatsvc", `/v1/users/ME/conversations/${encodeURIComponent(target)}/messages`, { method: "POST", body });
+  const r = await api("chatsvc", `/v1/users/ME/conversations/${encodeURIComponent(target)}/messages`, { method: "POST", body, onCapture: asConfirmed(account) });
   return { sent: true, conversation: conversation.title ?? conversation.id, time: r?.OriginalArrivalTime ? new Date(r.OriginalArrivalTime).toISOString() : null };
 }
 
@@ -1029,6 +1116,18 @@ export function pendingSendCount() {
   return pendingSends.size;
 }
 
+const ACCOUNT_CHANGED = "The signed-in Teams account changed since this was confirmed; nothing was sent.";
+const CHAT_CREATED_ACCOUNT_CHANGED =
+  "The chat was created, but no message was sent: the signed-in Teams account changed while it was being sent. Check with list_chats (as the account that confirmed it) before trying again.";
+
+/**
+ * The signed-in user's object id (one tenant's), or null before Teams has shown it. A send
+ * window remembers it: a click after a switch to another account posts nothing.
+ */
+async function signedInAccount() {
+  return (await chrome.storage.session.get("oid")).oid ?? null;
+}
+
 const WITHDRAWN = {
   sent: false,
   reason: "The request was withdrawn (cancelled, or the server stopped waiting), so the confirmation window was closed; nothing was sent.",
@@ -1041,7 +1140,7 @@ const WITHDRAWN = {
  * the AI was told the send failed. Once the user clicked Send, the post runs to the end
  * and its outcome is the answer.
  */
-async function askUserToConfirm(request, ctx) {
+async function askUserToConfirm(request, ctx, account = null) {
   if (ctx?.cancelled) return WITHDRAWN;
   const id = crypto.randomUUID();
   const win = await chrome.windows.create({
@@ -1064,7 +1163,7 @@ async function askUserToConfirm(request, ctx) {
       resolve(result);
     };
     const timer = setTimeout(() => finish({ sent: false, reason: "No decision within 5 minutes; nothing was sent." }), CONFIRM_TIMEOUT_MS);
-    pendingSends.set(id, { request, windowId: win.id, timer, finish, sending: false });
+    pendingSends.set(id, { request, account, windowId: win.id, timer, finish, sending: false });
     // Withdrawn while the window was opening, or later.
     if (ctx?.cancelled) finish(WITHDRAWN);
     else if (ctx) stopWatching = ctx.onCancel(() => finish(WITHDRAWN));
@@ -1093,13 +1192,22 @@ function onConfirmMessage(msg, sender, sendResponse) {
       }
       // From here on the post runs to the end: a withdrawal no longer closes the window.
       p.sending = true;
+      // Confirmed as one account, clicked after Teams switched to another: its session would post it.
+      if (p.account && (await signedInAccount()) !== p.account) {
+        p.finish({ sent: false, reason: ACCOUNT_CHANGED }, true);
+        return sendResponse({ ok: false, error: ACCOUNT_CHANGED });
+      }
       try {
-        p.finish(await sendMessage(p.request), true);
+        p.finish(await sendMessage(p.request, p.account), true);
         sendResponse({ ok: true });
       } catch (err) {
         // Without an answer the post may have gone through: saying it failed would invite a second one.
         const cause = /[.!?]$/.test(err.message) ? err.message : `${err.message}.`;
-        const reason = err.chatMayExist
+        const reason = err.accountChanged
+          ? err.chatCreated
+            ? CHAT_CREATED_ACCOUNT_CHANGED
+            : ACCOUNT_CHANGED
+          : err.chatMayExist
           ? `Creating the chat did not finish: ${cause} The chat may have been created, without the message: check with list_chats before trying again.`
           : err.outcomeUnknown
             ? `Sending did not finish: ${cause} The message may have been posted: check with read_messages before sending again.`
