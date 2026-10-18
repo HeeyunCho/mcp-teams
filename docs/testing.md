@@ -10,7 +10,7 @@ Every change starts with a failing test. The fix makes it pass; a refactor keeps
 | `test/integration/` | The extension's service worker (`extension/background.js`), the bridge (`src/bridge.ts`), pairing and the extension folder | A fake `chrome` (`test/helpers/fakeChrome.ts`); real sockets with hubs, peers and a fake extension (`test/helpers/bridgeHarness.ts`) | `npm run test:integration` |
 | `test/system/` | The built server (`dist/`) over stdio, as an MCP client sees it | A fake extension on the bridge | `npm run test:system` |
 
-`npm test` runs the build, a typecheck of the tests (`tsconfig.test.json`) and all three layers. It's what CI and the release workflow run. Nothing here talks to Teams; `npm run probe` does, by hand.
+`npm test` runs the build, a typecheck of the tests (`tsconfig.test.json`) and all three layers. It's what CI and the release workflow run. Nothing here talks to Teams; `npm run probe` does, by hand. `npm run measure-memory` is also run by hand (see Memory below).
 
 ## Writing a test
 
@@ -21,3 +21,20 @@ Every change starts with a failing test. The fix makes it pass; a refactor keeps
 - **Ports:** never fixed. Use `freePort()` or port 0, so test files and worktrees can run side by side.
 - **Tool contract:** `test/system/__snapshots__/tools.json` holds every tool's description and input schema. When a change to what the AI sees is intended, update it with `npx vitest run test/system -u` and review the diff.
 - **Fixtures:** only fictional people, companies and ids (Alex Doe, Sam Roe, contoso.example, `00000000-…` GUIDs). Never real names, tenants or tokens.
+
+## Memory
+
+`npm run measure-memory` builds and runs `scripts/measure-memory.mjs`: it measures memory instead of guessing it. Per scenario it starts three fresh processes, so the numbers don't mix: the hub, a peer that runs the real tools through an in-memory MCP client, and a fake extension that answers with fictional data shaped like the real extension's. Each samples `heapUsed` every 2 ms and reports it with its peak RSS (the OS's maxRSS). The scenarios: `transcript` reads a long meeting transcript to the end by `continueFrom`, and `history` pages a 5,000-message chat back to the first message by `olderCursor`. The run uses a free port, a pairing token made for it and a temporary `TEAMS_MCP_HOME`, so it never touches `~/.mcp-teams` or the configured port. Sizes: `npm run measure-memory -- --lines 20000 --chunk 40000 --messages 5000 --page 50` (the defaults). It's not part of CI; `test/system/measureMemory.test.ts` only checks that it runs, with small sizes.
+
+**A PR that claims a memory change** puts a before/after table in its description: run the script on the base branch and on the PR's branch (same machine, same Node, same sizes) and paste both, e.g.
+
+| scenario | process | peak RSS (MB) before | after | peak heapUsed (MB) before | after |
+|---|---|---:|---:|---:|---:|
+| transcript | hub | 51.1 | | 8.8 | |
+| transcript | peer | 73.8 | | 21.6 | |
+| transcript | extension | 66.6 | | 18.7 | |
+| history | hub | 50.6 | | 8.6 | |
+| history | peer | 74.5 | | 20.8 | |
+| history | extension | 68.4 | | 18.6 | |
+
+(The "before" column is a run of v0.2.14 plus Phase 3 so far, Node 24, macOS.) Peaks vary by a megabyte or two between runs; run each side two or three times and quote the middle one.
