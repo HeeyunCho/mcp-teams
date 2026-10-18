@@ -162,4 +162,35 @@ describe("3.2: a chat send_message creates empties the cache", () => {
     expect(listed.chats[0]).toMatchObject({ id: NEW_CHAT, title: "Contoso offsite" });
     expect(s.fake.count("csa")).toBe(before + 1);
   });
+
+  it("3.2: after a message is posted to an existing chat, list_chats reads the list again and shows it as the last message", async () => {
+    // So an AI checking list_chats after send_message never sees the old last message and sends again.
+    let posted = false;
+    const s = await setup({
+      csa: () => {
+        const view = csa();
+        if (posted) view.chats[0] = { ...view.chats[0], lastMessage: { composetime: "2026-10-03T10:00:00Z" } } as (typeof view.chats)[0];
+        return view;
+      },
+      mt: profiles,
+      chatsvc: (req: SentRequest) => {
+        if (req.method !== "POST") return undefined;
+        posted = true;
+        return { OriginalArrivalTime: Date.parse("2026-10-03T10:00:00Z") };
+      },
+    });
+    close = s.close;
+    const first = await s.tool("list_chats");
+    expect(first.chats[0].lastMessage.time).toBe("2026-10-02T09:00:00.000Z");
+    const result = s.worker.handlers.requestSend({ conversation: "19:contoso-launch@thread.v2", text: "Hi Sam" });
+    await vi.waitFor(() => expect(s.fake.spies.windowsCreate).toHaveBeenCalledTimes(1));
+    const id = /id=([^&]+)/.exec(s.fake.spies.windowsCreate.mock.calls[0][0]!.url!)![1];
+    await click(s.fake, id);
+    await expect(result).resolves.toMatchObject({ sent: true });
+    const before = s.fake.count("csa");
+
+    const listed = await s.tool("list_chats");
+    expect(s.fake.count("csa")).toBe(before + 1);
+    expect(listed.chats[0]).toMatchObject({ id: "19:contoso-launch@thread.v2", lastMessage: { time: "2026-10-03T10:00:00.000Z" } });
+  });
 });
