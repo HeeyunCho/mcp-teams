@@ -368,7 +368,7 @@ async function api(service, path, { method = "GET", body, raw = false, withLocat
     // Rejected before running (expired token), so trying once more is safe. A 403 is a
     // real answer (e.g. no longer a member of that chat).
     // The session (maybe the account) is changing: lists read with it are read again.
-    listCache = null;
+    dropList();
     meetingSessionsCache.clear();
     cap = await guarded(refreshSession(service, tab, { quickWaitMs: 0 }), ctx);
     if (!cap) throw new Error(SERVICE_HELP[service]);
@@ -418,7 +418,7 @@ const accountKey = (cap) => (cap ? `${cap.base}\n${cap.oid ?? ""}` : null);
  * (Throttle gates stay: they are Teams' limits per service and base, not anyone's data.)
  */
 function forgetAccount() {
-  listCache = null;
+  dropList();
   names.clear();
   transcripts.clear();
   meetingSessionsCache.clear();
@@ -429,6 +429,13 @@ const ACCOUNT_CHANGED_WHILE = (what, retry) => `The signed-in Teams account chan
 
 const LIST_CACHE_MS = 60_000;
 let listCache = null; // { key: accountKey of csa, until, data: { teams, chats, meetings, namesMissing } }
+let listGeneration = 0; // bumped by dropList: a read that started before a drop doesn't store its (older) list
+
+/** Empties the list cache, also for a read under way: it can't put the list from before this back. */
+function dropList() {
+  listCache = null;
+  listGeneration++;
+}
 
 /**
  * Teams, channels and chats (csa), with names for untitled chats. Cached for a minute for the
@@ -440,6 +447,7 @@ let listCache = null; // { key: accountKey of csa, until, data: { teams, chats, 
 async function teamsAndChats(fresh = false, ctx = null) {
   if (!fresh && listCache && Date.now() < listCache.until && listCache.key === accountKey(await getCapture("csa"))) return listCache.data;
   let readAs = null; // the session the list was read with
+  const generation = listGeneration;
   const json = await api("csa", "/api/v1/teams/users/me?isPrefetch=false&enableMembershipSummary=true&enableRC2Fetch=false", { ctx, onCapture: (c) => (readAs = c) });
   const data = { teams: teams.parseTeams(json), chats: teams.parseCsaChats(json), meetings: teams.parseCsaMeetings(json) };
   const chats = await nameChats(data.chats, ctx);
@@ -455,7 +463,7 @@ async function teamsAndChats(fresh = false, ctx = null) {
   // old account for the new one: not cached, and not used (its chats aren't the new account's).
   const key = accountKey(readAs);
   if (key !== accountKey(await getCapture("csa"))) throw new Error(ACCOUNT_CHANGED_WHILE("the chat list was read", "reads that account's chats"));
-  listCache = { key, until, data };
+  if (generation === listGeneration) listCache = { key, until, data };
   return data;
 }
 
@@ -1047,7 +1055,7 @@ async function createChat({ members, title }, account = null) {
   const { json, location } = await api("chatsvc", "/v1/threads", { method: "POST", body, withLocation: true, onCapture: asConfirmed(account) });
   const id = teams.threadIdFrom(location, json) ?? (oneOnOne ? teams.oneOnOneId(me, members[0]) : null);
   if (!id) throw new Error("Teams created no chat (its answer had no chat id).");
-  listCache = null; // the chat list changed
+  dropList(); // the chat list changed
   return id;
 }
 
@@ -1101,7 +1109,7 @@ async function sendMessage({ conversation, newChat, people, text, threadId, subj
     crossPostChannels: [],
   };
   const r = await api("chatsvc", `/v1/users/ME/conversations/${encodeURIComponent(target)}/messages`, { method: "POST", body, onCapture: asConfirmed(account) });
-  listCache = null; // its last message changed: a list_chats right after must not show the old one
+  dropList(); // its last message changed: a list_chats right after must not show the old one
   return { sent: true, conversation: conversation.title ?? conversation.id, time: r?.OriginalArrivalTime ? new Date(r.OriginalArrivalTime).toISOString() : null };
 }
 
