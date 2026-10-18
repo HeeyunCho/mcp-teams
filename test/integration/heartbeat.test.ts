@@ -1,15 +1,15 @@
 // 2.3: liveness between the hub and its peers. The hub pings each peer every keep-alive period
 // and drops one that stops answering; a peer drops a hub that declared its heartbeat but stopped
 // pinging (a suspended or hung server), so its calls fail at once instead of hanging, and the
-// takeover path runs. Real timers, with a 1 s period so "within 2 periods" is measurable (a peer's
-// watchdog never waits under 2 s).
+// takeover path runs. Real timers, with a 1.5 s period so "within 2 periods" is measurable and
+// differs from the 2 s a peer's watchdog never waits under.
 import { randomUUID } from "node:crypto";
 import { afterEach, describe, expect, it } from "vitest";
 import WebSocket, { WebSocketServer } from "ws";
 import { LOST_CALL, isLostCall, proof } from "../../src/bridge.js";
 import { FAST, TOKEN, bridgeHarness, until, type BridgeHarness } from "../helpers/bridgeHarness.js";
 
-const PERIOD = 1_000;
+const PERIOD = 1_500;
 const OPTIONS = { ...FAST, keepAliveMs: PERIOD };
 
 let h: BridgeHarness | undefined;
@@ -72,7 +72,7 @@ async function rawPeer(port: number, { pong = true } = {}) {
   };
 }
 
-describe("2.3: peer heartbeat", () => {
+describe("2.3: peer heartbeat", { timeout: 15_000 }, () => {
   it("2.3: the hub declares its heartbeat period to peers", async () => {
     h = await bridgeHarness(OPTIONS);
     await h.session();
@@ -114,6 +114,7 @@ describe("2.3: peer heartbeat", () => {
     expect(outcome?.err.message).toBe(LOST_CALL.hubSilent);
     // The hub stamps the welcome before the peer starts its timer; allow for clock rounding.
     expect(outcome!.at - hub.connections[0].welcomedAt!).toBeGreaterThanOrEqual(2_000 - 20);
+    expect(outcome!.at - hub.connections[0].welcomedAt!).toBeLessThan(2_000 + 500);
   });
 
   it("2.3: a peer keeps a hub that declares no heartbeat (0.2.13 and older never ping peers)", async () => {
