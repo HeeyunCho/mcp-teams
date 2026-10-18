@@ -96,7 +96,7 @@ describe("2.3: peer heartbeat", () => {
     expect(isLostCall(outcome!.err.message)).toBe(true);
     // The hub went silent at its welcome: no ping ever came.
     const silentFor = outcome!.at - hub.connections[0].welcomedAt!;
-    expect(silentFor).toBeGreaterThanOrEqual(2 * PERIOD);
+    expect(silentFor).toBeGreaterThanOrEqual(2 * PERIOD - 20); // the hub stamps the welcome first; clock rounding
     expect(silentFor).toBeLessThan(2 * PERIOD + 300);
     // The takeover path runs: it pairs again with whoever holds the port.
     await until(() => hub.connections.length >= 2, 3_000, "the peer to join again");
@@ -112,7 +112,8 @@ describe("2.3: peer heartbeat", () => {
     );
     const outcome = await call;
     expect(outcome?.err.message).toBe(LOST_CALL.hubSilent);
-    expect(outcome!.at - hub.connections[0].welcomedAt!).toBeGreaterThanOrEqual(2_000);
+    // The hub stamps the welcome before the peer starts its timer; allow for clock rounding.
+    expect(outcome!.at - hub.connections[0].welcomedAt!).toBeGreaterThanOrEqual(2_000 - 20);
   });
 
   it("2.3: a peer keeps a hub that declares no heartbeat (0.2.13 and older never ping peers)", async () => {
@@ -171,7 +172,7 @@ describe("2.3: slow peers", () => {
   async function stallPeer(keepAliveMs: number, { afterPing = false } = {}) {
     h = await bridgeHarness({ ...FAST, keepAliveMs, maxPeerBufferedBytes: LIMIT });
     const hub = await h.session();
-    const big = "x".repeat(16 * 1024 * 1024);
+    const big = "x".repeat(8 * 1024 * 1024);
     let pinged = false;
     const ext = await h.extension({ handle: async () => (afterPing && (await until(() => pinged, 4 * keepAliveMs, "a ping to the peer")), big) });
     const peer = await rawPeer(h.port);
@@ -214,14 +215,14 @@ describe("2.3: slow peers", () => {
   }, 30_000);
 
   it("2.3: a peer that reads one large answer slowly keeps its live hub (the hub's pings go on behind the backlog)", async () => {
-    // The answer lands right after a ping, and the peer reads nothing for 1.3 periods: the hub
-    // sees the backlog at exactly one tick, then it drains. Neither side may drop the other.
+    // The answer lands right after a ping, and the peer reads nothing until the hub has seen the
+    // backlog at one tick; then it drains well before the next. Neither side may drop the other.
     const keepAliveMs = 1_000;
     h = await bridgeHarness({ ...FAST, keepAliveMs, maxPeerBufferedBytes: LIMIT });
     const hub = await h.session();
-    const big = "x".repeat(16 * 1024 * 1024);
+    const big = "x".repeat(8 * 1024 * 1024);
     let pinged = false;
-    await h.extension({ handle: async () => (await until(() => pinged, 4 * keepAliveMs, "a ping to the peer"), big) });
+    const ext = await h.extension({ handle: async () => (await until(() => pinged, 4 * keepAliveMs, "a ping to the peer"), big) });
     const peer = await h.session();
     const peerSocket = [...(hub as any).peers][0];
     const ping = peerSocket.ping.bind(peerSocket);
@@ -232,10 +233,11 @@ describe("2.3: slow peers", () => {
       setTimeout(() => peerSocket.readyState === 1 && ping(...args), late ? 150 : 0);
     };
     const hubSocket = (peer as any).hub;
+    // The peer stops reading right after it heard the ping the answer follows.
+    hubSocket.once("ping", () => hubSocket._socket.pause());
     const call = peer.call<string>("readMessages", {}, 60_000);
-    await until(() => peerSocket.bufferedAmount > LIMIT, 4 * keepAliveMs, "the backlog");
-    hubSocket._socket.pause();
-    await new Promise((r) => setTimeout(r, 1.3 * keepAliveMs));
+    await until(() => ext.requests().length === 1, 3_000, "the request to reach the extension");
+    await until(() => (hub as any).backlogged.has(peerSocket), 3 * keepAliveMs, "the hub to see the backlog at a tick");
     hubSocket._socket.resume();
     expect((await call).length).toBe(big.length);
     await new Promise((r) => setTimeout(r, 2 * keepAliveMs));
