@@ -193,4 +193,43 @@ describe("3.2: a chat send_message creates empties the cache", () => {
     expect(s.fake.count("csa")).toBe(before + 1);
     expect(listed.chats[0]).toMatchObject({ id: "19:contoso-launch@thread.v2", lastMessage: { time: "2026-10-03T10:00:00.000Z" } });
   });
+
+  it("3.2: a list read that was under way when a message was posted doesn't put the old list back in the cache", async () => {
+    // Another session's list_chats can be in flight while this one sends (2.4 runs them side by side).
+    let posted = false;
+    let release!: () => void;
+    const held = new Promise<void>((r) => (release = r));
+    let csaReads = 0;
+    const s = await setup({
+      csa: async () => {
+        const n = ++csaReads;
+        const before = !posted;
+        if (n === 1) await held; // the first read stays under way until after the post
+        const view = csa();
+        if (!before) view.chats[0] = { ...view.chats[0], lastMessage: { composetime: "2026-10-03T10:00:00Z" } } as (typeof view.chats)[0];
+        return view;
+      },
+      mt: profiles,
+      chatsvc: (req: SentRequest) => {
+        if (req.method !== "POST") return undefined;
+        posted = true;
+        return { OriginalArrivalTime: Date.parse("2026-10-03T10:00:00Z") };
+      },
+    });
+    close = s.close;
+    const inFlight = s.tool("list_chats");
+    await vi.waitFor(() => expect(csaReads).toBe(1));
+    const result = s.worker.handlers.requestSend({ conversation: "19:contoso-launch@thread.v2", text: "Hi Sam" });
+    await vi.waitFor(() => expect(s.fake.spies.windowsCreate).toHaveBeenCalledTimes(1));
+    const id = /id=([^&]+)/.exec(s.fake.spies.windowsCreate.mock.calls[0][0]!.url!)![1];
+    await click(s.fake, id);
+    await expect(result).resolves.toMatchObject({ sent: true });
+    release();
+    await inFlight; // it read the old list; that's its own answer, but it must not be cached now
+    const before = s.fake.count("csa");
+
+    const listed = await s.tool("list_chats");
+    expect(s.fake.count("csa")).toBe(before + 1);
+    expect(listed.chats[0]).toMatchObject({ id: "19:contoso-launch@thread.v2", lastMessage: { time: "2026-10-03T10:00:00.000Z" } });
+  });
 });
