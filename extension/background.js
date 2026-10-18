@@ -352,7 +352,7 @@ async function sendTo(key, tab, url, method, headers, body, ctx, wait, repeatabl
  * that can be done without) fails at once as busy instead. `repeatable`: a POST that only
  * reads (a search, a profile lookup), sent again after a 429 like a GET.
  */
-async function api(service, path, { method = "GET", body, raw = false, withLocation = false, ctx = null, wait = true, repeatable = method === "GET" } = {}) {
+async function api(service, path, { method = "GET", body, raw = false, withLocation = false, ctx = null, wait = true, repeatable = method === "GET", onCapture } = {}) {
   ctx?.check();
   let cap = await getCapture(service);
   // Opening a tab or waiting for a session can take a minute; a withdrawn request stops waiting.
@@ -362,6 +362,7 @@ async function api(service, path, { method = "GET", body, raw = false, withLocat
     if (!cap) throw new Error(SERVICE_HELP[service]);
   }
   const urlFor = (c) => teams.serviceUrl(path, c.base);
+  onCapture?.(cap);
   let res = await sendTo(gateKey(service, cap.base), tab, urlFor(cap), method, cap.headers, body, ctx, wait, repeatable);
   if (res.status === 401) {
     // Rejected before running (expired token), so trying once more is safe. A 403 is a
@@ -372,6 +373,7 @@ async function api(service, path, { method = "GET", body, raw = false, withLocat
     cap = await guarded(refreshSession(service, tab, { quickWaitMs: 0 }), ctx);
     if (!cap) throw new Error(SERVICE_HELP[service]);
     tab = await guarded(findTeamsTab(new URL(cap.base).origin), ctx);
+    onCapture?.(cap);
     res = await sendTo(gateKey(service, cap.base), tab, urlFor(cap), method, cap.headers, body, ctx, wait, repeatable);
   }
   if (raw) return res;
@@ -422,6 +424,8 @@ function forgetAccount() {
   meetingSessionsCache.clear();
 }
 
+const ACCOUNT_CHANGED_WHILE = (what) => `The signed-in Teams account changed while ${what}; try again.`;
+
 const LIST_CACHE_MS = 60_000;
 let listCache = null; // { key: accountKey of csa, until, data: { teams, chats, meetings, namesMissing } }
 
@@ -434,7 +438,8 @@ let listCache = null; // { key: accountKey of csa, until, data: { teams, chats, 
  */
 async function teamsAndChats(fresh = false, ctx = null) {
   if (!fresh && listCache && Date.now() < listCache.until && listCache.key === accountKey(await getCapture("csa"))) return listCache.data;
-  const json = await api("csa", "/api/v1/teams/users/me?isPrefetch=false&enableMembershipSummary=true&enableRC2Fetch=false", { ctx });
+  let readAs = null; // the session the list was read with
+  const json = await api("csa", "/api/v1/teams/users/me?isPrefetch=false&enableMembershipSummary=true&enableRC2Fetch=false", { ctx, onCapture: (c) => (readAs = c) });
   const data = { teams: teams.parseTeams(json), chats: teams.parseCsaChats(json), meetings: teams.parseCsaMeetings(json) };
   const chats = await nameChats(data.chats, ctx);
   const organizers = await lookupNames(data.meetings.map((m) => m.organizer), ctx);
@@ -445,9 +450,11 @@ async function teamsAndChats(fresh = false, ctx = null) {
   data.namesMissing = { chats, organizers };
   const missing = [chats, organizers].filter(Boolean);
   const until = missing.some((x) => !x.throttled) ? 0 : missing.length ? Math.max(...missing.map((x) => x.until)) : Date.now() + LIST_CACHE_MS;
-  // Filed under the session the list was read with (a 401 on the way may have changed it).
-  const key = accountKey(await getCapture("csa"));
-  if (key) listCache = { key, until, data };
+  // Filed under the account it was read as. A switch while it was read leaves nothing of the
+  // old account for the new one: not cached, and not used (its chats aren't the new account's).
+  const key = accountKey(readAs);
+  if (key !== accountKey(await getCapture("csa"))) throw new Error(ACCOUNT_CHANGED_WHILE("the chat list was read"));
+  listCache = { key, until, data };
   return data;
 }
 
@@ -480,18 +487,26 @@ async function lookupNames(mris, ctx = null, { wait = false } = {}) {
     // Names that can't be looked up are left out, but a withdrawn request ends here (and isn't cached).
     ctx?.check();
     const batch = unknown.slice(i, i + 100);
+    let readAs = null; // the session the names were looked up with
     const json = await api("mt", "/beta/users/fetchShortProfile?isMailAddress=false&enableGuest=true&includeIBBarredUsers=true&skypeTeamsInfo=true", {
       method: "POST",
       body: batch,
       ctx,
       wait,
       repeatable: true,
+      onCapture: (c) => (readAs = c),
     }).catch((err) => {
       ctx?.check(); // a withdrawn request ends here (and isn't cached)
       missing = err?.throttled ? { throttled: true, until: err.until } : (missing ?? { error: err?.message ?? String(err) });
       for (const m of batch) notAsked.add(m);
       return null;
     });
+    // Names looked up as an account that is no longer signed in aren't kept.
+    if (json && accountKey(readAs) !== accountKey(await getCapture("mt"))) {
+      missing ??= { error: ACCOUNT_CHANGED_WHILE("names were looked up") };
+      for (const m of batch) notAsked.add(m);
+      continue;
+    }
     if (names.size > NAMES_MAX) names.clear();
     for (const p of teams.parseProfiles(json)) if (p.mri && p.name) names.set(p.mri, p.name);
   }
@@ -644,6 +659,8 @@ async function transcriptOf(info, session, ctx = null) {
   }
   if (res.status >= 400) throw new Error(`OneDrive HTTP ${res.status} while reading the transcript.`);
   const json = JSON.parse(res.text);
+  // Not kept for an account that signed in while it was read.
+  if (key !== `${accountKey(await getCapture("chatsvc")) ?? ""}\n${session.transcriptUrl}`) return json;
   if (transcripts.size >= TRANSCRIPTS_MAX) transcripts.delete(transcripts.keys().next().value);
   transcripts.set(key, json);
   return json;
@@ -672,12 +689,12 @@ async function sessionsOf(info, ctx = null) {
   const hit = key && meetingSessionsCache.get(key);
   if (hit && Date.now() - hit.at < SESSIONS_CACHE_MS) return hit.sessions;
   const sessions = await readSessions(info, ctx);
-  // Filed under the base the chat was read from (a 401 on the way may have changed it).
-  const keyNow = sessionsKey(await getCapture("chatsvc"), info.id);
-  if (keyNow) {
-    meetingSessionsCache.delete(keyNow);
+  // Kept only when the chat was read as the account it is filed under: a session that changed
+  // meanwhile (a switch, or a 401 that brought another base) may have read part of it.
+  if (key && key === sessionsKey(await getCapture("chatsvc"), info.id)) {
+    meetingSessionsCache.delete(key);
     if (meetingSessionsCache.size >= SESSIONS_CACHE_MAX) meetingSessionsCache.delete(meetingSessionsCache.keys().next().value);
-    meetingSessionsCache.set(keyNow, { at: Date.now(), sessions });
+    meetingSessionsCache.set(key, { at: Date.now(), sessions });
   }
   return sessions;
 }
@@ -981,6 +998,8 @@ export const handlers = {
 
   async requestSend({ conversation, to, title, text, threadId, subject }, ctx) {
     if (!String(text ?? "").trim()) throw new Error("The message is empty.");
+    // Who the window confirms for: taken before anything is looked up for it.
+    const account = await signedInAccount();
     if (to?.length) {
       if (conversation) throw new Error("Give either a conversation or people (to), not both.");
       if (threadId || subject) throw new Error("reply_to and subject are for channels; a new chat takes people and an optional title.");
@@ -992,7 +1011,7 @@ export const handlers = {
       const request = existing
         ? { conversation: { id: existing.id, kind: existing.kind, title: existing.title }, people, text: String(text), existingChat: true }
         : { conversation: null, newChat: { members: people.map((p) => p.mri), title: title ?? null }, people, text: String(text) };
-      return askUserToConfirm(request, ctx);
+      return askUserToConfirm(request, ctx, account);
     }
     const conv = await resolve(conversation, ctx);
     if (threadId && conv.kind !== "channel") throw new Error("reply_to is only for channel posts; in a chat, just send the message.");
@@ -1003,7 +1022,7 @@ export const handlers = {
       replyingTo = root ? teams.parseMessage(root) : { id: threadId };
     }
     const request = { conversation: conv, text: String(text), threadId: threadId ?? null, subject: subject ?? null, replyingTo };
-    return askUserToConfirm(request, ctx);
+    return askUserToConfirm(request, ctx, account);
   },
 };
 
@@ -1080,6 +1099,16 @@ export function pendingSendCount() {
   return pendingSends.size;
 }
 
+const ACCOUNT_CHANGED = "The signed-in Teams account changed since this was confirmed; nothing was sent.";
+
+/**
+ * The signed-in user's object id (one tenant's), or null before Teams has shown it. A send
+ * window remembers it: a click after a switch to another account posts nothing.
+ */
+async function signedInAccount() {
+  return (await chrome.storage.session.get("oid")).oid ?? null;
+}
+
 const WITHDRAWN = {
   sent: false,
   reason: "The request was withdrawn (cancelled, or the server stopped waiting), so the confirmation window was closed; nothing was sent.",
@@ -1092,7 +1121,7 @@ const WITHDRAWN = {
  * the AI was told the send failed. Once the user clicked Send, the post runs to the end
  * and its outcome is the answer.
  */
-async function askUserToConfirm(request, ctx) {
+async function askUserToConfirm(request, ctx, account = null) {
   if (ctx?.cancelled) return WITHDRAWN;
   const id = crypto.randomUUID();
   const win = await chrome.windows.create({
@@ -1115,7 +1144,7 @@ async function askUserToConfirm(request, ctx) {
       resolve(result);
     };
     const timer = setTimeout(() => finish({ sent: false, reason: "No decision within 5 minutes; nothing was sent." }), CONFIRM_TIMEOUT_MS);
-    pendingSends.set(id, { request, windowId: win.id, timer, finish, sending: false });
+    pendingSends.set(id, { request, account, windowId: win.id, timer, finish, sending: false });
     // Withdrawn while the window was opening, or later.
     if (ctx?.cancelled) finish(WITHDRAWN);
     else if (ctx) stopWatching = ctx.onCancel(() => finish(WITHDRAWN));
@@ -1144,6 +1173,11 @@ function onConfirmMessage(msg, sender, sendResponse) {
       }
       // From here on the post runs to the end: a withdrawal no longer closes the window.
       p.sending = true;
+      // Confirmed as one account, clicked after Teams switched to another: its session would post it.
+      if (p.account && (await signedInAccount()) !== p.account) {
+        p.finish({ sent: false, reason: ACCOUNT_CHANGED }, true);
+        return sendResponse({ ok: false, error: ACCOUNT_CHANGED });
+      }
       try {
         p.finish(await sendMessage(p.request), true);
         sendResponse({ ok: true });
