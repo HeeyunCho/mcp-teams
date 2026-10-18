@@ -246,8 +246,9 @@ describe("2.3: slow peers", () => {
   }, 30_000);
 
   it("2.3: over 4x the limit, a peer that doesn't read is closed (1013) at once, between ticks", async () => {
-    // Ticks are slow here, so only the check at send time can close the stalled peer.
-    h = await bridgeHarness({ ...FAST, keepAliveMs: 30_000, maxPeerBufferedBytes: LIMIT });
+    // Ticks are slow here, so only the check at send time can close the stalled peer. All 20
+    // calls run at once (2.4 lets a session run maxConcurrentCalls), so their answers pile up.
+    h = await bridgeHarness({ ...FAST, keepAliveMs: 30_000, maxPeerBufferedBytes: LIMIT, maxConcurrentCalls: 20 });
     await h.session();
     const big = "x".repeat(4 * 1024 * 1024);
     const ext = await h.extension({ handle: () => big });
