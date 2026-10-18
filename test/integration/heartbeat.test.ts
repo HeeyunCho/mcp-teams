@@ -150,23 +150,27 @@ describe("2.3: slow peers", () => {
   /**
    * A peer that stops reading while one answer far larger than the kernel's socket buffers is
    * sent to it (on an empty buffer, so under the hard cap: only the check at the ticks can close
-   * it). The extension answers after `latencyMs`. Returns how long the hub took from when the
-   * backlog showed to dropping the peer, and the code the peer saw.
+   * it). `afterPing`: the extension answers only once the hub has pinged the peer (at a tick).
+   * Returns how long the hub took from when the backlog showed to dropping the peer, and the
+   * code the peer saw.
    */
-  async function stallPeer(keepAliveMs: number, latencyMs: number) {
+  async function stallPeer(keepAliveMs: number, { afterPing = false } = {}) {
     h = await bridgeHarness({ ...FAST, keepAliveMs, maxPeerBufferedBytes: LIMIT });
     const hub = await h.session();
     const big = "x".repeat(16 * 1024 * 1024);
-    const ext = await h.extension({ handle: () => big, latencyMs });
+    let pinged = false;
+    const ext = await h.extension({ handle: async () => (afterPing && (await until(() => pinged, 4 * keepAliveMs, "a ping to the peer")), big) });
     const peer = await rawPeer(h.port);
+    const peerSocket = [...(hub as any).peers][0];
+    const ping = peerSocket.ping.bind(peerSocket);
+    peerSocket.ping = (...args: unknown[]) => ((pinged = true), ping(...args));
     (peer.ws as any)._socket.pause();
     peer.ws.send(JSON.stringify({ type: "request", id: "r1", method: "readMessages", params: {}, timeoutMs: 60_000 }));
     await until(() => ext.requests().length === 1, 3_000, "the request to reach the extension");
     // From when the backlog shows (Windows may take the whole answer into its loopback buffers,
     // so it may never show: then from now).
     let t0 = Date.now();
-    const peerSocket = [...(hub as any).peers][0];
-    await until(() => peerSocket.bufferedAmount > LIMIT || (hub as any).peers.size === 0, latencyMs + 4 * keepAliveMs, "the backlog");
+    await until(() => peerSocket.bufferedAmount > LIMIT || (hub as any).peers.size === 0, 6 * keepAliveMs, "the backlog");
     if ((hub as any).peers.size) t0 = Date.now();
     await until(() => (hub as any).peers.size === 0, 4 * keepAliveMs, "the hub to drop the stalled peer");
     const tookMs = Date.now() - t0;
@@ -181,16 +185,16 @@ describe("2.3: slow peers", () => {
 
   it("2.3: a peer that stops reading is closed (1013) within about 2 ticks", async () => {
     const keepAliveMs = 1_000;
-    const { tookMs, closeCode } = await stallPeer(keepAliveMs, 0);
+    const { tookMs, closeCode } = await stallPeer(keepAliveMs);
     expect(tookMs).toBeLessThanOrEqual(2 * keepAliveMs + 500);
     expect(SLOW_PEER_CODES).toContain(closeCode);
   }, 30_000);
 
   it("2.3: a backlog that starts just after a tick closes the peer as slow (1013), not for the ping stuck behind it", async () => {
-    // The answer lands just after the first tick: at the second, the ping sent at the first is
-    // still queued behind the data, so the peer could not have answered it.
+    // The answer lands just after a tick's ping: at the next tick, that ping is still queued
+    // behind the data, so the peer could not have answered it.
     const keepAliveMs = 1_000;
-    const { tookMs, closeCode } = await stallPeer(keepAliveMs, 1.1 * keepAliveMs);
+    const { tookMs, closeCode } = await stallPeer(keepAliveMs, { afterPing: true });
     expect(tookMs).toBeLessThanOrEqual(2 * keepAliveMs + 500);
     expect(SLOW_PEER_CODES).toContain(closeCode);
   }, 30_000);
