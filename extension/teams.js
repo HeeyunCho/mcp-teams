@@ -54,6 +54,31 @@ export function pickHeaders(requestHeaders) {
   return headers.authorization || headers.authentication || headers["x-skypetoken"] ? headers : null;
 }
 
+const GUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
+/**
+ * The object id (lowercase GUID) of the user a request's token was issued to, or null.
+ * Teams' tokens are JWTs: an AAD bearer token carries `oid`, a skype token
+ * `skypeid: "orgid:<oid>"`. An object id belongs to one tenant (a guest has its own in each),
+ * so it tells accounts and tenants apart. Only the payload is decoded, locally and without
+ * verifying; nothing else of the token is kept.
+ */
+export function tokenOid(headers) {
+  for (const value of [headers?.authorization, headers?.authentication, headers?.["x-skypetoken"]]) {
+    const jwt = /([A-Za-z0-9_-]+)\.([A-Za-z0-9_-]+)\.[A-Za-z0-9_-]*$/.exec(String(value ?? ""));
+    if (!jwt) continue;
+    let claims;
+    try {
+      claims = JSON.parse(atob(jwt[2].replace(/-/g, "+").replace(/_/g, "/")));
+    } catch {
+      continue;
+    }
+    const oid = String(claims?.oid ?? /^orgid:(.+)$/i.exec(String(claims?.skypeid ?? ""))?.[1] ?? "").toLowerCase();
+    if (GUID.test(oid)) return oid;
+  }
+  return null;
+}
+
 /** A paging link from chatsvc (often on its own host) on the base we send requests to. */
 export function rebase(link, base) {
   const i = link.indexOf("/v1/");

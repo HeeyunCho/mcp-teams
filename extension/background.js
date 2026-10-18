@@ -28,10 +28,35 @@ function captureSession(details) {
   if (!svc) return;
   const headers = teams.pickHeaders(details.requestHeaders);
   if (!headers) return;
-  const capture = { base: svc.base, region: svc.region ?? null, headers, at: Date.now() };
-  const update = { [`capture:${svc.service}`]: capture };
-  if (svc.oid) update.oid = svc.oid;
-  chrome.storage.session.set(update);
+  // Whose session it is: the user its token was issued to (an object id is one tenant's).
+  const oid = teams.tokenOid(headers) ?? svc.oid ?? null;
+  const capture = { base: svc.base, region: svc.region ?? null, headers, at: Date.now(), oid };
+  return (captureQueue = captureQueue.then(() => storeCapture(svc.service, capture)).catch(() => {}));
+}
+
+const CAPTURED_SERVICES = ["chatsvc", "csa", "mt", "substrate"];
+let captureQueue = Promise.resolve(); // one capture at a time, so a switch is seen in order
+
+/**
+ * Stores a capture. One from another user than the signed-in one (the user switched Teams to
+ * another tenant or account) retires the other services' sessions, which belong to the
+ * previous one (or to nobody known), and the caches of what that user saw: the next request
+ * to those services waits for Teams' own request as the new user.
+ */
+async function storeCapture(service, capture) {
+  const update = { [`capture:${service}`]: capture };
+  if (capture.oid) {
+    const { oid: was } = await chrome.storage.session.get("oid");
+    if (was && was !== capture.oid) {
+      const others = CAPTURED_SERVICES.filter((s) => s !== service).map((s) => `capture:${s}`);
+      const held = await chrome.storage.session.get(others);
+      const stale = others.filter((k) => held[k] && held[k].oid !== capture.oid);
+      if (stale.length) await chrome.storage.session.remove(stale);
+      forgetAccount();
+    }
+    update.oid = capture.oid;
+  }
+  await chrome.storage.session.set(update);
 }
 
 const captureFilter = {
@@ -341,7 +366,9 @@ async function api(service, path, { method = "GET", body, raw = false, withLocat
   if (res.status === 401) {
     // Rejected before running (expired token), so trying once more is safe. A 403 is a
     // real answer (e.g. no longer a member of that chat).
-    meetingSessionsCache.clear(); // the session (maybe the account) is changing
+    // The session (maybe the account) is changing: lists read with it are read again.
+    listCache = null;
+    meetingSessionsCache.clear();
     cap = await guarded(refreshSession(service, tab, { quickWaitMs: 0 }), ctx);
     if (!cap) throw new Error(SERVICE_HELP[service]);
     tab = await guarded(findTeamsTab(new URL(cap.base).origin), ctx);
@@ -377,17 +404,36 @@ async function myMri() {
   return oid ? `8:orgid:${oid}` : null;
 }
 
-const LIST_CACHE_MS = 60_000;
-let listCache = null; // { until, data: { teams, chats, meetings, namesMissing } }
+/**
+ * Whose data a capture reads: "<base>\n<oid>", the service's base (origin and region) and the
+ * user its token was issued to. An object id is one tenant's, so two tenants (or accounts) in
+ * the same region still get different keys. null without a capture.
+ */
+const accountKey = (cap) => (cap ? `${cap.base}\n${cap.oid ?? ""}` : null);
 
 /**
- * Teams, channels and chats (csa), with names for untitled chats. Cached for a minute, but
+ * The user switched Teams to another account or tenant: forget what the previous one saw.
+ * (Throttle gates stay: they are Teams' limits per service and base, not anyone's data.)
+ */
+function forgetAccount() {
+  listCache = null;
+  names.clear();
+  transcripts.clear();
+  meetingSessionsCache.clear();
+}
+
+const LIST_CACHE_MS = 60_000;
+let listCache = null; // { key: accountKey of csa, until, data: { teams, chats, meetings, namesMissing } }
+
+/**
+ * Teams, channels and chats (csa), with names for untitled chats. Cached for a minute for the
+ * account it was read as (a 401 empties it), but
  * when names are missing (`namesMissing`: { chats, organizers }, see lookupNames) only until
  * Teams' throttle is over, or not at all after another failure, so they are looked up again.
  * A meeting whose organizer's name is missing that way has `organizerNameMissing`.
  */
 async function teamsAndChats(fresh = false, ctx = null) {
-  if (!fresh && listCache && Date.now() < listCache.until) return listCache.data;
+  if (!fresh && listCache && Date.now() < listCache.until && listCache.key === accountKey(await getCapture("csa"))) return listCache.data;
   const json = await api("csa", "/api/v1/teams/users/me?isPrefetch=false&enableMembershipSummary=true&enableRC2Fetch=false", { ctx });
   const data = { teams: teams.parseTeams(json), chats: teams.parseCsaChats(json), meetings: teams.parseCsaMeetings(json) };
   const chats = await nameChats(data.chats, ctx);
@@ -399,7 +445,9 @@ async function teamsAndChats(fresh = false, ctx = null) {
   data.namesMissing = { chats, organizers };
   const missing = [chats, organizers].filter(Boolean);
   const until = missing.some((x) => !x.throttled) ? 0 : missing.length ? Math.max(...missing.map((x) => x.until)) : Date.now() + LIST_CACHE_MS;
-  listCache = { until, data };
+  // Filed under the session the list was read with (a 401 on the way may have changed it).
+  const key = accountKey(await getCapture("csa"));
+  if (key) listCache = { key, until, data };
   return data;
 }
 
@@ -579,12 +627,15 @@ async function sharepointGet(url, ctx = null) {
   return sendTo(gateKey("sharepoint", origin), await guarded(sharepointTab(origin), ctx), url, "GET", {}, null, ctx, true);
 }
 
-const transcripts = new Map(); // transcript URL -> parsed transcript; a finished transcript doesn't change
+// "<accountKey of chatsvc>\n<transcript URL>" -> parsed transcript; a finished transcript doesn't
+// change, but what one user may read isn't another's.
+const transcripts = new Map();
 const TRANSCRIPTS_MAX = 50;
 
 /** A call's transcript (Stream transcript.json) from the organizer's OneDrive. */
 async function transcriptOf(info, session, ctx = null) {
-  const cached = transcripts.get(session.transcriptUrl);
+  const key = `${accountKey(await getCapture("chatsvc")) ?? ""}\n${session.transcriptUrl}`;
+  const cached = transcripts.get(key);
   if (cached) return cached;
   const url = session.transcriptUrl + (session.transcriptUrl.includes("?") ? "&" : "?") + "format=json";
   const res = await sharepointGet(url, ctx);
@@ -594,7 +645,7 @@ async function transcriptOf(info, session, ctx = null) {
   if (res.status >= 400) throw new Error(`OneDrive HTTP ${res.status} while reading the transcript.`);
   const json = JSON.parse(res.text);
   if (transcripts.size >= TRANSCRIPTS_MAX) transcripts.delete(transcripts.keys().next().value);
-  transcripts.set(session.transcriptUrl, json);
+  transcripts.set(key, json);
   return json;
 }
 
@@ -608,9 +659,9 @@ async function resolveMeeting(meeting, ctx = null) {
 
 const SESSIONS_CACHE_MS = 60_000;
 const SESSIONS_CACHE_MAX = 50;
-/** "<chatsvc base>\n<meeting id>" -> { at, sessions }: one tenant's meetings never answer another's. */
+/** "<accountKey of chatsvc>\n<meeting id>" -> { at, sessions }: one tenant's meetings never answer another's. */
 const meetingSessionsCache = new Map();
-const sessionsKey = (cap, id) => (cap ? `${cap.base}\n${id}` : null);
+const sessionsKey = (cap, id) => (cap ? `${accountKey(cap)}\n${id}` : null);
 
 /**
  * The calls held in a meeting chat (see teams.meetingSessions). Cached for a minute, so
