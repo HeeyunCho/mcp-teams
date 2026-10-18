@@ -362,7 +362,7 @@ async function api(service, path, { method = "GET", body, raw = false, withLocat
     if (!cap) throw new Error(SERVICE_HELP[service]);
   }
   const urlFor = (c) => teams.serviceUrl(path, c.base);
-  onCapture?.(cap);
+  await onCapture?.(cap); // may refuse the session (it throws), before anything is sent
   let res = await sendTo(gateKey(service, cap.base), tab, urlFor(cap), method, cap.headers, body, ctx, wait, repeatable);
   if (res.status === 401) {
     // Rejected before running (expired token), so trying once more is safe. A 403 is a
@@ -373,7 +373,7 @@ async function api(service, path, { method = "GET", body, raw = false, withLocat
     cap = await guarded(refreshSession(service, tab, { quickWaitMs: 0 }), ctx);
     if (!cap) throw new Error(SERVICE_HELP[service]);
     tab = await guarded(findTeamsTab(new URL(cap.base).origin), ctx);
-    onCapture?.(cap);
+    await onCapture?.(cap);
     res = await sendTo(gateKey(service, cap.base), tab, urlFor(cap), method, cap.headers, body, ctx, wait, repeatable);
   }
   if (raw) return res;
@@ -424,7 +424,8 @@ function forgetAccount() {
   meetingSessionsCache.clear();
 }
 
-const ACCOUNT_CHANGED_WHILE = (what) => `The signed-in Teams account changed while ${what}; try again.`;
+/** A read that a switch of the signed-in Teams account overtook: what it read, and what a retry reads. */
+const ACCOUNT_CHANGED_WHILE = (what, retry) => `The signed-in Teams account changed while ${what}; it's now signed in as another account, so a retry ${retry}.`;
 
 const LIST_CACHE_MS = 60_000;
 let listCache = null; // { key: accountKey of csa, until, data: { teams, chats, meetings, namesMissing } }
@@ -453,7 +454,7 @@ async function teamsAndChats(fresh = false, ctx = null) {
   // Filed under the account it was read as. A switch while it was read leaves nothing of the
   // old account for the new one: not cached, and not used (its chats aren't the new account's).
   const key = accountKey(readAs);
-  if (key !== accountKey(await getCapture("csa"))) throw new Error(ACCOUNT_CHANGED_WHILE("the chat list was read"));
+  if (key !== accountKey(await getCapture("csa"))) throw new Error(ACCOUNT_CHANGED_WHILE("the chat list was read", "reads that account's chats"));
   listCache = { key, until, data };
   return data;
 }
@@ -503,7 +504,7 @@ async function lookupNames(mris, ctx = null, { wait = false } = {}) {
     });
     // Names looked up as an account that is no longer signed in aren't kept.
     if (json && accountKey(readAs) !== accountKey(await getCapture("mt"))) {
-      missing ??= { error: ACCOUNT_CHANGED_WHILE("names were looked up") };
+      missing ??= { error: ACCOUNT_CHANGED_WHILE("names were looked up", "looks them up as that account") };
       for (const m of batch) notAsked.add(m);
       continue;
     }
@@ -1030,7 +1031,7 @@ export const handlers = {
  * Creates a chat with these members and me (called only after the user clicked Send).
  * A 1:1 chat that already exists on Teams' side comes back as that chat.
  */
-async function createChat({ members, title }) {
+async function createChat({ members, title }, account = null) {
   const me = await myMri();
   const oneOnOne = members.length === 1;
   const body = {
@@ -1042,25 +1043,41 @@ async function createChat({ members, title }) {
       ...(title ? { topic: title } : {}),
     },
   };
-  const { json, location } = await api("chatsvc", "/v1/threads", { method: "POST", body, withLocation: true });
+  const { json, location } = await api("chatsvc", "/v1/threads", { method: "POST", body, withLocation: true, onCapture: asConfirmed(account) });
   const id = teams.threadIdFrom(location, json) ?? (oneOnOne ? teams.oneOnOneId(me, members[0]) : null);
   if (!id) throw new Error("Teams created no chat (its answer had no chat id).");
   listCache = null; // the chat list changed
   return id;
 }
 
-async function sendMessage({ conversation, newChat, people, text, threadId, subject }) {
+/**
+ * An onCapture check for a post confirmed as `account` (an oid, or null when Teams hadn't shown
+ * who was signed in): fails before anything is sent when the session it would go out with is
+ * another account's (Teams switched since the click).
+ */
+const asConfirmed = (account) => async (cap) => {
+  if (account && (cap.oid ?? (await signedInAccount())) !== account) throw Object.assign(new Error(ACCOUNT_CHANGED), { accountChanged: true });
+};
+
+/** Posts a confirmed message; `account`: who confirmed it (see asConfirmed). */
+async function sendMessage({ conversation, newChat, people, text, threadId, subject }, account = null) {
   if (newChat) {
     let id;
     try {
-      id = await createChat(newChat);
+      id = await createChat(newChat, account);
     } catch (err) {
       // Without an answer the chat may exist, but the message was never sent.
       if (err.outcomeUnknown) err.chatMayExist = true;
       throw err;
     }
     const title = newChat.title ?? people.map((p) => p.name).join(", ");
-    const r = await sendMessage({ conversation: { id, title }, text });
+    let r;
+    try {
+      r = await sendMessage({ conversation: { id, title }, text }, account);
+    } catch (err) {
+      if (err.accountChanged) err.chatCreated = true;
+      throw err;
+    }
     return { ...r, newChat: true, conversationId: id };
   }
   const target = threadId ? `${conversation.id};messageid=${threadId}` : conversation.id;
@@ -1082,7 +1099,7 @@ async function sendMessage({ conversation, newChat, people, text, threadId, subj
     postType: "Standard",
     crossPostChannels: [],
   };
-  const r = await api("chatsvc", `/v1/users/ME/conversations/${encodeURIComponent(target)}/messages`, { method: "POST", body });
+  const r = await api("chatsvc", `/v1/users/ME/conversations/${encodeURIComponent(target)}/messages`, { method: "POST", body, onCapture: asConfirmed(account) });
   return { sent: true, conversation: conversation.title ?? conversation.id, time: r?.OriginalArrivalTime ? new Date(r.OriginalArrivalTime).toISOString() : null };
 }
 
@@ -1100,6 +1117,8 @@ export function pendingSendCount() {
 }
 
 const ACCOUNT_CHANGED = "The signed-in Teams account changed since this was confirmed; nothing was sent.";
+const CHAT_CREATED_ACCOUNT_CHANGED =
+  "The chat was created, but no message was sent: the signed-in Teams account changed while it was being sent. Check with list_chats (as the account that confirmed it) before trying again.";
 
 /**
  * The signed-in user's object id (one tenant's), or null before Teams has shown it. A send
@@ -1179,12 +1198,16 @@ function onConfirmMessage(msg, sender, sendResponse) {
         return sendResponse({ ok: false, error: ACCOUNT_CHANGED });
       }
       try {
-        p.finish(await sendMessage(p.request), true);
+        p.finish(await sendMessage(p.request, p.account), true);
         sendResponse({ ok: true });
       } catch (err) {
         // Without an answer the post may have gone through: saying it failed would invite a second one.
         const cause = /[.!?]$/.test(err.message) ? err.message : `${err.message}.`;
-        const reason = err.chatMayExist
+        const reason = err.accountChanged
+          ? err.chatCreated
+            ? CHAT_CREATED_ACCOUNT_CHANGED
+            : ACCOUNT_CHANGED
+          : err.chatMayExist
           ? `Creating the chat did not finish: ${cause} The chat may have been created, without the message: check with list_chats before trying again.`
           : err.outcomeUnknown
             ? `Sending did not finish: ${cause} The message may have been posted: check with read_messages before sending again.`
