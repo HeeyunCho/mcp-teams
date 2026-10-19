@@ -1,9 +1,13 @@
 {
   "api_traffic": {
-    "description": "Lists the API endpoints the open Teams tab has called since the browser started: method, host, path, status, which headers were sent (names only, never values) and the auth scheme. Used to find out which API Teams uses for a feature: click through it in Teams first.",
+    "description": "Lists the API endpoints the open Teams tab called while recording was on: method, host, path, status, which headers were sent (names only, never values) and the auth scheme. Used to find out which API Teams uses for a feature. Recording is off until you turn it on: first call with record: true, then click through the feature in Teams, then call again to list what it called. Recording stops after 30 minutes or with record: false; what was recorded stays until clear.",
     "inputSchema": {
       "type": "object",
       "properties": {
+        "record": {
+          "description": "true: start recording the Teams tab's API calls (for 30 minutes); false: stop recording. Leave out to only list",
+          "type": "boolean"
+        },
         "filter": {
           "description": "Only requests whose host or path contains this text",
           "type": "string"

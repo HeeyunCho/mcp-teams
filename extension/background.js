@@ -94,18 +94,35 @@ const captureFilter = {
  * Which endpoints Teams uses for meetings, recaps and files is not documented, so we log
  * the calls the Teams tab makes (method, host, path, header *names*, auth scheme) for the
  * api_traffic tool. Kept in chrome.storage.session, so a browser restart clears it.
+ * Recorded only while api_traffic turned recording on (record: true), for at most
+ * TRAFFIC_RECORD_MS; when it ends is kept in chrome.storage.session too, so it survives a
+ * restart of this worker.
  */
 const TRAFFIC_KEY = "traffic";
+const TRAFFIC_UNTIL_KEY = "trafficUntil";
+const TRAFFIC_RECORD_MS = 30 * 60_000;
 let traffic = null;
 let trafficSave = null;
 let trafficQueue = Promise.resolve();
+let trafficUntil = null; // ms since 1970 when recording ends (0: off); null until read from storage
 
-/** Applies fn to the log one update at a time, so events that land together don't overwrite each other. */
-function updateTraffic(fn) {
+async function recordingUntil() {
+  trafficUntil ??= (await chrome.storage.session.get(TRAFFIC_UNTIL_KEY))[TRAFFIC_UNTIL_KEY] ?? 0;
+  return trafficUntil;
+}
+
+/**
+ * Applies fn to the log one update at a time, so events that land together don't overwrite
+ * each other. `ifRecording`: only while recording is on. Saved only when fn changed the log.
+ */
+function updateTraffic(fn, { ifRecording = false } = {}) {
   trafficQueue = trafficQueue
     .then(async () => {
+      if (ifRecording && Date.now() >= (await recordingUntil())) return;
       traffic ??= (await chrome.storage.session.get(TRAFFIC_KEY))[TRAFFIC_KEY] ?? [];
-      traffic = fn(traffic);
+      const next = fn(traffic);
+      if (next === traffic) return;
+      traffic = next;
       clearTimeout(trafficSave);
       trafficSave = setTimeout(() => chrome.storage.session.set({ [TRAFFIC_KEY]: traffic }), 500);
     })
@@ -118,14 +135,14 @@ const trafficFilter = { urls: teams.TRAFFIC_URLS, types: ["xmlhttprequest", "oth
 function recordRequest(details) {
   if (!teams.isTeamsOrigin(details.initiator)) return;
   const entry = teams.summarizeRequest(details);
-  updateTraffic((list) => teams.recordTraffic(list, entry));
+  updateTraffic((list) => teams.recordTraffic(list, entry), { ifRecording: true });
 }
 
 function recordCompleted(details) {
   if (!teams.isTeamsOrigin(details.initiator)) return;
   const url = new URL(details.url);
   const key = `${details.method} ${url.host}${url.pathname.slice(0, 300)}`;
-  updateTraffic((list) => teams.recordStatus(list, key, details.statusCode));
+  updateTraffic((list) => teams.recordStatus(list, key, details.statusCode), { ifRecording: true });
 }
 
 /** The service's captured session; its `at` is when Teams last sent it (stored, or seen again since). */
@@ -1077,13 +1094,30 @@ export const handlers = {
     return { status: res.status, text: res.text.slice(0, 20_000_000) };
   },
 
-  async apiTraffic({ filter, limit = 100, clear = false }) {
+  async apiTraffic({ filter, limit = 100, clear = false, record }) {
+    if (typeof record === "boolean") {
+      // In the log's queue, so events already reported are recorded (or not) under the old setting.
+      await (trafficQueue = trafficQueue.then(async () => {
+        trafficUntil = record ? Date.now() + TRAFFIC_RECORD_MS : 0;
+        await chrome.storage.session.set({ [TRAFFIC_UNTIL_KEY]: trafficUntil });
+      }).catch(() => {}));
+    }
     let list;
     await updateTraffic((l) => {
       list = l;
-      return clear ? [] : l;
+      return clear && l.length ? [] : l;
     });
-    return { recorded: list.length, requests: teams.filterTraffic(list, { filter, limit }) };
+    const until = await recordingUntil();
+    const recording = Date.now() < until;
+    return {
+      recording,
+      ...(recording ? { recordingUntil: new Date(until).toISOString() } : {}),
+      recorded: list.length,
+      requests: teams.filterTraffic(list, { filter, limit }),
+      ...(recording
+        ? {}
+        : { note: "Recording is off. Call api_traffic with record: true, use the feature in the Teams tab, then call api_traffic again to list its requests." }),
+    };
   },
 
   /**
