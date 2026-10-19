@@ -3,7 +3,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { WebSocketServer, type WebSocket } from "ws";
 import { proof } from "../../src/bridge.js";
-import { freePort } from "../helpers/bridgeHarness.js";
 import { connectWorker, createFakeChrome, loadWorker, NativeWebSocket, openedSockets } from "../helpers/fakeChrome.js";
 
 const TOKEN = "worker-connection-token";
@@ -29,11 +28,12 @@ afterEach(async () => {
  * with `dropAfter` it then drops the connection. `token`: the one it proves (asked per welcome).
  */
 async function scriptedHub(afterWelcome: object[], { forged = false, dropAfter = false, token = (): string => TOKEN } = {}) {
-  const port = await freePort();
   const received: any[] = [];
   let welcomed = false;
   let closed = false;
-  wss = new WebSocketServer({ host: "127.0.0.1", port });
+  // Port 0: the system picks a free port and this server keeps it.
+  const server = new WebSocketServer({ host: "127.0.0.1", port: 0 });
+  wss = server;
   wss.on("connection", (ws: WebSocket) => {
     ws.on("close", () => (closed = true));
     ws.send(JSON.stringify({ type: "challenge", nonce: "challenge-1" }));
@@ -48,6 +48,8 @@ async function scriptedHub(afterWelcome: object[], { forged = false, dropAfter =
       if (dropAfter) ws.terminate();
     });
   });
+  await new Promise<void>((r) => server.once("listening", () => r()));
+  const { port } = server.address() as { port: number };
   return { port, received, welcomed: () => welcomed, closed: () => closed };
 }
 
