@@ -741,9 +741,11 @@ async function sharepointGet(url, ctx = null) {
 }
 
 // "<accountKey of chatsvc>\n<transcript URL>" -> parsed transcript; a finished transcript doesn't
-// change, but what one user may read isn't another's.
-const transcripts = new Map();
-const TRANSCRIPTS_MAX = 50;
+// change, but what one user may read isn't another's. Bounded by size: each counts the length
+// of the response text it was parsed from, least recently used out first, and one longer than
+// the cap isn't kept at all.
+const TRANSCRIPTS_MAX_BYTES = 8 * 1024 * 1024;
+const transcripts = new teams.ByteCache(TRANSCRIPTS_MAX_BYTES);
 
 /** A call's transcript (Stream transcript.json) from the organizer's OneDrive. */
 async function transcriptOf(info, session, ctx = null) {
@@ -759,8 +761,7 @@ async function transcriptOf(info, session, ctx = null) {
   const json = JSON.parse(res.text);
   // Not kept for an account that signed in while it was read.
   if (key !== `${accountKey(await getCapture("chatsvc")) ?? ""}\n${session.transcriptUrl}`) return json;
-  if (transcripts.size >= TRANSCRIPTS_MAX) transcripts.delete(transcripts.keys().next().value);
-  transcripts.set(key, json);
+  transcripts.set(key, json, res.text.length);
   return json;
 }
 

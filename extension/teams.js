@@ -847,6 +847,57 @@ export function filterTraffic(list, { filter, limit = 100 } = {}) {
     .map(({ key, ...e }) => ({ ...e, lastAt: new Date(e.lastAt).toISOString() }));
 }
 
+// ------------------------------------------------------------ caches
+
+/**
+ * A least-recently-used cache bounded by bytes, not by entries: set() takes each value's size
+ * (the caller's measure, e.g. the length of the text it was parsed from) and evicts the least
+ * recently used entries until the total fits the cap. A value bigger than the cap isn't
+ * cached at all, and evicts nothing.
+ */
+export class ByteCache {
+  #map = new Map(); // key -> { value, bytes }, least recently used first
+  #bytes = 0;
+  constructor(maxBytes) {
+    this.maxBytes = maxBytes;
+  }
+  get bytes() {
+    return this.#bytes;
+  }
+  get size() {
+    return this.#map.size;
+  }
+  get(key) {
+    const e = this.#map.get(key);
+    if (!e) return undefined;
+    this.#map.delete(key);
+    this.#map.set(key, e);
+    return e.value;
+  }
+  set(key, value, bytes) {
+    this.delete(key);
+    if (bytes > this.maxBytes) return;
+    for (const [k, e] of this.#map) {
+      if (this.#bytes + bytes <= this.maxBytes) break;
+      this.#map.delete(k);
+      this.#bytes -= e.bytes;
+    }
+    this.#map.set(key, { value, bytes });
+    this.#bytes += bytes;
+  }
+  delete(key) {
+    const e = this.#map.get(key);
+    if (!e) return false;
+    this.#map.delete(key);
+    this.#bytes -= e.bytes;
+    return true;
+  }
+  clear() {
+    this.#map.clear();
+    this.#bytes = 0;
+  }
+}
+
 // ------------------------------------------------------------ meetings
 
 /** The tenant most of the user's non-meeting chats live in: their own organization's. */
