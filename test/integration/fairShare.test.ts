@@ -1,15 +1,21 @@
 // Sessions share the Teams tab fairly: the hub lets a limited number of calls run on each
 // extension at once, and a freed turn goes round the sessions (the hub's own calls are one
 // session, each peer another), so one session's long scans can't starve another's quick read.
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { isLostCall, NOT_SENT } from "../../src/bridge.js";
-import { bridgeHarness, FAST, until, type BridgeHarness, type FakeExtension, type Request } from "../helpers/bridgeHarness.js";
+import { bridgeHarness, FAST, TOKEN, until, type BridgeHarness, type FakeExtension, type Request } from "../helpers/bridgeHarness.js";
+import { connectWorker, createFakeChrome, loadWorker, openedSockets, reply } from "../helpers/fakeChrome.js";
 
 let h: BridgeHarness | undefined;
+let link: { disconnect: () => Promise<void> } | undefined;
 
 afterEach(async () => {
+  await link?.disconnect();
+  link = undefined;
   await h?.cleanup();
   h = undefined;
+  vi.unstubAllGlobals();
+  openedSockets.length = 0;
 });
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -225,4 +231,39 @@ describe("calls that never wait for a turn", () => {
     tab2.letGo();
     await scan;
   });
+});
+
+describe("throttled calls and turns", () => {
+  it("35: four reads waiting out a throttle hold no turn: another session's call to a service that isn't throttled finishes promptly", async () => {
+    h = await bridgeHarness({ ...FAST, maxConcurrentCalls: 4 });
+    const hub = await h.session(); // session A
+    let busy = true;
+    // csa throttles for 3 s; substrate (people search) isn't throttled.
+    const csa = () =>
+      busy
+        ? reply(429, { message: "Too many requests" }, { headers: { "retry-after": "3" } })
+        : { teams: [], chats: [{ id: "19:contoso-launch@thread.v2", title: "Contoso launch", chatType: "chat", members: [] }] };
+    const substrate = () => ({ Groups: [{ Suggestions: [{ DisplayName: "Alex Doe", EmailAddresses: ["alex.doe@contoso.com"] }] }] });
+    const fake = createFakeChrome({ services: { csa, substrate }, local: { token: TOKEN, port: h.port } });
+    const worker = await loadWorker(fake);
+    worker.registerListeners();
+    link = await connectWorker(fake, () => hub.connected);
+    const peer = await h.session(); // session B
+    await until(() => peer.connected, 3_000, "the peer sees the extension");
+
+    let readsDone = 0;
+    const reads = Array.from({ length: 4 }, () => hub.call("listTeams", {}, 30_000).then((r) => (readsDone++, r)));
+    for (const r of reads) r.catch(() => {}); // awaited below
+    await until(() => fake.count("csa") >= 1 && hub.inFlight.pending === 4, 3_000, "A's four reads reach the extension, and csa throttles");
+    await sleep(200); // they now wait at csa's gate
+
+    const t0 = Date.now();
+    await expect(peer.call("findPeople", { query: "Alex" }, 30_000)).resolves.toMatchObject({ people: [{ name: "Alex Doe" }] });
+    expect(Date.now() - t0, "B's call didn't wait for A's throttle").toBeLessThan(1_500);
+    expect(readsDone, "A's reads still wait out the throttle").toBe(0);
+    expect(fake.count("substrate")).toBe(1);
+
+    busy = false;
+    for (const r of await Promise.all(reads)) expect(r).toMatchObject({ teams: [] });
+  }, 15_000);
 });
