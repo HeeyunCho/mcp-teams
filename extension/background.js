@@ -292,13 +292,22 @@ const GATE_MARGIN_MS = 250;
 
 /**
  * Before anything goes to a throttled service: waits until Teams' Retry-After is over when
- * `wait` and that fits before the request's deadline, else fails at once as busy.
+ * `wait` and that fits before the request's deadline, else fails at once as busy. A request
+ * that holds one of the hub's turns gives it back while it waits, and goes on once it has one
+ * again (35), so calls to services that aren't throttled run meanwhile.
  */
 async function passGate(key, ctx, wait) {
-  for (let ms = gatedFor(key); ms > 0; ms = gatedFor(key)) {
-    const deadline = Math.min(ctx?.deadline ?? Infinity, Date.now() + REQUEST_TIMEOUT_MS);
-    if (!wait || Date.now() + ms + GATE_MARGIN_MS > deadline) throw busy(Date.now() + ms);
-    await guarded(sleep(ms), ctx);
+  let gaveBack = false;
+  try {
+    for (let ms = gatedFor(key); ms > 0; ms = gatedFor(key)) {
+      const deadline = Math.min(ctx?.deadline ?? Infinity, Date.now() + REQUEST_TIMEOUT_MS);
+      if (!wait || Date.now() + ms + GATE_MARGIN_MS > deadline) throw busy(Date.now() + ms);
+      if (ctx?.turn && !gaveBack) gaveBack = (ctx.turn.giveBack(), true);
+      await guarded(sleep(ms), ctx);
+    }
+  } finally {
+    // Also before a busy error: the handler may go on without this service.
+    if (gaveBack && !ctx.cancelled) await guarded(ctx.turn.takeAgain(), ctx);
   }
   ctx?.check();
 }
@@ -1357,6 +1366,27 @@ function guarded(promise, ctx) {
   });
 }
 
+/**
+ * The hub's turn a request holds (newer hubs say so with `turn: true`): giveBack() lets other
+ * calls have it ({type:"gate-wait"}), takeAgain() asks for one ({type:"gate-open"}) and resolves
+ * when the hub's {type:"turn"} comes (given()).
+ */
+function hubTurn(id, send) {
+  let resume = null;
+  return {
+    giveBack: () => send({ type: "gate-wait", id }),
+    takeAgain: () =>
+      new Promise((resolve) => {
+        resume = resolve;
+        send({ type: "gate-open", id });
+      }),
+    given() {
+      resume?.();
+      resume = null;
+    },
+  };
+}
+
 /** Withdraws the requests that came on `conn`: their answers can no longer arrive. */
 function withdrawAll(conn) {
   for (const ctx of running.values()) if (ctx.conn === conn) ctx.cancel();
@@ -1368,13 +1398,16 @@ function withdrawAll(conn) {
  * an unknown one is ignored, as is any other message.
  */
 export async function dispatch(msg, send, conn = null) {
-  if (msg.type === "cancel") {
+  if (msg.type === "cancel" || msg.type === "turn") {
     const ctx = running.get(msg.id);
-    if (ctx?.conn === conn) ctx.cancel();
+    if (ctx?.conn !== conn) return;
+    if (msg.type === "cancel") ctx.cancel();
+    else ctx.turn?.given();
     return;
   }
   if (msg.type !== "request") return;
   const ctx = requestContext(conn, Number(msg.timeoutMs), Number(msg.deadline));
+  if (msg.turn === true) ctx.turn = hubTurn(msg.id, send);
   running.set(msg.id, ctx);
   const handler = Object.hasOwn(handlers, msg.method) ? handlers[msg.method] : null;
   try {

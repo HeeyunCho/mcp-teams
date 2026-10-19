@@ -60,6 +60,21 @@ interface Pending {
   grace?: boolean;
   /** Hub: the extension connection the request went to. */
   socket?: WebSocket;
+  /** Hub: the turn a queued call holds, given back while it waits out a throttle. */
+  turn?: Turn;
+}
+
+/** Hub: a queued call's turn on an extension. */
+interface Turn {
+  queue: FairQueue<WebSocket | null>;
+  session: WebSocket | null;
+  /** When the call stops waiting (its time limit or deadline). */
+  end: number;
+  held: boolean;
+  /** While it waits for its turn back: leaves that line. */
+  rejoin?: AbortController;
+  /** The call is over: a turn handed to it now goes straight back. */
+  done?: boolean;
 }
 
 const EXTENSION_ORIGIN = /^(chrome-extension|extension):\/\/[a-z0-9]+$/i;
@@ -325,7 +340,7 @@ export class ExtensionBridge {
         else this.acceptPeer(ws, msg.version, welcome);
         return;
       }
-      if (this.sockets.has(ws)) this.onExtensionMessage(msg);
+      if (this.sockets.has(ws)) this.onExtensionMessage(ws, msg);
       else if (this.peers.has(ws)) this.onPeerMessage(ws, msg);
     });
 
@@ -498,8 +513,30 @@ export class ExtensionBridge {
     this.retry.unref();
   }
 
-  private onExtensionMessage(msg: any) {
-    if (msg.type === "response" && typeof msg.id === "string") this.settle(msg);
+  private onExtensionMessage(ws: WebSocket, msg: any) {
+    if (typeof msg.id !== "string") return;
+    if (msg.type === "response") return this.settle(msg);
+    // A queued call waiting out a throttle (35): {type:"gate-wait"} gives its turn back to the
+    // others, {type:"gate-open"} asks for one again, and {type:"turn"} says it may go on.
+    const p = this.pending.get(msg.id);
+    const turn = p?.socket === ws ? p.turn : undefined;
+    if (!turn || turn.done) return;
+    if (msg.type === "gate-wait" && turn.held) {
+      turn.held = false;
+      turn.queue.release(turn.session);
+    } else if (msg.type === "gate-open" && !turn.held && !turn.rejoin) {
+      const rejoin = (turn.rejoin = new AbortController());
+      // Not given in time: the call's own timer withdraws it (it may have sent requests already).
+      this.takeTurn(ws, turn.session, turn.end, rejoin.signal).then(
+        () => {
+          turn.rejoin = undefined;
+          if (turn.done) return turn.queue.release(turn.session);
+          turn.held = true;
+          if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: "turn", id: msg.id }));
+        },
+        () => (turn.rejoin = undefined),
+      );
+    }
   }
 
   /** Runs a peer's call against the extension and sends back the outcome; {type:"cancel", id} withdraws it. */
@@ -733,12 +770,14 @@ export class ExtensionBridge {
     if (this.role === "hub" && !UNQUEUED.has(method)) {
       // The call's time limit includes its wait for a turn.
       const end = Math.min(Date.now() + timeoutMs, deadline ?? Infinity);
-      const queue = await this.takeTurn(target, session, end, signal);
+      const turn: Turn = { queue: await this.takeTurn(target, session, end, signal), session, end, held: true };
       try {
         if (signal?.aborted) throw new Error(NOT_SENT.cancelled);
-        result = await this.send<T>(target, method, params, timeoutMs, signal, end);
+        result = await this.send<T>(target, method, params, timeoutMs, signal, end, turn);
       } finally {
-        queue.release(session); // handed to the next waiting call, if any
+        turn.done = true;
+        turn.rejoin?.abort();
+        if (turn.held) turn.queue.release(session); // handed to the next waiting call, if any
       }
     } else {
       result = await this.send<T>(target, method, params, timeoutMs, signal, deadline);
@@ -799,7 +838,7 @@ export class ExtensionBridge {
   }
 
   /** Sends one request on a connection (an extension for the hub, the hub for a peer). */
-  private send<T>(target: WebSocket, method: string, params: unknown, timeoutMs: number, signal?: AbortSignal, deadline?: number): Promise<T> {
+  private send<T>(target: WebSocket, method: string, params: unknown, timeoutMs: number, signal?: AbortSignal, deadline?: number, turn?: Turn): Promise<T> {
     if (signal?.aborted) return Promise.reject(cancelledError());
     const id = randomUUID();
     const now = Date.now();
@@ -817,11 +856,13 @@ export class ExtensionBridge {
         timer,
         grace: method === "requestSend",
         socket: this.role === "hub" ? target : undefined,
+        turn,
       });
       signal?.addEventListener("abort", onAbort, { once: true });
       // deadline: when this side stops waiting (same machine, same clock), so the extension
-      // sends nothing to Teams after it, however long the request took to arrive.
-      target.send(JSON.stringify({ type: "request", id, method, params, timeoutMs, deadline: end }));
+      // sends nothing to Teams after it, however long the request took to arrive. turn: it holds
+      // a turn, which it gives back while it waits out a throttle (see onExtensionMessage).
+      target.send(JSON.stringify({ type: "request", id, method, params, timeoutMs, deadline: end, ...(turn ? { turn: true } : {}) }));
     });
   }
 
