@@ -10,9 +10,9 @@ beforeEach(async () => {
 });
 const ORIGIN = "chrome-extension://abcdefghijklmnop";
 
-function connectExt(token: string, origin = ORIGIN) {
+function connectExt(token: string, origin = ORIGIN, version = "0.1.0") {
   const ws = new WebSocket(`ws://127.0.0.1:${PORT}`, { origin });
-  ws.on("open", () => ws.send(JSON.stringify({ type: "hello", token, version: "0.1.0", browser: "Edge" })));
+  ws.on("open", () => ws.send(JSON.stringify({ type: "hello", token, version, browser: "Edge" })));
   return ws;
 }
 const waitFor = (cond: () => boolean) =>
@@ -58,7 +58,7 @@ describe("ExtensionBridge", () => {
   it("1.2: only a send waits out the cancel grace; any other timed-out call fails at its timeout", async () => {
     bridge = new ExtensionBridge(PORT, "secret", "0.1.0", { cancelGraceMs: 1_500 });
     await bridge.start();
-    const ws = connectExt("secret"); // never answers
+    const ws = connectExt("secret", ORIGIN, "0.2.13"); // never answers (0.2.13: new enough to be given sends)
     await waitFor(() => bridge!.connected);
     const t0 = Date.now();
     await expect(bridge.call("listChats", {}, 200)).rejects.toThrow(/timed out/);

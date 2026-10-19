@@ -115,16 +115,28 @@ export const DEFAULT_BRIDGE_OPTIONS: Readonly<Required<BridgeOptions>> = Object.
  */
 const UNQUEUED = new Set(["status", "reload", "reloadAll", "requestSend"]);
 
+/** The oldest extension that closes a send's confirmation window on {type:"cancel"} (1.2). Sends need it. */
+export const MIN_SEND_EXTENSION = "0.2.13";
+
 /**
- * What a call fails with when it waited for a turn and was never sent: nothing reached Teams,
- * so none of these is a lost call (isLostCall is false for each).
+ * What a call fails with when it was never sent (it waited for a turn, or was refused before it
+ * reached the extension): nothing reached Teams, so none of these is a lost call (isLostCall is
+ * false for each).
  */
 export const NOT_SENT = Object.freeze({
   cancelled: "Cancelled while it waited for its turn; it was not sent.",
   waitedOut: (running: number) =>
     `Busy: this call waited its whole time limit for a turn (${running} calls at once run on the Teams tab, shared between AI sessions) and was not sent; try again shortly.`,
   gone: "The connection to the browser extension closed before this call's turn came; it was not sent. Try again.",
+  /** A send on an extension that can't close its confirmation window when the send is withdrawn. */
+  extensionTooOld: (version: unknown) =>
+    `Nothing was sent: the browser extension (${String(version)}) is older than ${MIN_SEND_EXTENSION} and can't close its confirmation window when the AI stops waiting, so a late click could still post. Update it with reload_extension (it loads the version mcp-teams put in its folder), or run \`npx mcp-teams setup\` if it was loaded from another folder, then send again.`,
 });
+
+/** True when an extension of `version` closes its confirmation window on a cancel (an unreadable version doesn't). */
+export function closesSendWindow(version: unknown): boolean {
+  return typeof version === "string" && /^\d+\.\d+\.\d+$/.test(version) && !isNewer(MIN_SEND_EXTENSION, version);
+}
 
 /** A peer's watchdog never waits less for its hub's ping: a busy machine runs timers late. */
 const MIN_HUB_SILENCE_MS = 2_000;
@@ -728,6 +740,14 @@ export class ExtensionBridge {
           ? (this.listenError ?? "Connecting to the mcp-teams bridge; try again in a few seconds.")
           : "Browser extension is not connected. Open Chrome or Edge with the mcp-teams extension installed (run `mcp-teams setup`).";
       throw new Error(reason);
+    }
+    // A send opens a window that must close once nobody waits for it: an extension that ignores
+    // cancel would leave it open for a late click. The hub checks the extension it picked (for its
+    // own sends and its peers'); a peer checks what its hub reported, in case the hub is older.
+    if (method === "requestSend") {
+      const version = this.role === "hub" ? this.sockets.get(target)?.version : this.extension?.version;
+      const ok = this.role === "hub" ? closesSendWindow(version) : this.extensions.some((e) => closesSendWindow(e.version));
+      if (!ok) throw new Error(NOT_SENT.extensionTooOld(version ?? "unknown"));
     }
     let result: T;
     if (this.role === "hub" && !UNQUEUED.has(method)) {
