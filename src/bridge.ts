@@ -208,7 +208,7 @@ export class ExtensionBridge {
   private backlogged = new WeakSet<WebSocket>(); // hub: peers over maxPeerBufferedBytes at the last tick
   private legacyReloaded = false; // hub: an extension of 0.2.0 or older was told to reload
   private readonly opts: Required<BridgeOptions>;
-  private boundPort?: number; // hub: the port it listens on (port 0 picks a free one)
+  private boundPort?: number; // the port it got when it first listened (port 0 picks a free one); kept for later takeovers
 
   /** The 4th argument is the options, or (as before) just the largest message size. */
   constructor(
@@ -223,7 +223,10 @@ export class ExtensionBridge {
     this.opts = { ...DEFAULT_BRIDGE_OPTIONS, ...defined };
   }
 
-  /** The bridge's port: the one it listens on as the hub (port 0 picks a free one), else the one it was given. */
+  /**
+   * The bridge's port: the one it was given, or with port 0 the free one it got when it first
+   * listened. It keeps that port when it hands over, so its peers and a newer server find it.
+   */
   get port(): number {
     return this.boundPort ?? this.requestedPort;
   }
@@ -274,7 +277,7 @@ export class ExtensionBridge {
     return new Promise((resolve) => {
       const wss = new WebSocketServer({
         host: "127.0.0.1",
-        port: this.requestedPort,
+        port: this.port,
         maxPayload: this.maxMessageBytes,
         verifyClient: ({ origin }: { origin?: string; req: IncomingMessage }) => !origin || EXTENSION_ORIGIN.test(origin),
       });
@@ -478,7 +481,6 @@ export class ExtensionBridge {
   private restartHub(reason: string, delayMs = 100 + Math.random() * 400) {
     const wss = this.wss;
     this.wss = undefined;
-    this.boundPort = undefined;
     this.role = "none";
     clearInterval(this.keepAlive);
     this.stopPeerBeat();
