@@ -225,3 +225,52 @@ describe("meeting chat read once per call", () => {
     expect(chatRequestsOf(fake, 1)).toHaveLength(2);
   });
 });
+
+describe("3.4: the transcript cache is bounded by bytes", () => {
+  const MB = 1024 * 1024;
+  /** Meeting n's transcript, padded to about `size` characters of JSON. */
+  const bigTranscriptOf = (n: number, size: number) => {
+    const t = transcriptOf(n);
+    const pad = `The plan for review ${n} is still being worked out by the team this week. `.repeat(20);
+    for (let length = JSON.stringify(t).length; length < size; length += pad.length + 100) {
+      t.entries.push({ speakerDisplayName: "Sam Roe", startOffset: "00:10:00.0", endOffset: "00:10:09.0", text: pad });
+    }
+    return t;
+  };
+  /** OneDrive with meeting n's transcript at about `sizeOf(n)` characters; built once per meeting. */
+  const bigSharepoint = (sizeOf: (n: number) => number) => {
+    const built = new Map<number, unknown>();
+    return (req: SentRequest) => {
+      const n = Number(/\/items\/i(\d+)\//.exec(req.url)?.[1]);
+      if (!n) return undefined;
+      if (!built.has(n)) built.set(n, bigTranscriptOf(n, sizeOf(n)));
+      return built.get(n);
+    };
+  };
+  const transcriptReadsOf = (fake: { sent: SentRequest[] }, n: number) => fake.sent.filter((r) => r.service === "sharepoint" && r.url.includes(`/items/i${n}/`)).length;
+
+  it("3.4: after 20 transcripts of 1 MB, the first is read from OneDrive again (fewer than 50 entries, but over the byte cap)", async () => {
+    const fake = createFakeChrome({ services: { csa: csaWith(20), chatsvc: chatsvcWith(1), sharepoint: bigSharepoint(() => 1 * MB) } });
+    const worker = await loadWorker(fake);
+    for (let n = 1; n <= 20; n++) await worker.handlers.readTranscript({ meeting: meetingId(n), maxLength: 1000 });
+    expect(fake.count("sharepoint")).toBe(20);
+
+    await worker.handlers.readTranscript({ meeting: meetingId(20), maxLength: 1000 }); // the newest is still cached
+    expect(transcriptReadsOf(fake, 20)).toBe(1);
+    const r = await worker.handlers.readTranscript({ meeting: meetingId(1), maxLength: 1000 }); // evicted
+    expect(transcriptReadsOf(fake, 1)).toBe(2);
+    expect(r.transcript).toMatch(/review 1, point 0/);
+  });
+
+  it("3.4: a transcript bigger than the cap is not cached: each read fetches it, and it pushes nothing out", async () => {
+    const fake = createFakeChrome({ services: { csa: csaWith(2), chatsvc: chatsvcWith(1), sharepoint: bigSharepoint((n) => (n === 1 ? 20 * MB : 10_000)) } });
+    const worker = await loadWorker(fake);
+    await worker.handlers.readTranscript({ meeting: meetingId(2), maxLength: 1000 });
+    const first = await worker.handlers.readTranscript({ meeting: meetingId(1), maxLength: 1000 });
+    const again = await worker.handlers.readTranscript({ meeting: meetingId(1), from: first.continueFrom, maxLength: 1000 });
+    expect(again.transcript.length).toBeGreaterThan(0);
+    expect(transcriptReadsOf(fake, 1)).toBe(2);
+    await worker.handlers.readTranscript({ meeting: meetingId(2), maxLength: 1000 });
+    expect(transcriptReadsOf(fake, 2)).toBe(1);
+  });
+});
