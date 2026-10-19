@@ -7,7 +7,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { registerTools } from "../../src/tools.js";
 import { bridgeHarness, TOKEN, until, type BridgeHarness } from "../helpers/bridgeHarness.js";
-import { connectWorker, createFakeChrome, loadWorker, ME_OID, networkError, openedSockets, reply, timedOut, type FakeChrome, type SentRequest, type Worker } from "../helpers/fakeChrome.js";
+import { connectWorker, createFakeChrome, loadWorker, ME_OID, networkError, openedSockets, reply, TEAMS_ORIGIN, timedOut, type FakeChrome, type SentRequest, type Worker } from "../helpers/fakeChrome.js";
 
 const CHAT = "19:contoso-launch@thread.v2";
 const ALEX = "8:orgid:00000000-0000-4000-8000-00000000000a";
@@ -229,6 +229,21 @@ describe("send confirmation window", () => {
     const r = (await call) as { sent: boolean; reason: string };
     expect(r.sent).toBe(false);
     expect(r.reason).toMatch(/[.!?] The message may have been posted/);
+  });
+
+  it("3.1: the Teams tab closing while the post runs, with Teams open in another tab: the post isn't sent again there", async () => {
+    const { hub, fake } = await setup(() => new Promise(() => {}));
+    fake.tabs.push({ id: 2, url: `${TEAMS_ORIGIN}/v2/`, status: "complete" });
+    const call = hub.call("requestSend", SEND, 60_000);
+    const w = await windowOpened(fake);
+    void click(fake, w.id);
+    await vi.waitFor(() => expect(posts(fake)).toBe(1));
+    fake.closeTab(1);
+    const r = (await call) as { sent: boolean; reason: string };
+    expect(r.sent).toBe(false);
+    expect(r.reason).toMatch(/[.!?] The message may have been posted/);
+    await new Promise((r) => setTimeout(r, 100));
+    expect(fake.sent.filter((q) => q.service === "chatsvc" && q.method === "POST").map((q) => q.tabId)).toEqual([1]);
   });
 
   it("2.1: creating a new group chat gets no answer: the AI is told the chat may exist (not that the message was posted)", async () => {
