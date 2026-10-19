@@ -2,7 +2,6 @@
 // listen(0), and a scripted fake extension that pairs like the real one, records every message
 // it gets and answers requests as told.
 import { randomUUID } from "node:crypto";
-import { createServer } from "node:net";
 import WebSocket from "ws";
 import { ExtensionBridge, proof, type BridgeOptions } from "../../src/bridge.js";
 import { EXTENSION_ORIGIN } from "../../src/extension.js";
@@ -16,19 +15,6 @@ export const TOKEN = "test-token";
  * a 200 ms pong can queue behind the data and the hub drops the connection.
  */
 export const FAST: BridgeOptions = { retryMs: 700, joinTimeoutMs: 500, stepDownMaxWaitMs: 2_000, keepAliveMs: 200, pickStatusTimeoutMs: 300, authTimeoutMs: 500 };
-
-/** A local port nobody listens on right now (from listen(0)). */
-export function freePort(): Promise<number> {
-  return new Promise((resolve, reject) => {
-    const srv = createServer();
-    srv.unref();
-    srv.on("error", reject);
-    srv.listen(0, "127.0.0.1", () => {
-      const { port } = srv.address() as { port: number };
-      srv.close(() => resolve(port));
-    });
-  });
-}
 
 /** Polls until cond holds (default 3 s). */
 export async function until(cond: () => boolean, timeoutMs = 3_000, what = "condition"): Promise<void> {
