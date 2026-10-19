@@ -25,7 +25,7 @@ AI app ────stdio(MCP)──► mcp-teams server ──ws://127.0.0.1:473
 | `get_meeting` | The calls held in a meeting (one per occurrence of a recurring one): start, end, who joined, the recording's link, whether there is a transcript |
 | `read_transcript` | What was said: `[hh:mm:ss] Speaker: text` lines and each speaker's talk time. Long transcripts continue with `from`. |
 | `search_transcripts` | Finds lines in the transcripts of your recent meetings that contain all the words of a query, each with the line before it |
-| `api_traffic` | Diagnostic: the endpoints the Teams tab has called (method, host, path, status, header **names**, auth scheme). Header and query **values** are never recorded. |
+| `api_traffic` | Diagnostic: the endpoints the Teams tab called while recording was on (method, host, path, status, header **names**, auth scheme). Off until the AI turns it on with `record: true`; it stops after 30 minutes or with `record: false`. Header and query **values** are never recorded. |
 | `send_message` | Asks to post in a chat or channel, to reply to a channel post, or to start a chat with people (`to`: one person for a 1:1 chat, several for a group chat, with an optional `title`). **You must click Send.** |
 
 People in `to` are given by name or email and looked up like Teams' people picker; each must mean exactly one person in your organization, otherwise the matches are listed. If a chat with exactly those people already exists (for a group with a `title`, also that title), the message goes there instead of starting another one.
@@ -107,7 +107,7 @@ Every AI session starts its own mcp-teams server, and they share the one extensi
 - The server and the extension prove to each other that they know the pairing token in `~/.mcp-teams/config.json`, without sending it. Setup copies it into the installed extension folder as `pairing.json`; both files can be read only by your user. So a program that takes the port while no AI app runs gets nothing from the extension, and a program posing as the extension gets no calls.
 - Teams' tokens are only ever sent to the service they were captured from.
 - Messages can contain prompt injection. The send-confirmation window is the safeguard, so read it before clicking Send.
-- The extension may observe requests to Microsoft hosts (`*.microsoft.com`, `*.office.com`, `*.sharepoint.com` and similar), but it only records requests made by the Teams tab, and only names, for `api_traffic`. It runs requests only in Teams tabs, and in SharePoint tabs to read transcripts.
+- The extension may observe requests to Microsoft hosts (`*.microsoft.com`, `*.office.com`, `*.sharepoint.com` and similar), but it only records requests made by the Teams tab, only names, and only while `api_traffic` recording is on. It runs requests only in Teams tabs, and in SharePoint tabs to read transcripts.
 - If you also give an AI direct control of your browser or desktop, it could click the confirmation button itself. Don't combine the two if you rely on the confirmation step.
 
 ## Limitations

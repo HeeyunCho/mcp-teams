@@ -116,8 +116,9 @@ export function registerTools(server: McpServer, bridge: ExtensionBridge, config
     {
       title: "Show the Teams web app's API calls (diagnostic)",
       description:
-        "Lists the API endpoints the open Teams tab has called since the browser started: method, host, path, status, which headers were sent (names only, never values) and the auth scheme. Used to find out which API Teams uses for a feature: click through it in Teams first.",
+        "Lists the API endpoints the open Teams tab called while recording was on: method, host, path, status, which headers were sent (names only, never values) and the auth scheme. Used to find out which API Teams uses for a feature. Recording is off until you turn it on: first call with record: true, then click through the feature in Teams, then call again to list what it called. Recording stops after 30 minutes or with record: false; what was recorded stays until clear.",
       inputSchema: {
+        record: z.boolean().optional().describe("true: start recording the Teams tab's API calls (for 30 minutes); false: stop recording. Leave out to only list"),
         filter: z.string().optional().describe("Only requests whose host or path contains this text"),
         limit: z.number().int().min(1).max(400).default(100),
         clear: z.boolean().default(false).describe("Clear the recorded traffic after returning it"),
