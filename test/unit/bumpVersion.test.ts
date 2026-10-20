@@ -124,6 +124,16 @@ describe("nextVersion with an invalid version", () => {
     expect(() => nextVersion(v, ["fix: x"])).toThrow(/invalid version/i);
   });
 
+  it("throws on numbers too large to count exactly, as semver does", () => {
+    expect(() => nextVersion("99999999999999999.0.0", ["fix: x"])).toThrow(/invalid version/i);
+    expect(() => nextVersion("1.2.9007199254740993", ["fix: x"])).toThrow(/invalid version/i);
+  });
+
+  it("throws rather than give a part Chrome's manifest can't take (above 65535)", () => {
+    expect(nextVersion("0.0.65534", ["fix: x"])).toBe("0.0.65535");
+    expect(() => nextVersion("0.0.65535", ["fix: x"])).toThrow(/65535/);
+  });
+
   it("makes the CLI exit with an error naming the bad version", () => {
     expect(() => runCli("1.2", ["patch"])).toThrow(/invalid version "1\.2"/i);
   });

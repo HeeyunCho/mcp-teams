@@ -47,12 +47,26 @@ const SEMVER = new RegExp(
 
 function parse(version) {
   const m = SEMVER.exec(version);
-  if (!m) throw new Error(`Invalid version "${version}": expected MAJOR.MINOR.PATCH[-prerelease][+build]`);
-  return { major: Number(m[1]), minor: Number(m[2]), patch: Number(m[3]), pre: m[4] };
+  const [major, minor, patch] = [m?.[1], m?.[2], m?.[3]].map(Number);
+  // Too large to count exactly (semver rejects these too).
+  if (!m || ![major, minor, patch].every(Number.isSafeInteger)) {
+    throw new Error(`Invalid version "${version}": expected MAJOR.MINOR.PATCH[-prerelease][+build]`);
+  }
+  return { major, minor, patch, pre: m[4] };
 }
 
+// Chrome's manifest "version" takes integers up to 65535.
+const MAX_PART = 65535;
+
 export function increment(version, level) {
-  const { major, minor, patch, pre } = parse(version);
+  const next = step(parse(version), level);
+  if (next.split(".").some((n) => Number(n) > MAX_PART)) {
+    throw new Error(`Bumping "${version}" gives ${next}, but extension/manifest.json takes version parts up to ${MAX_PART}.`);
+  }
+  return next;
+}
+
+function step({ major, minor, patch, pre }, level) {
   if (level === "major") return pre && minor === 0 && patch === 0 ? `${major}.0.0` : `${major + 1}.0.0`;
   if (level === "minor") return pre && patch === 0 ? `${major}.${minor}.0` : `${major}.${minor + 1}.0`;
   if (pre) return `${major}.${minor}.${patch}`;
@@ -95,10 +109,8 @@ async function main() {
   }
   setVersion("package.json", next);
   setVersion("package-lock.json", next, 2); // root + packages[""]
-  // Chrome's manifest "version" must be 1-4 dot-separated integers, so "0.3.0-beta.1" is invalid
-  // there; a prerelease label can only live in the optional "version_name". A bump always yields a
-  // plain MAJOR.MINOR.PATCH (it releases the prerelease, see above), so "version" stays valid, and an
-  // existing "version_name" (left over from a hand-set prerelease) is set to the release too.
+  // A bump is always plain MAJOR.MINOR.PATCH, as Chrome's "version" needs; a prerelease label can only
+  // be in "version_name", so one left from a hand-set prerelease is set to the release too.
   setVersion("extension/manifest.json", next);
   setVersion("extension/manifest.json", next, 1, "version_name");
   console.log(next);
