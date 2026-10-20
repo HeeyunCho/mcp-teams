@@ -74,7 +74,7 @@ if (command === "reload-extension") {
 console.error(
   bridge.listenError
     ? `[mcp-teams ${SERVER_VERSION}] bridge unavailable: ${bridge.listenError}`
-    : `[mcp-teams ${SERVER_VERSION}] bridge listening on ws://127.0.0.1:${config.port} (config: ${CONFIG_PATH})`,
+    : `[mcp-teams ${SERVER_VERSION}] bridge listening on ws://127.0.0.1:${bridge.port} (config: ${CONFIG_PATH})`,
 );
 
 // The extension's icon, which ships in the package next to dist/.

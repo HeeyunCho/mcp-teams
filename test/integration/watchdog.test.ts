@@ -4,7 +4,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { WebSocketServer, type WebSocket } from "ws";
 import { proof } from "../../src/bridge.js";
-import { FAST, TOKEN as HUB_TOKEN, bridgeHarness, freePort, type BridgeHarness } from "../helpers/bridgeHarness.js";
+import { FAST, TOKEN as HUB_TOKEN, bridgeHarness, type BridgeHarness } from "../helpers/bridgeHarness.js";
 import { connectWorker, createFakeChrome, loadWorker, NativeWebSocket, openedSockets } from "../helpers/fakeChrome.js";
 
 const TOKEN = "watchdog-token";
@@ -34,9 +34,10 @@ afterEach(async () => {
  * frozen hub). Records when each connection was opened, welcomed and closed.
  */
 async function scriptedHub({ heartbeatMs, pingEveryMs = 0 }: { heartbeatMs?: number; pingEveryMs?: number }) {
-  const port = await freePort();
   const connections: { openedAt: number; welcomedAt?: number; closedAt?: number }[] = [];
-  wss = new WebSocketServer({ host: "127.0.0.1", port });
+  // Port 0: the system picks a free port and this server keeps it.
+  const server = new WebSocketServer({ host: "127.0.0.1", port: 0 });
+  wss = server;
   wss.on("connection", (ws: WebSocket) => {
     const c: (typeof connections)[number] = { openedAt: Date.now() };
     connections.push(c);
@@ -51,6 +52,8 @@ async function scriptedHub({ heartbeatMs, pingEveryMs = 0 }: { heartbeatMs?: num
       if (pingEveryMs) timers.push(setInterval(() => ws.readyState === ws.OPEN && ws.send(JSON.stringify({ type: "ping" })), pingEveryMs));
     });
   });
+  await new Promise<void>((r) => server.once("listening", () => r()));
+  const { port } = server.address() as { port: number };
   return { port, connections };
 }
 
