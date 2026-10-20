@@ -223,6 +223,8 @@ export class ExtensionBridge {
   listenError?: string;
   /** Peer only: version of the hub server it forwards through. */
   hubVersion?: string;
+  /** Peer only: whether that hub checks the browser it picks for a send (#22); hubs before it don't. */
+  hubChecksSend = false;
 
   private wss?: WebSocketServer;
   private sockets = new Map<WebSocket, ExtensionInfo>(); // hub: the extensions
@@ -485,6 +487,7 @@ export class ExtensionBridge {
         extension: this.extension ?? null,
         extensions: this.extensions,
         heartbeatMs: this.opts.keepAliveMs,
+        checksSend: true,
         ...welcome,
       }),
     );
@@ -722,6 +725,7 @@ export class ExtensionBridge {
           clearTimeout(timer);
           this.hub = ws;
           this.hubVersion = String(msg.serverVersion ?? "unknown");
+          this.hubChecksSend = msg.checksSend === true;
           this.extension = msg.extension ?? undefined;
           this.extensions = msg.extensions ?? (msg.extension ? [msg.extension] : []);
           heartbeatMs = Number(msg.heartbeatMs) > 0 ? Number(msg.heartbeatMs) : 0;
@@ -753,6 +757,7 @@ export class ExtensionBridge {
         // The hub went away: take over the port or join whoever did.
         this.hub = undefined;
         this.hubVersion = undefined;
+        this.hubChecksSend = false;
         this.extension = undefined;
         this.extensions = [];
         this.role = "none";
@@ -789,13 +794,14 @@ export class ExtensionBridge {
     }
     // A send opens a window that must close once nobody waits for it: an extension that ignores
     // cancel would leave it open for a late click. The hub checks the extension it picked (for its
-    // own sends and its peers'). A peer checks what its hub reported, in case the hub is older:
-    // it can't know which browser an older hub will pick, so every one must close the window.
+    // own sends and its peers'). A peer behind a hub that doesn't say it checks (one from before
+    // #22) checks what that hub reported: it can't know which browser the hub will pick, so every
+    // one must close the window.
     if (method === "requestSend") {
       if (this.role === "hub") {
         const version = this.sockets.get(target)?.version;
         if (!closesSendWindow(version)) throw new Error(NOT_SENT.extensionTooOld(version ?? "unknown"));
-      } else if (!this.extensions.length || !this.extensions.every((e) => closesSendWindow(e.version))) {
+      } else if (!this.hubChecksSend && (!this.extensions.length || !this.extensions.every((e) => closesSendWindow(e.version)))) {
         throw new Error(NOT_SENT.extensionTooOld(oldestTooOld(this.extensions)));
       }
     }
