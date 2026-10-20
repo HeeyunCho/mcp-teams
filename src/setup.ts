@@ -348,7 +348,8 @@ export async function setup(bridge: ExtensionBridge, serverVersion: string, { ye
 
   // Opens Teams in a background tab if none is open, and waits for its session.
   try {
-    const { teams } = await bridge.call<{ teams: unknown[] }>("listTeams", {}, TEAMS_WAIT_MS);
+    // refresh: really ask Teams, not a list cached a minute ago.
+    const { teams } = await bridge.call<{ teams: unknown[] }>("listTeams", { refresh: true }, TEAMS_WAIT_MS);
     ok(`Teams reachable (${teams.length} teams)`);
   } catch (err) {
     console.log(`\n✗ Teams: ${(err as Error).message}\n  Sign in to Teams in your browser, then run setup again.`);

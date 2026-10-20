@@ -7,7 +7,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { registerTools } from "../../src/tools.js";
 import { bridgeHarness, TOKEN, until, type BridgeHarness } from "../helpers/bridgeHarness.js";
-import { connectWorker, createFakeChrome, loadWorker, ME_OID, networkError, openedSockets, reply, timedOut, type FakeChrome, type SentRequest, type Worker } from "../helpers/fakeChrome.js";
+import { connectWorker, createFakeChrome, loadWorker, ME_OID, networkError, openedSockets, reply, TEAMS_ORIGIN, timedOut, type FakeChrome, type SentRequest, type Worker } from "../helpers/fakeChrome.js";
 
 const CHAT = "19:contoso-launch@thread.v2";
 const ALEX = "8:orgid:00000000-0000-4000-8000-00000000000a";
@@ -28,11 +28,11 @@ afterEach(async () => {
   openedSockets.length = 0;
 });
 
-/** A hub with the worker connected to it; chatsvc answers posts with `post`. */
-async function setup(post: (req: SentRequest) => unknown = () => ({ OriginalArrivalTime: Date.parse("2026-10-01T09:00:00Z") })) {
+/** A hub with the worker connected to it; chatsvc answers posts with `post`, csa reads with `list`. */
+async function setup(post: (req: SentRequest) => unknown = () => ({ OriginalArrivalTime: Date.parse("2026-10-01T09:00:00Z") }), list = csa) {
   h = await bridgeHarness();
   const hub = await h.session();
-  const fake = createFakeChrome({ services: { csa, chatsvc: (req) => (req.method === "POST" ? post(req) : undefined) }, local: { token: TOKEN, port: h.port } });
+  const fake = createFakeChrome({ services: { csa: list, chatsvc: (req) => (req.method === "POST" ? post(req) : undefined) }, local: { token: TOKEN, port: h.port } });
   const worker = await loadWorker(fake);
   worker.registerListeners();
   link = await connectWorker(fake, () => hub.connected);
@@ -231,6 +231,21 @@ describe("send confirmation window", () => {
     expect(r.reason).toMatch(/[.!?] The message may have been posted/);
   });
 
+  it("3.1: the Teams tab closing while the post runs, with Teams open in another tab: the post isn't sent again there", async () => {
+    const { hub, fake } = await setup(() => new Promise(() => {}));
+    fake.tabs.push({ id: 2, url: `${TEAMS_ORIGIN}/v2/`, status: "complete" });
+    const call = hub.call("requestSend", SEND, 60_000);
+    const w = await windowOpened(fake);
+    void click(fake, w.id);
+    await vi.waitFor(() => expect(posts(fake)).toBe(1));
+    fake.closeTab(1);
+    const r = (await call) as { sent: boolean; reason: string };
+    expect(r.sent).toBe(false);
+    expect(r.reason).toMatch(/[.!?] The message may have been posted/);
+    await new Promise((r) => setTimeout(r, 100));
+    expect(fake.sent.filter((q) => q.service === "chatsvc" && q.method === "POST").map((q) => q.tabId)).toEqual([1]);
+  });
+
   it("2.1: creating a new group chat gets no answer: the AI is told the chat may exist (not that the message was posted)", async () => {
     const SAM = "8:orgid:00000000-0000-4000-8000-00000000000b";
     const { hub, fake } = await setup(() => timedOut());
@@ -243,6 +258,32 @@ describe("send confirmation window", () => {
     expect(r.reason).toMatch(/chat may have been created/);
     expect(r.reason).toMatch(/list_chats/);
     expect(r.reason).not.toMatch(/message may have been posted/);
+  });
+
+  // The reason says to check with list_chats: the list cached just before (the send's own lookup)
+  // can't contain the chat, so an AI would conclude none was made and create a second one.
+  it("3.2: after creating a chat gets no answer, list_chats reads the list again and shows the chat", async () => {
+    const SAM = "8:orgid:00000000-0000-4000-8000-00000000000b";
+    const NEW_CHAT = "19:contoso-launch-team@thread.v2";
+    let created = false;
+    const list = () => {
+      const view = csa();
+      if (created) view.chats.push({ id: NEW_CHAT, title: "Contoso launch team", chatType: "chat", members: [{ mri: `8:orgid:${ME_OID}` }, { mri: ALEX }, { mri: SAM }] });
+      return view;
+    };
+    const { hub, fake } = await setup(() => {
+      created = true; // Teams made the chat, but its answer never came
+      return timedOut();
+    }, list);
+    const call = hub.call("requestSend", { to: [ALEX, SAM], title: "Contoso launch team", text: "Hi both" }, 60_000);
+    const w = await windowOpened(fake);
+    await click(fake, w.id);
+    await expect(call).resolves.toMatchObject({ sent: false, reason: expect.stringMatching(/list_chats/) });
+    const before = fake.count("csa");
+
+    const listed = (await hub.call("listChats", {}, 30_000)) as { chats: { id: string }[] };
+    expect(fake.count("csa")).toBe(before + 1);
+    expect(listed.chats.map((c) => c.id)).toContain(NEW_CHAT);
   });
 
   it("2.1: a post Teams refuses (HTTP error) after the click is a known failure, without that warning", async () => {

@@ -117,8 +117,9 @@ export function registerTools(server: McpServer, bridge: ExtensionBridge, config
     {
       title: "Show the Teams web app's API calls (diagnostic)",
       description:
-        "Lists the API endpoints the open Teams tab has called since the browser started: method, host, path, status, which headers were sent (names only, never values) and the auth scheme. Used to find out which API Teams uses for a feature: click through it in Teams first.",
+        "Lists the API endpoints the open Teams tab called while recording was on: method, host, path, status, which headers were sent (names only, never values) and the auth scheme. Used to find out which API Teams uses for a feature. Recording is off until you turn it on: first call with record: true, then click through the feature in Teams, then call again to list what it called. Recording stops after 30 minutes or with record: false; what was recorded stays until clear.",
       inputSchema: {
+        record: z.boolean().optional().describe("true: start recording the Teams tab's API calls (for 30 minutes); false: stop recording. Leave out to only list"),
         filter: z.string().optional().describe("Only requests whose host or path contains this text"),
         limit: z.number().int().min(1).max(400).default(100),
         clear: z.boolean().default(false).describe("Clear the recorded traffic after returning it"),
@@ -127,19 +128,28 @@ export function registerTools(server: McpServer, bridge: ExtensionBridge, config
     safe(async (args, extra) => text(await bridge.call("apiTraffic", args, undefined, extra.signal))),
   );
 
+  // list_teams, list_chats and list_meetings share one list, which the extension keeps for a minute.
+  const refresh = z
+    .boolean()
+    .default(false)
+    .describe("Read the list from Teams again instead of reusing the one from the last minute: e.g. right after a chat was created or joined elsewhere, or for the current unread state");
+  /** The bridge param: sent only when asked, so a call without it reads as before. */
+  const refreshParam = (r: boolean) => (r ? { refresh: true } : {});
+
   server.registerTool(
     "list_teams",
     {
       title: "List teams and channels",
       description:
-        "Lists the teams you are a member of, each with its channels. Use 'Team/Channel' or a channel id as the conversation for read_messages and send_message.",
+        "Lists the teams you are a member of, each with its channels. Use 'Team/Channel' or a channel id as the conversation for read_messages and send_message. The list may be up to a minute old (see refresh).",
       inputSchema: {
         include_ids: z.boolean().default(false).describe("Also return team and channel ids (long; 'Team/Channel' names are enough to address channels)"),
+        refresh,
       },
     },
-    safe(async ({ include_ids }, extra) => {
+    safe(async ({ include_ids, refresh }, extra) => {
       type Team = { id: string; name: string; channels: { id: string; name: string }[] };
-      const r = await bridge.call<{ teams: Team[] }>("listTeams", {}, READ_TIMEOUT_MS, extra.signal);
+      const r = await bridge.call<{ teams: Team[] }>("listTeams", refreshParam(refresh), READ_TIMEOUT_MS, extra.signal);
       return text(
         include_ids
           ? r
@@ -153,15 +163,16 @@ export function registerTools(server: McpServer, bridge: ExtensionBridge, config
     {
       title: "List chats",
       description:
-        "Lists your chats (1:1, group and meeting chats), most recent first, with their title (or the other members' names), the last message and whether it is unread. Returns ids for read_messages and send_message.",
+        "Lists your chats (1:1, group and meeting chats), most recent first, with their title (or the other members' names), the last message and whether it is unread. Returns ids for read_messages and send_message. The list may be up to a minute old, so the last message and unread state can lag; pass refresh: true for the current ones.",
       inputSchema: {
         query: z.string().optional().describe("Only chats whose title or a member's name contains these words"),
         unread_only: z.boolean().default(false),
         limit: z.number().int().min(1).max(200).default(30),
+        refresh,
       },
     },
-    safe(async ({ query, unread_only, limit }, extra) =>
-      text(await bridge.call("listChats", { query, unreadOnly: unread_only, limit }, READ_TIMEOUT_MS, extra.signal)),
+    safe(async ({ query, unread_only, limit, refresh }, extra) =>
+      text(await bridge.call("listChats", { query, unreadOnly: unread_only, limit, ...refreshParam(refresh) }, READ_TIMEOUT_MS, extra.signal)),
     ),
   );
 
@@ -203,15 +214,16 @@ export function registerTools(server: McpServer, bridge: ExtensionBridge, config
     {
       title: "List Teams meetings",
       description:
-        "Lists your Teams meetings (each scheduled meeting or recurring series has a meeting chat), most recent activity first: subject, scheduled time (for a series, its first occurrence), organizer, whether a transcript exists, and whether another organization hosted it (`external`: its chat and recordings are usually no longer readable afterwards). Use get_meeting for the calls held and who attended, read_transcript for what was said, read_messages for the meeting chat.",
+        "Lists your Teams meetings (each scheduled meeting or recurring series has a meeting chat), most recent activity first: subject, scheduled time (for a series, its first occurrence), organizer, whether a transcript exists, and whether another organization hosted it (`external`: its chat and recordings are usually no longer readable afterwards). The list may be up to a minute old (see refresh). Use get_meeting for the calls held and who attended, read_transcript for what was said, read_messages for the meeting chat.",
       inputSchema: {
         query: z.string().optional().describe("Only meetings whose subject or organizer contains these words"),
         transcript_only: z.boolean().default(false).describe("Only meetings with a transcript"),
         limit: z.number().int().min(1).max(200).default(20),
+        refresh,
       },
     },
-    safe(async ({ query, transcript_only, limit }, extra) =>
-      text(await bridge.call("listMeetings", { query, transcriptOnly: transcript_only, limit }, READ_TIMEOUT_MS, extra.signal)),
+    safe(async ({ query, transcript_only, limit, refresh }, extra) =>
+      text(await bridge.call("listMeetings", { query, transcriptOnly: transcript_only, limit, ...refreshParam(refresh) }, READ_TIMEOUT_MS, extra.signal)),
     ),
   );
 
