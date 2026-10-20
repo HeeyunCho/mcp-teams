@@ -136,6 +136,21 @@ describe("send_message and an extension that can't close its window", () => {
     expect(sends(newer)).toBe(0);
   });
 
+  it("22: behind a current hub, a peer leaves the check to the hub: with browsers at 0.2.12 and 0.2.13 the send reaches 0.2.13", async () => {
+    h = await bridgeHarness();
+    const hub = await h.session();
+    const posts = (req: { method: string }) => (req.method === "requestSend" ? { sent: true } : { ok: true });
+    const older = await h.extension({ version: "0.2.12", instance: "profile-1", handle: posts });
+    const newer = await h.extension({ version: "0.2.13", instance: "profile-2", handle: posts }); // last: the hub's pick
+    await until(() => hub.extensions.length === 2, 3_000, "the hub sees both browsers");
+    const peer = await h.session();
+    expect(peer.role).toBe("peer");
+    await until(() => peer.extensions.length === 2, 3_000, "the peer sees both browsers");
+    expect(await sendMessage(peer)).toEqual({ isError: false, text: JSON.stringify({ sent: true }, null, 2) });
+    expect(sends(newer)).toBe(1);
+    expect(sends(older)).toBe(0);
+  });
+
   it("22: an extension whose version can't be read counts as too old", async () => {
     const { hub, ext } = await setup("dev");
     expectRefused(await sendMessage(hub), ext);
