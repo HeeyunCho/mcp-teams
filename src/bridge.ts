@@ -138,6 +138,13 @@ export function closesSendWindow(version: unknown): boolean {
   return typeof version === "string" && /^\d+\.\d+\.\d+$/.test(version) && !isNewer(MIN_SEND_EXTENSION, version);
 }
 
+/** The version to name when a send is refused: of the extensions that can't close the window, the oldest (an unreadable one first). */
+function oldestTooOld(extensions: ExtensionInfo[]): string {
+  const tooOld = extensions.map((e) => e.version).filter((v) => !closesSendWindow(v));
+  const unreadable = tooOld.find((v) => !/^\d+\.\d+\.\d+$/.test(v));
+  return unreadable ?? tooOld.reduce<string | undefined>((a, v) => (a === undefined || isNewer(a, v) ? v : a), undefined) ?? "unknown";
+}
+
 /** A peer's watchdog never waits less for its hub's ping: a busy machine runs timers late. */
 const MIN_HUB_SILENCE_MS = 2_000;
 
@@ -743,11 +750,15 @@ export class ExtensionBridge {
     }
     // A send opens a window that must close once nobody waits for it: an extension that ignores
     // cancel would leave it open for a late click. The hub checks the extension it picked (for its
-    // own sends and its peers'); a peer checks what its hub reported, in case the hub is older.
+    // own sends and its peers'). A peer checks what its hub reported, in case the hub is older:
+    // it can't know which browser an older hub will pick, so every one must close the window.
     if (method === "requestSend") {
-      const version = this.role === "hub" ? this.sockets.get(target)?.version : this.extension?.version;
-      const ok = this.role === "hub" ? closesSendWindow(version) : this.extensions.some((e) => closesSendWindow(e.version));
-      if (!ok) throw new Error(NOT_SENT.extensionTooOld(version ?? "unknown"));
+      if (this.role === "hub") {
+        const version = this.sockets.get(target)?.version;
+        if (!closesSendWindow(version)) throw new Error(NOT_SENT.extensionTooOld(version ?? "unknown"));
+      } else if (!this.extensions.length || !this.extensions.every((e) => closesSendWindow(e.version))) {
+        throw new Error(NOT_SENT.extensionTooOld(oldestTooOld(this.extensions)));
+      }
     }
     let result: T;
     if (this.role === "hub" && !UNQUEUED.has(method)) {
