@@ -217,6 +217,21 @@ export function parseProfiles(json) {
   }));
 }
 
+/** Email addresses as compared for autoSendTo: trimmed, lowercased; anything else left out. */
+export function normalizeAddresses(list) {
+  if (!Array.isArray(list)) return [];
+  const out = list.map((a) => (typeof a === "string" ? a.trim().toLowerCase() : "")).filter((a) => /^[^\s@]+@[^\s@]+$/.test(a));
+  return [...new Set(out)];
+}
+
+/** Every address (email and UPN) short profiles (mt fetchShortProfile) give for this MRI, normalized. */
+export function profileAddresses(json, mri) {
+  const list = Array.isArray(json) ? json : (json?.value ?? []);
+  const oid = oidOf(mri);
+  const mine = list.filter((p) => p && (p.mri === mri || (oid && String(p.objectId ?? "").toLowerCase() === oid)));
+  return normalizeAddresses(mine.flatMap((p) => [p.email, p.userPrincipalName]));
+}
+
 /** People from substrate's suggestions API. */
 export function parseSuggestions(json) {
   const groups = json?.Groups ?? json?.groups ?? [];
