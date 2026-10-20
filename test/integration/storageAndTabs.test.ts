@@ -6,7 +6,7 @@
 // In Chrome the worker's own requests in the Teams tab reach its webRequest listeners like
 // Teams' own: `seesOwnRequests` makes the fake do the same.
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { BASES, createFakeChrome, loadWorker, ME_OID, openedSockets, reply, SHAREPOINT_ORIGIN, type FakeChrome, type SentRequest, type Worker } from "../helpers/fakeChrome.js";
+import { BASES, createFakeChrome, loadWorker, ME_OID, networkError, openedSockets, reply, SHAREPOINT_ORIGIN, TEAMS_ORIGIN, type FakeChrome, type SentRequest, type Worker } from "../helpers/fakeChrome.js";
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -286,5 +286,69 @@ describe("3.1: waits listen for chrome's events instead of polling", () => {
     const r = await call(worker, "readMessages", { conversation: CHAT, limit: PAGE }, 800);
     expect(r).toMatchObject({ ok: false, error: expect.stringContaining("time limit") });
     expect(Date.now() - start).toBeLessThan(1_500);
+  });
+});
+
+describe("3.1: a Teams tab that changes during a call is looked up again", () => {
+  /** The tab each meeting chat's messages (sessionsOf) were read in, in order. */
+  const meetingTabs = (fake: FakeChrome) => fake.sent.filter((r) => r.service === "chatsvc" && /meeting_contoso/.test(r.path)).map((r) => r.tabId);
+
+  /** OneDrive's transcripts; once the first is read, `change` runs (between two of the call's requests). */
+  function afterFirstTranscript(change: () => void) {
+    let changed = false;
+    return (req: SentRequest) => {
+      const answer = sharepoint(req);
+      if (!changed) {
+        changed = true;
+        change();
+      }
+      return answer;
+    };
+  }
+
+  /** A search_transcripts over the three meetings, and how many tab lookups it made. */
+  async function search(fake: FakeChrome, worker: Worker) {
+    fake.spies.tabsQuery.mockClear();
+    const r = await call(worker, "searchTranscripts", { query: "budget", meetings: 3 });
+    return { r, tabLookups: fake.spies.tabsQuery.mock.calls.length };
+  }
+
+  const allThree = {
+    ok: true,
+    result: { meetingsSearched: 3, matches: 3, results: [1, 2, 3].map((n) => expect.objectContaining({ meeting: `Contoso review ${n}` })) },
+  };
+
+  it("3.1: Teams closed and opened again (a new tab) between two requests of a search_transcripts: the next request runs in the new tab and all three meetings are searched", async () => {
+    let fake: FakeChrome | undefined;
+    const sharepointOnce = afterFirstTranscript(() => {
+      fake!.closeTab(1);
+      fake!.tabs.push({ id: 7, url: `${TEAMS_ORIGIN}/v2/`, status: "complete" });
+    });
+    const started = await chromeLikeWorker({ services: { ...services, sharepoint: sharepointOnce } });
+    fake = started.fake;
+
+    const { r, tabLookups } = await search(fake, started.worker);
+    expect(r).toMatchObject(allThree);
+    expect(r.result.skipped).toBeUndefined();
+    expect(meetingTabs(fake)).toEqual([1, 7, 7]);
+    expect(tabLookups).toBe(2); // at the start, and once more after the tab went away
+  });
+
+  it("3.1: the Teams tab went to OneDrive between two requests (pageFetch: status 0 there) and Teams is open in another tab: the next request runs there and all three meetings are searched", async () => {
+    let fake: FakeChrome | undefined;
+    const sharepointOnce = afterFirstTranscript(() => {
+      fake!.tabs[0].url = `${SHAREPOINT_ORIGIN}/`;
+      fake!.tabs.push({ id: 8, url: `${TEAMS_ORIGIN}/v2/`, status: "complete" });
+    });
+    // From a page that isn't Teams, Teams' services don't answer the page's fetch (CORS).
+    const inTeams = (req: SentRequest) => !!fake!.tabs.find((t) => t.id === req.tabId)?.url.startsWith(`${TEAMS_ORIGIN}/`);
+    const started = await chromeLikeWorker({ services: { ...services, sharepoint: sharepointOnce, chatsvc: (req) => (inTeams(req) ? chatsvc(req) : networkError("Failed to fetch")) } });
+    fake = started.fake;
+
+    const { r, tabLookups } = await search(fake, started.worker);
+    expect(r).toMatchObject(allThree);
+    expect(r.result.skipped).toBeUndefined();
+    expect(meetingTabs(fake)).toEqual([1, 1, 8, 8]);
+    expect(tabLookups).toBe(2);
   });
 });

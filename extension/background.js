@@ -344,6 +344,16 @@ function unanswered(message) {
 }
 
 /**
+ * unanswered, because of the tab: its script failed (`tabFailed: "script"`: closed, reloaded,
+ * gone elsewhere) or its fetch failed without a timeout (`"fetch"`: e.g. a page that isn't Teams
+ * any more). The call's next request looks the tabs up again.
+ */
+function tabFailed(kind, message, ctx) {
+  if (ctx) ctx.tabs = null;
+  return Object.assign(unanswered(message), { tabFailed: kind });
+}
+
+/**
  * One fetch in the tab, by REQUEST_TIMEOUT_MS or the request's deadline (ctx), whichever
  * comes first. Nothing starts once the request was withdrawn, and a tab that doesn't run
  * the script in time (frozen, discarded) fails the call instead of holding it.
@@ -370,8 +380,7 @@ async function runInTab(tab, url, method, headers, body, ctx = null) {
     })
     // E.g. the tab closed or reloaded while the request ran: it may have reached Teams.
     .catch((err) => {
-      if (ctx) ctx.tabs = null; // the call's next request looks the tabs up again
-      throw unanswered(String(err?.message ?? err));
+      throw tabFailed("script", String(err?.message ?? err), ctx);
     });
   let injection;
   try {
@@ -380,15 +389,12 @@ async function runInTab(tab, url, method, headers, body, ctx = null) {
     clearTimeout(timer);
   }
   const res = injection?.result;
-  if (!res) throw unanswered("Could not run inside the Teams tab. Reload the Teams tab and try again.");
+  if (!res) throw tabFailed("script", "Could not run inside the Teams tab. Reload the Teams tab and try again.", ctx);
   if (res.status === 0) {
     ctx?.check(); // the deadline passed: say that rather than "Teams did not answer"
     // A fetch that failed may have been sent already (a reset connection, no answer in time).
-    throw unanswered(
-      res.error === "timeout"
-        ? `Teams did not answer within ${seconds} s. Reload the Teams tab and try again.`
-        : `Could not reach Teams: ${res.error}`,
-    );
+    if (res.error === "timeout") throw unanswered(`Teams did not answer within ${seconds} s. Reload the Teams tab and try again.`);
+    throw tabFailed("fetch", `Could not reach Teams: ${res.error}`, ctx);
   }
   return res;
 }
@@ -434,20 +440,39 @@ async function passGate(key, ctx, wait) {
   ctx?.check();
 }
 
+const originOf = (tab) => (tab?.url ? new URL(tab.url).origin : null);
+
 /**
- * runInTab through the gate `key`. A 429 closes the gate for its Retry-After. Teams refused
- * that request without running it, so a read (a GET, or a POST that only reads: `repeatable`)
- * goes once more after the wait (when `wait` and it fits the deadline). Anything else, such as
- * a post, is never sent again: the caller hears that Teams is busy.
+ * runInTab in `tab` through the gate `key`. A 429 closes the gate for its Retry-After. Teams
+ * refused that request without running it, so a read (a GET, or a POST that only reads:
+ * `repeatable`) goes once more after the wait (when `wait` and it fits the deadline). Anything
+ * else, such as a post, is never sent again: the caller hears that Teams is busy.
+ *
+ * A tab that failed under a read (see tabFailed: closed or reloaded since the call looked it up,
+ * or gone to another page) is looked up again with `findTab`, and the read goes once more there,
+ * by the same deadline. A fetch that failed in the same tab, still on the same page (e.g.
+ * offline), isn't sent again. A post never is: it may have reached Teams.
  */
-async function sendTo(key, tab, url, method, headers, body, ctx, wait, repeatable = method === "GET") {
-  for (let attempt = 0; ; attempt++) {
+async function sendTo(key, tab, findTab, url, method, headers, body, ctx, wait, repeatable = method === "GET") {
+  let foundAgain = false;
+  for (let attempt = 0; ; ) {
     await passGate(key, ctx, wait);
-    const res = await runInTab(tab, url, method, headers, body, ctx);
+    let res;
+    try {
+      res = await runInTab(tab, url, method, headers, body, ctx);
+    } catch (err) {
+      if (!err?.tabFailed || !repeatable || foundAgain) throw err;
+      foundAgain = true;
+      const again = await guarded(findTab(), ctx);
+      if (err.tabFailed === "fetch" && again.id === tab.id && originOf(again) === originOf(tab)) throw err;
+      if (again.status === "loading") await guarded(waitForTabLoaded(again.id), ctx);
+      tab = again;
+      continue;
+    }
     if (res.status !== 429) return res;
     const until = Math.max(gates.get(key) ?? 0, Date.now() + teams.retryAfterMs(res.retryAfter));
     gates.set(key, until);
-    if (!repeatable || attempt > 0) throw busy(until);
+    if (!repeatable || attempt++ > 0) throw busy(until);
   }
 }
 
@@ -468,8 +493,9 @@ async function api(service, path, { method = "GET", body, raw = false, withLocat
     if (!cap) throw new Error(SERVICE_HELP[service]);
   }
   const urlFor = (c) => teams.serviceUrl(path, c.base);
+  const findTab = () => findTeamsTab(new URL(cap.base).origin, ctx);
   await onCapture?.(cap); // may refuse the session (it throws), before anything is sent
-  let res = await sendTo(gateKey(service, cap.base), tab, urlFor(cap), method, cap.headers, body, ctx, wait, repeatable);
+  let res = await sendTo(gateKey(service, cap.base), tab, findTab, urlFor(cap), method, cap.headers, body, ctx, wait, repeatable);
   if (res.status === 401) {
     // Rejected before running (expired token), so trying once more is safe. A 403 is a
     // real answer (e.g. no longer a member of that chat).
@@ -480,9 +506,9 @@ async function api(service, path, { method = "GET", body, raw = false, withLocat
     if (!cap) throw new Error(SERVICE_HELP[service]);
     // The tab reloaded (or was closed meanwhile): look the tabs up again.
     if (ctx) ctx.tabs = null;
-    tab = await guarded(findTeamsTab(new URL(cap.base).origin, ctx), ctx);
+    tab = await guarded(findTab(), ctx);
     await onCapture?.(cap);
-    res = await sendTo(gateKey(service, cap.base), tab, urlFor(cap), method, cap.headers, body, ctx, wait, repeatable);
+    res = await sendTo(gateKey(service, cap.base), tab, findTab, urlFor(cap), method, cap.headers, body, ctx, wait, repeatable);
   }
   if (raw) return res;
   if (res.status >= 400) {
@@ -754,7 +780,8 @@ async function sharepointGet(url, ctx = null) {
   if (!SHAREPOINT_URL.test(url)) throw new Error("Not a SharePoint URL");
   ctx?.check();
   const origin = new URL(url).origin;
-  return sendTo(gateKey("sharepoint", origin), await guarded(sharepointTab(origin, ctx), ctx), url, "GET", {}, null, ctx, true);
+  const findTab = () => sharepointTab(origin, ctx);
+  return sendTo(gateKey("sharepoint", origin), await guarded(findTab(), ctx), findTab, url, "GET", {}, null, ctx, true);
 }
 
 // "<accountKey of chatsvc>\n<transcript URL>" -> parsed transcript; a finished transcript doesn't
