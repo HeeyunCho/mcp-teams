@@ -6,7 +6,7 @@ Every change starts with a failing test. The fix makes it pass; a refactor keeps
 
 | Folder | What it checks | Runs against | Command |
 |---|---|---|---|
-| `test/unit/` | Pure functions: Teams parsers and request helpers (`extension/teams.js`), client registration (`src/clients.ts`) | Nothing external | `npm run test:unit` |
+| `test/unit/` | Pure functions: Teams parsers and request helpers (`extension/teams.js`), client registration (`src/clients.ts`), the version bump (`scripts/bump-version.mjs`, on a temporary copy of the version files) | Nothing external | `npm run test:unit` |
 | `test/integration/` | The extension's service worker (`extension/background.js`), the bridge (`src/bridge.ts`), pairing and the extension folder | A fake `chrome` (`test/helpers/fakeChrome.ts`); real sockets with hubs, peers and a fake extension (`test/helpers/bridgeHarness.ts`) | `npm run test:integration` |
 | `test/system/` | The built server (`dist/`) over stdio, as an MCP client sees it | A fake extension on the bridge | `npm run test:system` |
 
