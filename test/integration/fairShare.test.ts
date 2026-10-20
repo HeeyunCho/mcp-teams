@@ -243,7 +243,7 @@ describe("throttled calls and turns", () => {
       busy
         ? reply(429, { message: "Too many requests" }, { headers: { "retry-after": "3" } })
         : { teams: [], chats: [{ id: "19:contoso-launch@thread.v2", title: "Contoso launch", chatType: "chat", members: [] }] };
-    const substrate = () => ({ Groups: [{ Suggestions: [{ DisplayName: "Alex Doe", EmailAddresses: ["alex.doe@contoso.com"] }] }] });
+    const substrate = () => ({ Groups: [{ Suggestions: [{ DisplayName: "Alex Doe", EmailAddresses: ["alex.doe@contoso.example"] }] }] });
     const fake = createFakeChrome({ services: { csa, substrate }, local: { token: TOKEN, port: h.port } });
     const worker = await loadWorker(fake);
     worker.registerListeners();
@@ -266,4 +266,43 @@ describe("throttled calls and turns", () => {
     busy = false;
     for (const r of await Promise.all(reads)) expect(r).toMatchObject({ teams: [] });
   }, 15_000);
+
+  it("35: a call that got its turn back checks the gate again: it doesn't send while another call's 429 has shut it", async () => {
+    h = await bridgeHarness({ ...FAST, maxConcurrentCalls: 2 });
+    const hub = await h.session(); // session A
+    // csa throttles the first read for 1 s and the second for 2 s, then answers.
+    const csaAt: number[] = [];
+    const csa = () => {
+      csaAt.push(Date.now());
+      if (csaAt.length > 2) return { teams: [], chats: [] };
+      const s = String(csaAt.length);
+      return reply(429, { message: "Too many requests" }, { headers: { "retry-after": s } });
+    };
+    // People search (not throttled) answers when the test lets it go, so B holds its turns.
+    const held: (() => void)[] = [];
+    const substrate = () =>
+      new Promise((r) => held.push(() => r({ Groups: [{ Suggestions: [{ DisplayName: "Alex Doe", EmailAddresses: ["alex.doe@contoso.example"] }] }] })));
+    const fake = createFakeChrome({ services: { csa, substrate }, local: { token: TOKEN, port: h.port } });
+    const worker = await loadWorker(fake);
+    worker.registerListeners();
+    link = await connectWorker(fake, () => hub.connected);
+    const b = await h.session();
+    const c = await h.session();
+    await until(() => b.connected && c.connected, 3_000, "both peers see the extension");
+
+    const x = hub.call("listTeams", {}, 30_000); // 429 for 1 s: X waits at the gate, its turn given back
+    x.catch(() => {}); // settled below
+    await until(() => csaAt.length === 1, 3_000, "A's read is throttled");
+    await sleep(200);
+    const bs = [b.call("findPeople", { query: "Alex" }, 30_000), b.call("findPeople", { query: "Alex" }, 30_000)];
+    await until(() => held.length === 2, 3_000, "B's two calls hold both turns");
+    const z = c.call("listTeams", {}, 30_000); // C's read waits for a turn, ahead of X's rejoin
+    z.catch(() => {});
+    await sleep(1_300); // X's gate is open again: X waits for its turn back, behind C
+    held.shift()!(); // C's read takes the freed turn, gets a 429 for 2 s and gives its turn back to X
+    await until(() => csaAt.length >= 3, 5_000, "A's read goes to csa again");
+    held.shift()!();
+    await Promise.allSettled([x, z, ...bs]);
+    expect(csaAt[2], "A's read went to csa while C's 429 had shut the gate").toBeGreaterThanOrEqual(csaAt[1] + 2_000);
+  }, 20_000);
 });
