@@ -1176,10 +1176,17 @@ async function createChat({ members, title }, account = null) {
       ...(title ? { topic: title } : {}),
     },
   };
-  const { json, location } = await api("chatsvc", "/v1/threads", { method: "POST", body, withLocation: true, onCapture: asConfirmed(account) });
+  let answer;
+  try {
+    answer = await api("chatsvc", "/v1/threads", { method: "POST", body, withLocation: true, onCapture: asConfirmed(account) });
+  } finally {
+    // The chat list changed, or may have: without an answer the chat may exist, and the
+    // list_chats the AI is told to check with must not show the list from before it.
+    dropList();
+  }
+  const { json, location } = answer;
   const id = teams.threadIdFrom(location, json) ?? (oneOnOne ? teams.oneOnOneId(me, members[0]) : null);
   if (!id) throw new Error("Teams created no chat (its answer had no chat id).");
-  dropList(); // the chat list changed
   return id;
 }
 
