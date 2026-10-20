@@ -13,7 +13,7 @@ import { bridgeHarness, TOKEN, until, type BridgeHarness, type FakeExtension } f
 const SEND = { conversation: "19:contoso-launch@thread.v2", text: "Hi Alex" };
 
 let h: BridgeHarness | undefined;
-let old: { close: () => Promise<void> } | undefined;
+let old: { port: number; close: () => Promise<void> } | undefined;
 
 afterEach(async () => {
   await h?.cleanup();
@@ -30,8 +30,8 @@ afterEach(async () => {
  * current ExtensionBridge can't stand in for it: as a hub it refuses the send itself, before
  * the peer's own check is ever reached.
  */
-async function oldHub(port: number) {
-  const wss = new WebSocketServer({ host: "127.0.0.1", port });
+async function oldHub() {
+  const wss = new WebSocketServer({ host: "127.0.0.1", port: 0 });
   await new Promise<void>((r) => wss.once("listening", () => r()));
   const extensions: { ws: WebSocket; info: { version: string; browser?: string; instance?: string } }[] = [];
   const peers = new Set<WebSocket>();
@@ -67,6 +67,7 @@ async function oldHub(port: number) {
     });
   });
   return {
+    port: (wss.address() as { port: number }).port,
     close: () =>
       new Promise<void>((r) => {
         for (const c of wss.clients) c.terminate();
@@ -121,8 +122,8 @@ describe("send_message and an extension that can't close its window", () => {
   });
 
   it("22: behind a hub from before #22, a peer refuses the send while any browser is older than 0.2.13", async () => {
-    h = await bridgeHarness();
-    old = await oldHub(h.port);
+    old = await oldHub();
+    h = await bridgeHarness(undefined, { port: old.port });
     const posts = (req: { method: string }) => (req.method === "requestSend" ? { sent: true } : { ok: true });
     const newer = await h.extension({ version: "0.2.13", instance: "profile-1", handle: posts });
     const older = await h.extension({ version: "0.2.12", instance: "profile-2", handle: posts }); // last: the old hub's pick

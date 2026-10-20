@@ -5,7 +5,6 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import WebSocket from "ws";
-import { freePort } from "../helpers/bridgeHarness.js";
 
 // Runs the built server (dist/) over stdio, with a fake extension on the bridge.
 const VERSION: string = JSON.parse(readFileSync("package.json", "utf8")).version;
@@ -42,8 +41,9 @@ const call = async (name: string, args: Record<string, unknown> = {}) => {
 };
 
 beforeAll(async () => {
-  PORT = await freePort();
-  writeFileSync(join(home, "config.json"), JSON.stringify({ token: "tok", port: PORT }));
+  // Port 0: the server's bridge listens on a free port and keeps it; get_version reports it.
+  // A port picked and freed here could be taken before the server binds it (#23).
+  writeFileSync(join(home, "config.json"), JSON.stringify({ token: "tok", port: 0 }));
   client = new Client({ name: "test", version: "0" });
   await client.connect(
     new StdioClientTransport({
@@ -53,6 +53,8 @@ beforeAll(async () => {
       stderr: "ignore",
     }),
   );
+  PORT = (await call("get_version")).data.port;
+  expect(PORT).toBeGreaterThan(0);
   ext = new WebSocket(`ws://127.0.0.1:${PORT}`, { origin: "chrome-extension://fake" });
   await new Promise<void>((resolve) => {
     ext.on("message", async (raw) => {

@@ -1,8 +1,7 @@
-// Real-socket bridge tests: hubs and peers (ExtensionBridge) on a free local port, and a
-// scripted fake extension that pairs like the real one, records every message it gets and
-// answers requests as told.
+// Real-socket bridge tests: hubs and peers (ExtensionBridge) on the port the first hub got from
+// listen(0), and a scripted fake extension that pairs like the real one, records every message
+// it gets and answers requests as told.
 import { randomUUID } from "node:crypto";
-import { createServer } from "node:net";
 import WebSocket from "ws";
 import { ExtensionBridge, proof, type BridgeOptions } from "../../src/bridge.js";
 import { EXTENSION_ORIGIN } from "../../src/extension.js";
@@ -16,19 +15,6 @@ export const TOKEN = "test-token";
  * a 200 ms pong can queue behind the data and the hub drops the connection.
  */
 export const FAST: BridgeOptions = { retryMs: 700, joinTimeoutMs: 500, stepDownMaxWaitMs: 2_000, keepAliveMs: 200, pickStatusTimeoutMs: 300, authTimeoutMs: 500 };
-
-/** A local port nobody listens on right now (from listen(0)). */
-export function freePort(): Promise<number> {
-  return new Promise((resolve, reject) => {
-    const srv = createServer();
-    srv.unref();
-    srv.on("error", reject);
-    srv.listen(0, "127.0.0.1", () => {
-      const { port } = srv.address() as { port: number };
-      srv.close(() => resolve(port));
-    });
-  });
-}
 
 /** Polls until cond holds (default 3 s). */
 export async function until(cond: () => boolean, timeoutMs = 3_000, what = "condition"): Promise<void> {
@@ -154,25 +140,36 @@ export async function fakeExtension(port: number, opts: FakeExtensionOptions = {
 export type FakeExtension = Awaited<ReturnType<typeof fakeExtension>>;
 
 /**
- * Creates bridges and fake extensions on one free port and closes them all in cleanup().
+ * Creates bridges and fake extensions on one port and closes them all in cleanup(). The first
+ * session listens on port 0 and the rest use the port it got, so no port is ever picked, freed
+ * and bound again (a test file running alongside could take it in between). `port`: a port the
+ * test already holds instead, e.g. its own scripted hub listening on port 0.
  * Call cleanup() from afterEach, so a failing test never leaves a server holding the port.
  */
-export async function bridgeHarness(options: BridgeOptions = FAST) {
-  const port = await freePort();
+export async function bridgeHarness(options: BridgeOptions = FAST, { port: given }: { port?: number } = {}) {
+  let port = given;
+  const held = (): number => {
+    if (port === undefined) throw new Error("the harness has no port until its first session listens");
+    return port;
+  };
   const bridges: ExtensionBridge[] = [];
   const extensions: FakeExtension[] = [];
   return {
-    port,
-    /** A server session's bridge: the first one started becomes the hub, later ones peers. */
+    /** The port, once something holds it: the first session's, or the one given. */
+    get port(): number {
+      return held();
+    },
+    /** A server session's bridge: the first one started becomes the hub (on port 0), later ones peers. */
     async session(version = "1.0.0", extra: BridgeOptions & { token?: string } = {}) {
       const { token = TOKEN, ...rest } = extra;
-      const b = new ExtensionBridge(port, token, version, { ...options, ...rest });
+      const b = new ExtensionBridge(port ?? 0, token, version, { ...options, ...rest });
       bridges.push(b);
       await b.start();
+      port ??= b.port;
       return b;
     },
     async extension(opts: FakeExtensionOptions = {}) {
-      const e = await fakeExtension(port, opts);
+      const e = await fakeExtension(held(), opts);
       extensions.push(e);
       return e;
     },

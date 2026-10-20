@@ -91,7 +91,8 @@ export function registerTools(server: McpServer, bridge: ExtensionBridge, config
         // hub: this session owns the port; peer: it forwards through another session's server.
         role: bridge.role,
         ...(bridge.role === "peer" ? { hubServer: bridge.hubVersion } : {}),
-        port: config.port,
+        // The port the bridge uses (with port 0 configured, the free one it got).
+        port: bridge.port,
         teams,
       });
     }),

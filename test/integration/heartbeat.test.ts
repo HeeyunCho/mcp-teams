@@ -23,10 +23,11 @@ afterEach(async () => {
 /**
  * A hub that pairs with peers like the real one (challenge, proof) and then never pings them and
  * never answers: a hub that froze right after the welcome. `heartbeatMs`: what its welcome declares
- * (undefined: a hub of 0.2.13 or older, which never pings peers).
+ * (undefined: a hub of 0.2.13 or older, which never pings peers). It listens on port 0: pass its
+ * port to bridgeHarness().
  */
-async function frozenHub(port: number, heartbeatMs?: number) {
-  const wss = new WebSocketServer({ host: "127.0.0.1", port });
+async function frozenHub(heartbeatMs?: number) {
+  const wss = new WebSocketServer({ host: "127.0.0.1", port: 0 });
   const connections: { welcomedAt?: number; closedAt?: number; requests: any[] }[] = [];
   wss.on("connection", (ws) => {
     const c: (typeof connections)[number] = { requests: [] };
@@ -44,7 +45,7 @@ async function frozenHub(port: number, heartbeatMs?: number) {
   });
   await new Promise<void>((r) => wss.once("listening", () => r()));
   extra.push(() => new Promise<void>((r) => (wss.clients.forEach((c) => c.terminate()), wss.close(() => r()))));
-  return { connections };
+  return { port: (wss.address() as { port: number }).port, connections };
 }
 
 /** A peer on the real hub, by hand: pairs, records what it gets; pong false: a frozen session. */
@@ -81,8 +82,8 @@ describe("2.3: peer heartbeat", { timeout: 15_000 }, () => {
   });
 
   it("2.3: a peer whose hub froze fails its pending call within 2 heartbeat periods, as a lost call", async () => {
-    h = await bridgeHarness(OPTIONS);
-    const hub = await frozenHub(h.port, PERIOD);
+    const hub = await frozenHub(PERIOD);
+    h = await bridgeHarness(OPTIONS, { port: hub.port });
     const peer = await h.session();
     expect(peer.role).toBe("peer");
     const call = peer.call("listChats", {}, 60_000).then(
@@ -103,8 +104,8 @@ describe("2.3: peer heartbeat", { timeout: 15_000 }, () => {
   });
 
   it("2.3: a peer's watchdog never waits under 2 s, however short the declared period (a busy machine runs timers late)", async () => {
-    h = await bridgeHarness(OPTIONS);
-    const hub = await frozenHub(h.port, 200);
+    const hub = await frozenHub(200);
+    h = await bridgeHarness(OPTIONS, { port: hub.port });
     const peer = await h.session();
     const call = peer.call("listChats", {}, 60_000).then(
       () => null,
@@ -118,8 +119,8 @@ describe("2.3: peer heartbeat", { timeout: 15_000 }, () => {
   });
 
   it("2.3: a peer keeps a hub that declares no heartbeat (0.2.13 and older never ping peers)", async () => {
-    h = await bridgeHarness(OPTIONS);
-    const hub = await frozenHub(h.port);
+    const hub = await frozenHub();
+    h = await bridgeHarness(OPTIONS, { port: hub.port });
     const peer = await h.session();
     expect(peer.role).toBe("peer");
     await new Promise((r) => setTimeout(r, 4 * PERIOD));

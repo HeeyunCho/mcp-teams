@@ -1,13 +1,26 @@
 import { describe, expect, it, afterEach, beforeEach } from "vitest";
 import WebSocket from "ws";
 import { DEFAULT_BRIDGE_OPTIONS, ExtensionBridge } from "../../src/bridge.js";
-import { freePort } from "../helpers/bridgeHarness.js";
 
-// A free port per test, so test files and worktrees can run side by side.
+// Each test's port: 0 until its first bridge listens (the system picks a free port and the
+// bridge keeps it), then that bridge's port. A "free" port picked and closed before a bridge
+// binds it could be taken by a test file or worktree running alongside (#23).
 let PORT: number;
-beforeEach(async () => {
-  PORT = await freePort();
+beforeEach(() => {
+  PORT = 0;
 });
+
+/** A bridge on this test's port; the first one started sets PORT to the port it got. */
+class TestBridge extends ExtensionBridge {
+  constructor(...[token, version, options]: Tail<ConstructorParameters<typeof ExtensionBridge>>) {
+    super(PORT, token, version, options);
+  }
+  override async start(): Promise<void> {
+    await super.start();
+    PORT ||= this.port;
+  }
+}
+type Tail<T extends unknown[]> = T extends [unknown, ...infer R] ? R : never;
 const ORIGIN = "chrome-extension://abcdefghijklmnop";
 
 function connectExt(token: string, origin = ORIGIN, version = "0.1.0") {
@@ -27,7 +40,7 @@ describe("ExtensionBridge", () => {
   afterEach(async () => bridge?.close());
 
   it("accepts a paired extension and routes RPC calls", async () => {
-    bridge = new ExtensionBridge(PORT, "secret", "0.1.0");
+    bridge = new TestBridge("secret", "0.1.0");
     await bridge.start();
     const ws = connectExt("secret");
     ws.on("message", (raw) => {
@@ -43,7 +56,7 @@ describe("ExtensionBridge", () => {
   });
 
   it("propagates extension errors", async () => {
-    bridge = new ExtensionBridge(PORT, "secret", "0.1.0");
+    bridge = new TestBridge("secret", "0.1.0");
     await bridge.start();
     const ws = connectExt("secret");
     ws.on("message", (raw) => {
@@ -56,7 +69,7 @@ describe("ExtensionBridge", () => {
   });
 
   it("1.2: only a send waits out the cancel grace; any other timed-out call fails at its timeout", async () => {
-    bridge = new ExtensionBridge(PORT, "secret", "0.1.0", { cancelGraceMs: 1_500 });
+    bridge = new TestBridge("secret", "0.1.0", { cancelGraceMs: 1_500 });
     await bridge.start();
     const ws = connectExt("secret", ORIGIN, "0.2.13"); // never answers (0.2.13: new enough to be given sends)
     await waitFor(() => bridge!.connected);
@@ -70,7 +83,7 @@ describe("ExtensionBridge", () => {
   });
 
   it("rejects a wrong token", async () => {
-    bridge = new ExtensionBridge(PORT, "secret", "0.1.0");
+    bridge = new TestBridge("secret", "0.1.0");
     await bridge.start();
     const ws = connectExt("wrong");
     const code = await new Promise<number>((r) => ws.on("close", (c) => r(c)));
@@ -79,7 +92,7 @@ describe("ExtensionBridge", () => {
   });
 
   it("rejects connections that are not from a browser extension (e.g. a web page)", async () => {
-    bridge = new ExtensionBridge(PORT, "secret", "0.1.0");
+    bridge = new TestBridge("secret", "0.1.0");
     await bridge.start();
     const ws = connectExt("secret", "https://evil.example");
     const err = await new Promise<Error>((r) => ws.on("error", r));
@@ -87,7 +100,7 @@ describe("ExtensionBridge", () => {
   });
 
   it("an oversized message fails the call instead of crashing, and the extension can reconnect", async () => {
-    bridge = new ExtensionBridge(PORT, "secret", "0.1.0", 1024);
+    bridge = new TestBridge("secret", "0.1.0", 1024);
     await bridge.start();
     const reply = (ws: WebSocket, size: number) =>
       ws.on("message", (raw) => {
@@ -109,7 +122,7 @@ describe("ExtensionBridge", () => {
   });
 
   it("reloads the extension and waits until the new version is connected", async () => {
-    bridge = new ExtensionBridge(PORT, "secret", "0.2.0");
+    bridge = new TestBridge("secret", "0.2.0");
     await bridge.start();
     const ext = (version: string) => {
       const ws = new WebSocket(`ws://127.0.0.1:${PORT}`, { origin: ORIGIN });
@@ -132,7 +145,7 @@ describe("ExtensionBridge", () => {
   });
 
   it("fails calls clearly when no extension is connected", async () => {
-    bridge = new ExtensionBridge(PORT, "secret", "0.1.0");
+    bridge = new TestBridge("secret", "0.1.0");
     await bridge.start();
     await expect(bridge.call("x")).rejects.toThrow(/not connected/);
   });
@@ -142,7 +155,7 @@ describe("ExtensionBridge with several sessions", () => {
   const bridges: ExtensionBridge[] = [];
   const sockets: WebSocket[] = [];
   const make = async (token = "secret", version = "0.1.0") => {
-    const b = new ExtensionBridge(PORT, token, version);
+    const b = new TestBridge(token, version);
     bridges.push(b);
     await b.start();
     return b;
