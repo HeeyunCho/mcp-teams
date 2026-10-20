@@ -1,7 +1,6 @@
 # Bumps the version on every change merged into main, commits and tags it, then
 # publishes that version to npm. The bump level comes from the pushed commit messages
-# (rules in scripts/bump-version.mjs; below 1.0.0, feat: bumps the patch and a breaking
-# change the minor). Publishing uses npm trusted publishing (OIDC): npm
+# (see scripts/bump-version.mjs). Publishing uses npm trusted publishing (OIDC): npm
 # trusts this workflow file of this repository, so there is no npm token and every
 # release carries provenance. Publishing happens here, not in a workflow on the tag,
 # because pushes made with GITHUB_TOKEN don't start other workflows.

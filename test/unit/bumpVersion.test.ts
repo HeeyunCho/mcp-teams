@@ -8,7 +8,7 @@ import { nextVersion } from "../../scripts/bump-version.mjs";
 
 /** Runs the script on a copy of the repository's version files in a temporary folder. */
 function runCli(version: string, args: string[], stdin = "") {
-  const root = mkdtempSync(join(tmpdir(), "bump-version-"));
+  const root = mkdtempSync(join(tmpdir(), "mcp-teams-bump-"));
   try {
     mkdirSync(join(root, "scripts"));
     mkdirSync(join(root, "extension"));
