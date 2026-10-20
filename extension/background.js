@@ -310,6 +310,8 @@ async function passGate(key, ctx, wait) {
     if (gaveBack && !ctx.cancelled) await guarded(ctx.turn.takeAgain(), ctx);
   }
   ctx?.check();
+  // The gate may have shut again while it waited for its turn back.
+  if (gaveBack && gatedFor(key) > 0) return passGate(key, ctx, wait);
 }
 
 /**
