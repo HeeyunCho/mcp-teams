@@ -69,7 +69,7 @@ function heldScans() {
 async function oneTurn(handle: (req: Request) => unknown) {
   h = await bridgeHarness({ ...FAST, maxConcurrentCalls: 1 });
   const hub = await h.session();
-  const ext = await h.extension({ handle });
+  const ext = await h.extension({ handle, version: "0.2.13" }); // sends need 0.2.13 or newer
   const peer = await h.session();
   await until(() => hub.connected && peer.connected, 3_000, "both sessions see the extension");
   return { hub, peer, ext };

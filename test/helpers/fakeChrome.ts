@@ -3,11 +3,15 @@
 // through chrome.scripting.executeScript(pageFetch). Here pageFetch runs from its source, as
 // Chrome runs it, with a fetch that goes to scripted fake services (chatsvc, csa, mt,
 // substrate, and SharePoint for transcripts), and the test sees each request.
+import { readFileSync } from "node:fs";
 import { expect, vi } from "vitest";
 import WsWebSocket from "ws";
 
 export type Service = "chatsvc" | "csa" | "mt" | "substrate" | "sharepoint";
 export const TEAMS_SERVICES = ["chatsvc", "csa", "mt", "substrate"] as const;
+
+/** The worker reports its manifest's version, as in the browser (sends need 0.2.13 or newer). */
+export const EXTENSION_VERSION: string = JSON.parse(readFileSync(new URL("../../extension/manifest.json", import.meta.url), "utf8")).version;
 
 /** What a fake service answers: a JSON body (HTTP 200) or reply(status, ...), maybe later. */
 export interface Reply {
@@ -212,7 +216,7 @@ export function createFakeChrome({ services = {}, captured = [...TEAMS_SERVICES]
   const chrome = {
     runtime: {
       id: "fake-extension-id",
-      getManifest: () => ({ version: "0.0.0-test" }),
+      getManifest: () => ({ version: EXTENSION_VERSION }),
       getURL: (p: string) => `chrome-extension://fake-extension-id/${p}`,
       reload: spies.runtimeReload,
       onMessage: runtimeMessage,

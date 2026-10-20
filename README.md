@@ -57,6 +57,8 @@ The AI can only **request** a send. The extension then opens its own window show
 
 If the AI stops waiting (it cancels, times out or loses its connection) while the window is open, the window closes and nothing is posted. If you had already clicked *Send* but no answer came back, the AI is told the message may have been posted and to check the chat before sending again, so it doesn't post twice.
 
+Extensions older than 0.2.13 can't close that window, so a send that would open it in one is refused: `send_message` says nothing was sent and asks to update the extension. With several browsers, a send goes through when the browser picked for it is 0.2.13 or newer. If the bridge is held by another AI session still on mcp-teams 0.2.16 or older, that server doesn't check the browser it picks, so this session's sends are refused unless every connected browser is 0.2.13 or newer. The server keeps the installed folder up to date, so `reload_extension` (or reloading it on the Extensions page) is usually enough; run `npx mcp-teams setup` if it was loaded from another folder.
+
 ### When Teams is busy
 
 When Teams asks to slow down (HTTP 429), mcp-teams sends nothing more to that service, for that region or account, until Teams' wait is over. A call waits that out if it has time; otherwise it fails with "Teams is busy (throttled) for N s". A list that came back without some people's names says so in a `note`, instead of leaving them out silently.
