@@ -16,7 +16,11 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { describe, expect, it } from "vitest";
 // @ts-expect-error plain JS script without types
-import { levelFor, nextVersion, VERSION_FILE_NAMES, VERSION_SAMPLES, writeAll } from "../../scripts/bump-version.mjs";
+import * as bump from "../../scripts/bump-version.mjs";
+
+const { levelFor, nextVersion, writeAll } = bump;
+const VERSION_FILE_NAMES: readonly string[] = bump.VERSION_FILE_NAMES;
+const VERSION_SAMPLES: Readonly<Record<string, (version: string) => string>> = bump.VERSION_SAMPLES;
 
 describe("bump-version VERSION_FILE_NAMES", () => {
   it("puts package.json, which holds the current version, first", () => {
@@ -35,10 +39,11 @@ describe("bump-version VERSION_FILE_NAMES", () => {
 describe("bump-version VERSION_SAMPLES", () => {
   it("has a sample for each version file, in table order", () => {
     expect(Object.keys(VERSION_SAMPLES)).toEqual(VERSION_FILE_NAMES);
+    for (const f of VERSION_FILE_NAMES) expect(typeof VERSION_SAMPLES[f], `${f} has no sample in VERSION_FILES`).toBe("function");
   });
 
   it("gives JSON that holds the version", () => {
-    for (const f of VERSION_FILE_NAMES as string[]) {
+    for (const f of VERSION_FILE_NAMES) {
       const text = VERSION_SAMPLES[f]("1.2.3");
       expect(() => JSON.parse(text), f).not.toThrow();
       expect(text, f).toContain('"1.2.3"');
@@ -47,7 +52,7 @@ describe("bump-version VERSION_SAMPLES", () => {
 
   // A sample missing a field its entry's update must replace makes the bump throw ("has fewer than N
   // fields"); one holding the old version in a field the update skips doesn't match the new sample.
-  it.each(VERSION_FILE_NAMES as string[])("%s sample round-trips through a real bump to the new version", (f) => {
+  it.each(VERSION_FILE_NAMES)("%s sample round-trips through a real bump to the new version", (f) => {
     const r = runCli("0.2.16", ["patch"]);
     expect(r.out).toBe("0.2.17");
     expect(r.texts[f]).toBe(VERSION_SAMPLES[f]("0.2.17"));
@@ -61,11 +66,11 @@ describe("bump-version VERSION_SAMPLES", () => {
 // failure-count cases (which count writes and renames for three files).
 
 /** The folders holding version files, relative to the root ("." for the root itself). */
-const VERSION_DIRS = [...new Set(VERSION_FILE_NAMES.map((f: string) => dirname(f)))] as string[];
+const VERSION_DIRS = [...new Set(VERSION_FILE_NAMES.map((f) => dirname(f)))];
 
 /** Each version file's fixture text at `version`: its table entry's sample. */
 function fixtures(version: string): Record<string, string> {
-  return Object.fromEntries(VERSION_FILE_NAMES.map((f: string) => [f, VERSION_SAMPLES[f](version)]));
+  return Object.fromEntries(VERSION_FILE_NAMES.map((f) => [f, VERSION_SAMPLES[f](version)]));
 }
 
 type FileOverrides = Partial<Record<string, string | null>>;
@@ -77,7 +82,7 @@ function makeRoot(version: string, files: FileOverrides = {}) {
   for (const d of VERSION_DIRS) mkdirSync(join(root, d), { recursive: true });
   copyFileSync("scripts/bump-version.mjs", join(root, "scripts", "bump-version.mjs"));
   const contents: Record<string, string | null | undefined> = { ...fixtures(version), ...files };
-  for (const f of VERSION_FILE_NAMES as string[]) {
+  for (const f of VERSION_FILE_NAMES) {
     const text = contents[f];
     if (text != null) writeFileSync(join(root, f), text);
   }
@@ -94,7 +99,7 @@ function runCli(version: string, args: string[], stdin = "", files: FileOverride
     const out = runScript(root, args, stdin);
     const read = (f: string) => JSON.parse(readFileSync(join(root, f), "utf8"));
     const texts: Record<string, string> = Object.fromEntries(
-      VERSION_FILE_NAMES.map((f: string) => [f, readFileSync(join(root, f), "utf8")]),
+      VERSION_FILE_NAMES.map((f) => [f, readFileSync(join(root, f), "utf8")]),
     );
     return { out, texts, pkg: read("package.json"), lock: read("package-lock.json"), manifest: read("extension/manifest.json") };
   } finally {
@@ -114,7 +119,7 @@ function runCliBroken(file: string, content: string | null, version = "0.2.16") 
     if (!existsSync(path)) return null;
     return statSync(path).isDirectory() ? "<dir>" : readFileSync(path).toString("hex");
   };
-  const snapshot = () => Object.fromEntries(VERSION_FILE_NAMES.map((f: string) => [f, bytes(f)]));
+  const snapshot = () => Object.fromEntries(VERSION_FILE_NAMES.map((f) => [f, bytes(f)]));
   try {
     const before = snapshot();
     let error: (Error & { stderr?: string }) | undefined;
@@ -204,9 +209,9 @@ describe("bump-version writeAll", () => {
   function setup() {
     const root = makeRoot("0.2.16");
     const read = (f: string) => readFileSync(join(root, f), "utf8");
-    const writes = VERSION_FILE_NAMES.map((file: string) => ({ file, text: read(file).replaceAll("0.2.16", "0.2.17"), original: read(file) }));
+    const writes = VERSION_FILE_NAMES.map((file) => ({ file, text: read(file).replaceAll("0.2.16", "0.2.17"), original: read(file) }));
     const bytes = (f: string) => readFileSync(join(root, f)).toString("hex");
-    const snapshot = () => Object.fromEntries(VERSION_FILE_NAMES.map((f: string) => [f, bytes(f)]));
+    const snapshot = () => Object.fromEntries(VERSION_FILE_NAMES.map((f) => [f, bytes(f)]));
     const leftovers = () => VERSION_DIRS.flatMap((d) => readdirSync(join(root, d))).filter((n) => n.endsWith(".tmp"));
     return { root, read, writes, bytes, snapshot, leftovers };
   }
