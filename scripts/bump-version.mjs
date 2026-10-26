@@ -146,12 +146,22 @@ export function writeAll(root, writes, fs = { chmodSync, renameSync, rmSync, sta
   }
 }
 
+/** The version files, each with how its new text is made from the old. package.json must stay first (see main). */
+const VERSION_FILES = [
+  { file: "package.json", update: setVersion },
+  { file: "package-lock.json", update: (file, text, next) => setVersion(file, text, next, 2) }, // root + packages[""]
+  // A bump is always plain MAJOR.MINOR.PATCH, as Chrome's "version" needs; a prerelease label can only
+  // be in "version_name", so one left from a hand-set prerelease is set to the release too.
+  {
+    file: "extension/manifest.json",
+    update: (file, text, next) => setVersion(file, setVersion(file, text, next), next, 1, "version_name", true),
+  },
+];
+
 async function main() {
   const level = process.argv[2];
-  const pkg = readJson("package.json");
-  const lock = readJson("package-lock.json");
-  const manifest = readJson("extension/manifest.json");
-  const current = pkg.json.version;
+  const files = VERSION_FILES.map((f) => ({ ...f, ...readJson(f.file) }));
+  const current = files[0].json.version; // package.json, the first entry, holds the current version
   let next;
   if (["patch", "minor", "major"].includes(level)) {
     next = increment(current, level);
@@ -160,18 +170,7 @@ async function main() {
     for await (const chunk of process.stdin) input += chunk;
     next = nextVersion(current, input.split("\0").filter((m) => m.trim()));
   }
-  const writes = [
-    { file: "package.json", text: setVersion("package.json", pkg.text, next), original: pkg.text },
-    { file: "package-lock.json", text: setVersion("package-lock.json", lock.text, next, 2), original: lock.text }, // root + packages[""]
-    // A bump is always plain MAJOR.MINOR.PATCH, as Chrome's "version" needs; a prerelease label can only
-    // be in "version_name", so one left from a hand-set prerelease is set to the release too.
-    {
-      file: "extension/manifest.json",
-      text: setVersion("extension/manifest.json", setVersion("extension/manifest.json", manifest.text, next), next, 1, "version_name", true),
-      original: manifest.text,
-    },
-  ];
-  writeAll(ROOT, writes);
+  writeAll(ROOT, files.map(({ file, text, update }) => ({ file, text: update(file, text, next), original: text })));
   console.log(next);
 }
 
