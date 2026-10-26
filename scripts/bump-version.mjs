@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 // Bumps the version in package.json, package-lock.json and extension/manifest.json together. All three
-// are read and parsed first; if any is missing or not valid JSON, none is written.
+// are read and checked first; if any is missing, not valid JSON or lacks the "version" fields to
+// update, none is written.
 //
 //   node scripts/bump-version.mjs patch|minor|major     explicit bump
 //   git log --format=%B%x00 A..B | node scripts/bump-version.mjs
@@ -87,10 +88,13 @@ export const nextVersion = (version, messages) => increment(version, levelFor(ve
 /**
  * Replaces the first `count` `field` fields in a file's text, keeping its formatting. The value
  * pattern takes any string, so a prerelease or build-metadata version in the file is replaced too.
+ * Throws, naming the file, if it has fewer than `count` such fields, unless the field is `optional`.
  */
-function setVersion(text, version, count = 1, field = "version") {
+function setVersion(file, text, version, count = 1, field = "version", optional = false) {
   let left = count;
-  return text.replace(new RegExp(`"${field}":\\s*"[^"]*"`, "g"), (m) => (left-- > 0 ? `"${field}": "${version}"` : m));
+  const out = text.replace(new RegExp(`"${field}":\\s*"[^"]*"`, "g"), (m) => (left-- > 0 ? `"${field}": "${version}"` : m));
+  if (left > 0 && !optional) throw new Error(`${file} has fewer than ${count} "${field}" field(s) to update.`);
+  return out;
 }
 
 /** Reads a version file and checks it is JSON, throwing an error that names the file. */
@@ -110,7 +114,6 @@ function readJson(file) {
 
 async function main() {
   const level = process.argv[2];
-  // Read and check all three files before writing any, so a missing or broken one leaves them all as they were.
   const pkg = readJson("package.json");
   const lock = readJson("package-lock.json");
   const manifest = readJson("extension/manifest.json");
@@ -124,11 +127,14 @@ async function main() {
     next = nextVersion(current, input.split("\0").filter((m) => m.trim()));
   }
   const writes = [
-    ["package.json", setVersion(pkg.text, next)],
-    ["package-lock.json", setVersion(lock.text, next, 2)], // root + packages[""]
+    ["package.json", setVersion("package.json", pkg.text, next)],
+    ["package-lock.json", setVersion("package-lock.json", lock.text, next, 2)], // root + packages[""]
     // A bump is always plain MAJOR.MINOR.PATCH, as Chrome's "version" needs; a prerelease label can only
     // be in "version_name", so one left from a hand-set prerelease is set to the release too.
-    ["extension/manifest.json", setVersion(setVersion(manifest.text, next), next, 1, "version_name")],
+    [
+      "extension/manifest.json",
+      setVersion("extension/manifest.json", setVersion("extension/manifest.json", manifest.text, next), next, 1, "version_name", true),
+    ],
   ];
   for (const [file, text] of writes) writeFileSync(join(ROOT, file), text);
   console.log(next);

@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -43,11 +43,19 @@ function runCli(version: string, args: string[], stdin = "", manifest: Record<st
   }
 }
 
-/** Runs `patch` with one version file left out or replaced; returns the error and every file's bytes before and after. */
-function runCliBroken(file: VersionFile, content: string | null) {
-  const root = makeRoot("0.2.16", { version: "0.2.16" }, { [file]: content });
-  const snapshot = () =>
-    Object.fromEntries(VERSION_FILES.map((f) => [f, existsSync(join(root, f)) ? readFileSync(join(root, f)).toString("hex") : null]));
+/**
+ * Runs `patch` with one version file left out (`null`), replaced, or made a directory (`"<dir>"`), from `version`;
+ * returns the error and every file's bytes before and after.
+ */
+function runCliBroken(file: VersionFile, content: string | null, version = "0.2.16") {
+  const root = makeRoot(version, { version }, { [file]: content === "<dir>" ? null : content });
+  if (content === "<dir>") mkdirSync(join(root, file));
+  const bytes = (f: string) => {
+    const path = join(root, f);
+    if (!existsSync(path)) return null;
+    return statSync(path).isDirectory() ? "<dir>" : readFileSync(path).toString("hex");
+  };
+  const snapshot = () => Object.fromEntries(VERSION_FILES.map((f) => [f, bytes(f)]));
   try {
     const before = snapshot();
     let error: (Error & { stderr?: string }) | undefined;
@@ -66,14 +74,28 @@ describe("bump-version CLI with a missing or broken version file", () => {
   it.each([
     ["package-lock.json", null, /package-lock\.json/],
     ["extension/manifest.json", null, /manifest\.json/],
+    ["package-lock.json", "<dir>", /package-lock\.json/],
+    ["extension/manifest.json", "<dir>", /manifest\.json/],
     ["package-lock.json", "{ not json", /package-lock\.json/],
     ["extension/manifest.json", "{ not json", /manifest\.json/],
     ["package.json", "{ not json", /package\.json/],
+    ["package-lock.json", JSON.stringify({ name: "x", packages: {} }, null, 2), /package-lock\.json/],
+    ["package-lock.json", JSON.stringify({ name: "x", version: "0.2.16", packages: {} }, null, 2), /package-lock\.json/],
+    ["extension/manifest.json", JSON.stringify({ name: "x" }, null, 2), /manifest\.json/],
   ] as const)("fails on %s = %j, naming the file, and leaves every file untouched", (file, content, message) => {
     const r = runCliBroken(file, content);
     expect(r.error).toBeDefined();
     expect(r.error?.stderr).toMatch(message);
     expect(r.after).toEqual(r.before);
+  });
+
+  it("leaves every file untouched when the new version can't be computed", () => {
+    const tooBig = runCliBroken("package.json", JSON.stringify({ name: "x", version: "1.2.65535" }, null, 2), "1.2.65535");
+    expect(tooBig.error?.stderr).toMatch(/65535/);
+    expect(tooBig.after).toEqual(tooBig.before);
+    const invalid = runCliBroken("package.json", JSON.stringify({ name: "x", version: "1.2" }, null, 2));
+    expect(invalid.error?.stderr).toMatch(/invalid version "1\.2"/i);
+    expect(invalid.after).toEqual(invalid.before);
   });
 });
 
