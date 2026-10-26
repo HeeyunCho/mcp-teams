@@ -13,19 +13,28 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { describe, expect, it } from "vitest";
 // @ts-expect-error plain JS script without types
-import { levelFor, nextVersion, writeAll } from "../../scripts/bump-version.mjs";
+import { levelFor, nextVersion, VERSION_FILE_NAMES, writeAll } from "../../scripts/bump-version.mjs";
 
-const VERSION_FILES = ["package.json", "package-lock.json", "extension/manifest.json"] as const;
-type VersionFile = (typeof VERSION_FILES)[number];
+describe("bump-version VERSION_FILE_NAMES", () => {
+  it("lists the version files in order, package.json (which holds the current version) first", () => {
+    expect(VERSION_FILE_NAMES).toEqual(["package.json", "package-lock.json", "extension/manifest.json"]);
+  });
+});
+
+/** The script's own list, so adding a version file there is the only change these helpers need. */
+const VERSION_FILES: readonly string[] = VERSION_FILE_NAMES;
+type VersionFile = string;
+/** The folders holding version files, relative to the root ("." for the root itself). */
+const VERSION_DIRS = [...new Set(VERSION_FILES.map((f) => dirname(f)))];
 
 /** Copies the script and writes the version files into a new temporary folder; `null` leaves a file out. */
 function makeRoot(version: string, manifest: Record<string, string>, files: Partial<Record<VersionFile, string | null>> = {}) {
   const root = mkdtempSync(join(tmpdir(), "mcp-teams-bump-"));
   mkdirSync(join(root, "scripts"));
-  mkdirSync(join(root, "extension"));
+  for (const d of VERSION_DIRS) mkdirSync(join(root, d), { recursive: true });
   copyFileSync("scripts/bump-version.mjs", join(root, "scripts", "bump-version.mjs"));
   const contents: Record<VersionFile, string | null> = {
     "package.json": JSON.stringify({ name: "x", version }, null, 2),
@@ -135,7 +144,7 @@ describe("bump-version writeAll", () => {
     const writes = VERSION_FILES.map((file) => ({ file, text: read(file).replaceAll("0.2.16", "0.2.17"), original: read(file) }));
     const bytes = (f: string) => readFileSync(join(root, f)).toString("hex");
     const snapshot = () => Object.fromEntries(VERSION_FILES.map((f) => [f, bytes(f)]));
-    const leftovers = () => [...readdirSync(root), ...readdirSync(join(root, "extension"))].filter((n) => n.endsWith(".tmp"));
+    const leftovers = () => VERSION_DIRS.flatMap((d) => readdirSync(join(root, d))).filter((n) => n.endsWith(".tmp"));
     return { root, read, writes, bytes, snapshot, leftovers };
   }
 
