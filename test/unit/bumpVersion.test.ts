@@ -148,29 +148,46 @@ describe("bump-version CLI with a missing or broken version file", () => {
   });
 });
 
-type FsOp = "writeFileSync" | "renameSync" | "rmSync";
+type FsOp = "writeFileSync" | "renameSync" | "rmSync" | "chmodSync";
+
+/** One call to fail; only a writeFileSync can fail `partial`ly. */
+type FsFailure = { op: "writeFileSync"; nth: number; partial?: true } | { op: Exclude<FsOp, "writeFileSync">; nth: number };
 
 /**
  * Real fs whose listed calls (e.g. the 2nd renameSync) throw instead of running. A writeFileSync marked
  * `partial` writes the first half of its data before throwing, as a full disk or an interruption can.
  */
-function failingFs(...fails: { op: FsOp; nth: number; partial?: true }[]) {
-  const real = { writeFileSync, renameSync, rmSync };
-  const calls = { writeFileSync: 0, renameSync: 0, rmSync: 0 };
+function failingFs(...fails: FsFailure[]) {
+  const real = { writeFileSync, renameSync, rmSync, chmodSync };
+  const calls = { writeFileSync: 0, renameSync: 0, rmSync: 0, chmodSync: 0 };
   const wrap =
     (op: FsOp) =>
     (...args: unknown[]) => {
       const n = ++calls[op];
       const fail = fails.find((f) => f.op === op && f.nth === n);
-      if (fail?.partial) {
+      if (fail?.op === "writeFileSync" && fail.partial) {
         const [path, data] = args as [string, string];
         writeFileSync(path, data.slice(0, Math.floor(data.length / 2)));
       }
       if (fail) throw new Error(`injected ${op} failure #${n}`);
       return (real[op] as (...a: unknown[]) => unknown)(...args);
     };
-  return { statSync, chmodSync, writeFileSync: wrap("writeFileSync"), renameSync: wrap("renameSync"), rmSync: wrap("rmSync") };
+  return {
+    statSync,
+    chmodSync: wrap("chmodSync"),
+    writeFileSync: wrap("writeFileSync"),
+    renameSync: wrap("renameSync"),
+    rmSync: wrap("rmSync"),
+  };
 }
+
+describe("bump-version failingFs test helper", () => {
+  it("takes a partial failure only on writeFileSync", () => {
+    expect(() => failingFs({ op: "writeFileSync", nth: 1, partial: true })).not.toThrow();
+    // @ts-expect-error a partial write only makes sense for writeFileSync
+    expect(() => failingFs({ op: "renameSync", nth: 1, partial: true })).not.toThrow();
+  });
+});
 
 describe("bump-version writeAll", () => {
   /** A temp root with the three version files, and the writes a bump to 0.2.17 would make. */
@@ -289,6 +306,20 @@ describe("bump-version writeAll", () => {
     try {
       // Renames 1-2: package.json is replaced, then package-lock.json fails; rename 3, the rollback of package.json, fails.
       const e = thrown(() => writeAll(root, writes, failingFs({ op: "renameSync", nth: 2 }, { op: "renameSync", nth: 3 })));
+      expect(e.message).toMatch(/could not restore package\.json/);
+      expect(e.cause?.message).toBe("injected renameSync failure #2");
+      expect(read("package.json")).toBe(writes[0].text);
+      expect(leftovers()).toEqual([]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps a target whole when its rollback chmod fails", () => {
+    const { root, writes, read, leftovers } = setup();
+    try {
+      // Chmods 1-3 are the forward temps; the 2nd rename fails; chmod 4, on the rollback temp of package.json, fails.
+      const e = thrown(() => writeAll(root, writes, failingFs({ op: "renameSync", nth: 2 }, { op: "chmodSync", nth: 4 })));
       expect(e.message).toMatch(/could not restore package\.json/);
       expect(e.cause?.message).toBe("injected renameSync failure #2");
       expect(read("package.json")).toBe(writes[0].text);

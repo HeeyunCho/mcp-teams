@@ -141,12 +141,13 @@ export function writeAll(root, writes, fs = { chmodSync, renameSync, rmSync, sta
         left.push(what);
       }
     };
-    writes.slice(0, renamed).forEach(({ file, original }, i) =>
+    for (let i = 0; i < renamed; i++) {
+      const { file, original } = writes[i];
       attempt(`could not restore ${file}`, () => {
         stage(file, temps[i], original);
         fs.renameSync(temps[i], join(root, file));
-      }),
-    );
+      });
+    }
     for (const temp of temps) attempt(`could not remove ${temp}`, () => fs.rmSync(temp, { force: true }));
     if (left.length) throw new Error(`${e.message}; then ${left.join("; ")}`, { cause: e });
     throw e;
