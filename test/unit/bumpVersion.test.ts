@@ -62,8 +62,10 @@ describe("bump-version VERSION_SAMPLES", () => {
 // The helpers below take the file list and each file's fixture from the script (VERSION_FILE_NAMES and the
 // entries' samples), so a new entry in its table, whatever its shape, gets its fixture, its folder, the
 // round-trip check and the "every file holds the new version" check without a test edit; the writeAll
-// failure cases derive which fs call to fail from the number of files. Still tied to the three current
-// files, on purpose: the broken-file cases and the pkg/lock/manifest assertions.
+// failure cases derive which fs call to fail from the number of files (they assume only that there are at
+// least three, so the 2nd rename is neither first nor last, and that package.json comes first, as the
+// script requires). Still tied to the three current files, on purpose: the broken-file cases and the
+// pkg/lock/manifest assertions.
 
 /** The folders holding version files, relative to the root ("." for the root itself). */
 const VERSION_DIRS = [...new Set(VERSION_FILE_NAMES.map((f) => dirname(f)))];
