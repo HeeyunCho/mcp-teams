@@ -16,7 +16,11 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { describe, expect, it } from "vitest";
 // @ts-expect-error plain JS script without types
-import { levelFor, nextVersion, VERSION_FILE_NAMES, writeAll } from "../../scripts/bump-version.mjs";
+import * as bump from "../../scripts/bump-version.mjs";
+
+const { levelFor, nextVersion, writeAll } = bump;
+const VERSION_FILE_NAMES: readonly string[] = bump.VERSION_FILE_NAMES;
+const VERSION_SAMPLES: Readonly<Record<string, (version: string) => string>> = bump.VERSION_SAMPLES;
 
 describe("bump-version VERSION_FILE_NAMES", () => {
   it("puts package.json, which holds the current version, first", () => {
@@ -32,42 +36,53 @@ describe("bump-version VERSION_FILE_NAMES", () => {
   });
 });
 
-describe("bump-version test fixtures", () => {
-  it("gives a version file without a specific fixture a generic one holding the version", () => {
-    const contents = fixtures([...VERSION_FILE_NAMES, "extra/other.json"], "1.2.3", { version: "1.2.3" });
-    expect(contents["extra/other.json"]).toBe(JSON.stringify({ version: "1.2.3" }, null, 2));
-    expect(JSON.parse(contents["package.json"])).toEqual({ name: "x", version: "1.2.3" });
+describe("bump-version VERSION_SAMPLES", () => {
+  it("has a sample for each version file, in table order", () => {
+    expect(Object.keys(VERSION_SAMPLES)).toEqual(VERSION_FILE_NAMES);
+    for (const f of VERSION_FILE_NAMES) expect(typeof VERSION_SAMPLES[f], `${f} has no sample in VERSION_FILES`).toBe("function");
+  });
+
+  it("gives JSON that holds the version", () => {
+    for (const f of VERSION_FILE_NAMES) {
+      const text = VERSION_SAMPLES[f]("1.2.3");
+      expect(() => JSON.parse(text), f).not.toThrow();
+      expect(text, f).toContain('"1.2.3"');
+    }
+  });
+
+  // A sample missing a field its entry's update must replace makes the bump throw ("has fewer than N
+  // fields"); one holding the old version in a field the update skips doesn't match the new sample.
+  it.each(VERSION_FILE_NAMES)("%s sample round-trips through a real bump to the new version", (f) => {
+    const r = runCli("0.2.16", ["patch"]);
+    expect(r.out).toBe("0.2.17");
+    expect(r.texts[f]).toBe(VERSION_SAMPLES[f]("0.2.17"));
   });
 });
 
-// The helpers below take the file list from the script (VERSION_FILE_NAMES), so a new entry in its table
-// gets a generic fixture, its folder and the "every file holds the new version" check without a test edit.
-// Still tied to the three current files, on purpose: their specific fixtures in `fixtures`, the
-// broken-file cases, the pkg/lock/manifest assertions and the writeAll failure-count cases (which count
-// writes and renames for three files). A new file whose version isn't a top-level "version" field also
-// needs its own fixture there.
+// The helpers below take the file list and each file's fixture from the script (VERSION_FILE_NAMES and the
+// entries' samples), so a new entry in its table, whatever its shape, gets its fixture, its folder, the
+// round-trip check and the "every file holds the new version" check without a test edit. Still tied to the
+// three current files, on purpose: the broken-file cases, the pkg/lock/manifest assertions and the writeAll
+// failure-count cases (which count writes and renames for three files).
 
 /** The folders holding version files, relative to the root ("." for the root itself). */
-const VERSION_DIRS = [...new Set(VERSION_FILE_NAMES.map((f: string) => dirname(f)))] as string[];
+const VERSION_DIRS = [...new Set(VERSION_FILE_NAMES.map((f) => dirname(f)))];
 
-/** Each named file's fixture text at `version`: the three current files have specific ones, any other a generic one. */
-function fixtures(names: readonly string[], version: string, manifest: Record<string, string>): Record<string, string> {
-  const specific: Record<string, string> = {
-    "package.json": JSON.stringify({ name: "x", version }, null, 2),
-    "package-lock.json": JSON.stringify({ name: "x", version, packages: { "": { version }, "node_modules/y": { version: "9.9.9" } } }, null, 2),
-    "extension/manifest.json": JSON.stringify(manifest, null, 2),
-  };
-  return Object.fromEntries(names.map((f) => [f, specific[f] ?? JSON.stringify({ version }, null, 2)]));
+/** Each version file's fixture text at `version`: its table entry's sample. */
+function fixtures(version: string): Record<string, string> {
+  return Object.fromEntries(VERSION_FILE_NAMES.map((f) => [f, VERSION_SAMPLES[f](version)]));
 }
 
-/** Copies the script and writes the version files into a new temporary folder; `null` leaves a file out. */
-function makeRoot(version: string, manifest: Record<string, string>, files: Partial<Record<string, string | null>> = {}) {
+type FileOverrides = Partial<Record<string, string | null>>;
+
+/** Copies the script and writes the version files into a new temporary folder; `files` replaces a fixture, `null` leaves it out. */
+function makeRoot(version: string, files: FileOverrides = {}) {
   const root = mkdtempSync(join(tmpdir(), "mcp-teams-bump-"));
   mkdirSync(join(root, "scripts"));
   for (const d of VERSION_DIRS) mkdirSync(join(root, d), { recursive: true });
   copyFileSync("scripts/bump-version.mjs", join(root, "scripts", "bump-version.mjs"));
-  const contents: Record<string, string | null | undefined> = { ...fixtures(VERSION_FILE_NAMES, version, manifest), ...files };
-  for (const f of VERSION_FILE_NAMES as string[]) {
+  const contents: Record<string, string | null | undefined> = { ...fixtures(version), ...files };
+  for (const f of VERSION_FILE_NAMES) {
     const text = contents[f];
     if (text != null) writeFileSync(join(root, f), text);
   }
@@ -78,13 +93,13 @@ const runScript = (root: string, args: string[], stdin = "") =>
   execFileSync(process.execPath, [join(root, "scripts", "bump-version.mjs"), ...args], { input: stdin, encoding: "utf8", stdio: "pipe" }).trim();
 
 /** Runs the script on a copy of the repository's version files in a temporary folder. */
-function runCli(version: string, args: string[], stdin = "", manifest: Record<string, string> = { version }) {
-  const root = makeRoot(version, manifest);
+function runCli(version: string, args: string[], stdin = "", files: FileOverrides = {}) {
+  const root = makeRoot(version, files);
   try {
     const out = runScript(root, args, stdin);
     const read = (f: string) => JSON.parse(readFileSync(join(root, f), "utf8"));
     const texts: Record<string, string> = Object.fromEntries(
-      VERSION_FILE_NAMES.map((f: string) => [f, readFileSync(join(root, f), "utf8")]),
+      VERSION_FILE_NAMES.map((f) => [f, readFileSync(join(root, f), "utf8")]),
     );
     return { out, texts, pkg: read("package.json"), lock: read("package-lock.json"), manifest: read("extension/manifest.json") };
   } finally {
@@ -97,14 +112,14 @@ function runCli(version: string, args: string[], stdin = "", manifest: Record<st
  * returns the error and every file's bytes before and after.
  */
 function runCliBroken(file: string, content: string | null, version = "0.2.16") {
-  const root = makeRoot(version, { version }, { [file]: content === "<dir>" ? null : content });
+  const root = makeRoot(version, { [file]: content === "<dir>" ? null : content });
   if (content === "<dir>") mkdirSync(join(root, file));
   const bytes = (f: string) => {
     const path = join(root, f);
     if (!existsSync(path)) return null;
     return statSync(path).isDirectory() ? "<dir>" : readFileSync(path).toString("hex");
   };
-  const snapshot = () => Object.fromEntries(VERSION_FILE_NAMES.map((f: string) => [f, bytes(f)]));
+  const snapshot = () => Object.fromEntries(VERSION_FILE_NAMES.map((f) => [f, bytes(f)]));
   try {
     const before = snapshot();
     let error: (Error & { stderr?: string }) | undefined;
@@ -192,11 +207,11 @@ describe("bump-version failingFs test helper", () => {
 describe("bump-version writeAll", () => {
   /** A temp root with the three version files, and the writes a bump to 0.2.17 would make. */
   function setup() {
-    const root = makeRoot("0.2.16", { version: "0.2.16" });
+    const root = makeRoot("0.2.16");
     const read = (f: string) => readFileSync(join(root, f), "utf8");
-    const writes = VERSION_FILE_NAMES.map((file: string) => ({ file, text: read(file).replaceAll("0.2.16", "0.2.17"), original: read(file) }));
+    const writes = VERSION_FILE_NAMES.map((file) => ({ file, text: read(file).replaceAll("0.2.16", "0.2.17"), original: read(file) }));
     const bytes = (f: string) => readFileSync(join(root, f)).toString("hex");
-    const snapshot = () => Object.fromEntries(VERSION_FILE_NAMES.map((f: string) => [f, bytes(f)]));
+    const snapshot = () => Object.fromEntries(VERSION_FILE_NAMES.map((f) => [f, bytes(f)]));
     const leftovers = () => VERSION_DIRS.flatMap((d) => readdirSync(join(root, d))).filter((n) => n.endsWith(".tmp"));
     return { root, read, writes, bytes, snapshot, leftovers };
   }
@@ -364,7 +379,9 @@ describe("bump-version CLI", () => {
 
   it("replaces a prerelease in every file, and a manifest version_name with the released version", () => {
     // Chrome's manifest "version" takes only 1-4 dot-separated integers; a prerelease can only sit in "version_name".
-    const r = runCli("0.3.0-beta.1", [], "fix: y\n\n\0", { version: "0.3.0", version_name: "0.3.0-beta.1" });
+    const r = runCli("0.3.0-beta.1", [], "fix: y\n\n\0", {
+      "extension/manifest.json": JSON.stringify({ version: "0.3.0", version_name: "0.3.0-beta.1" }, null, 2),
+    });
     expect(r.out).toBe("0.3.0");
     expect(r.pkg.version).toBe("0.3.0");
     expect(r.lock.version).toBe("0.3.0");
