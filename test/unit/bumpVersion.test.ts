@@ -61,9 +61,9 @@ describe("bump-version VERSION_SAMPLES", () => {
 
 // The helpers below take the file list and each file's fixture from the script (VERSION_FILE_NAMES and the
 // entries' samples), so a new entry in its table, whatever its shape, gets its fixture, its folder, the
-// round-trip check and the "every file holds the new version" check without a test edit. Still tied to the
-// three current files, on purpose: the broken-file cases, the pkg/lock/manifest assertions and the writeAll
-// failure-count cases (which count writes and renames for three files).
+// round-trip check and the "every file holds the new version" check without a test edit; the writeAll
+// failure cases derive which fs call to fail from the number of files. Still tied to the three current
+// files, on purpose: the broken-file cases and the pkg/lock/manifest assertions.
 
 /** The folders holding version files, relative to the root ("." for the root itself). */
 const VERSION_DIRS = [...new Set(VERSION_FILE_NAMES.map((f) => dirname(f)))];
@@ -204,27 +204,37 @@ describe("bump-version failingFs test helper", () => {
   });
 });
 
-describe("bump-version writeAll", () => {
-  /** A temp root with the three version files, and the writes a bump to 0.2.17 would make. */
-  function setup() {
-    const root = makeRoot("0.2.16");
-    const read = (f: string) => readFileSync(join(root, f), "utf8");
-    const writes = VERSION_FILE_NAMES.map((file) => ({ file, text: read(file).replaceAll("0.2.16", "0.2.17"), original: read(file) }));
-    const bytes = (f: string) => readFileSync(join(root, f)).toString("hex");
-    const snapshot = () => Object.fromEntries(VERSION_FILE_NAMES.map((f) => [f, bytes(f)]));
-    const leftovers = () => VERSION_DIRS.flatMap((d) => readdirSync(join(root, d))).filter((n) => n.endsWith(".tmp"));
-    return { root, read, writes, bytes, snapshot, leftovers };
+/** Runs `fn` and returns what it threw. */
+function thrown(fn: () => void) {
+  try {
+    fn();
+  } catch (e) {
+    return e as Error & { cause?: Error };
   }
+  throw new Error("expected a throw");
+}
 
-  /** Runs `fn` and returns what it threw. */
-  function thrown(fn: () => void) {
-    try {
-      fn();
-    } catch (e) {
-      return e as Error & { cause?: Error };
-    }
-    throw new Error("expected a throw");
+/**
+ * A temp root with the version files in `names`, and the writes a bump to 0.2.17 would make. `extra` gives the
+ * text of a file that isn't in the script's table (a fictional one, to run the cases with more files).
+ */
+function writeAllSetup(names: readonly string[], extra: Record<string, string> = {}) {
+  const root = makeRoot("0.2.16");
+  for (const [f, text] of Object.entries(extra)) {
+    mkdirSync(join(root, dirname(f)), { recursive: true });
+    writeFileSync(join(root, f), text);
   }
+  const read = (f: string) => readFileSync(join(root, f), "utf8");
+  const writes = names.map((file) => ({ file, text: read(file).replaceAll("0.2.16", "0.2.17"), original: read(file) }));
+  const bytes = (f: string) => readFileSync(join(root, f)).toString("hex");
+  const snapshot = () => Object.fromEntries(names.map((f) => [f, bytes(f)]));
+  const dirs = [...new Set(names.map((f) => dirname(f)))];
+  const leftovers = () => dirs.flatMap((d) => readdirSync(join(root, d))).filter((n) => n.endsWith(".tmp"));
+  return { root, read, writes, bytes, snapshot, leftovers };
+}
+
+describe("bump-version writeAll", () => {
+  const setup = () => writeAllSetup(VERSION_FILE_NAMES);
 
   it("writes every file and leaves no temp files", () => {
     const { root, read, writes, leftovers } = setup();
@@ -249,12 +259,36 @@ describe("bump-version writeAll", () => {
     }
   });
 
+  failureCases(VERSION_FILE_NAMES);
+});
+
+describe("bump-version writeAll with a fourth, fictional version file", () => {
+  failureCases([...VERSION_FILE_NAMES, "extra/other.json"], { "extra/other.json": '{ "version": "0.2.16" }\n' });
+});
+
+/** Registers writeAll's failure cases for the version files in `names` (`extra` as in writeAllSetup). */
+function failureCases(names: readonly string[], extra: Record<string, string> = {}) {
+  const setup = () => writeAllSetup(names, extra);
+
+  // Which call of each fs function a step is, for n files (see writeAll): the n forward temp writes, each
+  // followed by its chmod, then the n renames; on failure, each replaced file k (0-based, in order) is
+  // restored by one more write + chmod, then one more rename.
+  const n = names.length;
+  const lastTempWrite = n;
+  const lastRename = n;
+  /** The writeFileSync that stages the restore of replaced file k. */
+  const restoreWrite = (k: number) => n + 1 + k;
+  /** The chmodSync on the restore temp of replaced file k. */
+  const restoreChmod = (k: number) => n + 1 + k;
+  /** The renameSync that restores replaced file k, after rename `failedRename` failed. */
+  const restoreRename = (failedRename: number, k: number) => failedRename + 1 + k;
+
   it.each([
     ["the 1st temp write", { op: "writeFileSync", nth: 1 }],
-    ["the 3rd temp write", { op: "writeFileSync", nth: 3 }],
+    ["the last temp write", { op: "writeFileSync", nth: lastTempWrite }],
     ["the 1st rename", { op: "renameSync", nth: 1 }],
     ["the 2nd rename (rolls back the 1st)", { op: "renameSync", nth: 2 }],
-    ["the 3rd rename (rolls back two)", { op: "renameSync", nth: 3 }],
+    ["the last rename (rolls back all but the last)", { op: "renameSync", nth: lastRename }],
   ] as const)("fails on %s, rethrows and leaves every file untouched with no temp files", (_, fail) => {
     const { root, writes, snapshot, leftovers } = setup();
     try {
@@ -271,13 +305,14 @@ describe("bump-version writeAll", () => {
     const { root, writes, bytes, snapshot, leftovers } = setup();
     try {
       const before = snapshot();
-      // Writes 1-3 make the temps; the 2nd rename fails; write 4 is the rollback temp of package.json.
-      const e = thrown(() => writeAll(root, writes, failingFs({ op: "renameSync", nth: 2 }, { op: "writeFileSync", nth: 4 })));
+      // The 2nd rename fails; the first restore write, the rollback temp of package.json, fails.
+      const e = thrown(() =>
+        writeAll(root, writes, failingFs({ op: "renameSync", nth: 2 }, { op: "writeFileSync", nth: restoreWrite(0) })),
+      );
       expect(e.message).toMatch(/package\.json/);
       expect(e.cause?.message).toBe("injected renameSync failure #2");
       expect(leftovers()).toEqual([]);
-      expect(bytes("package-lock.json")).toBe(before["package-lock.json"]);
-      expect(bytes("extension/manifest.json")).toBe(before["extension/manifest.json"]);
+      for (const f of names.slice(1)) expect(bytes(f), f).toBe(before[f]);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
@@ -287,13 +322,18 @@ describe("bump-version writeAll", () => {
     const { root, writes, bytes, snapshot } = setup();
     try {
       const before = snapshot();
-      // The 3rd rename fails; write 4 (rollback temp of package.json) fails, write 5 and rename 4 (rollback of
-      // package-lock.json) must still run.
-      const e = thrown(() => writeAll(root, writes, failingFs({ op: "renameSync", nth: 3 }, { op: "writeFileSync", nth: 4 })));
+      // The last rename fails; the first restore write (rollback temp of package.json) fails, the restores of
+      // the other replaced files (package-lock.json, ...) must still run.
+      const e = thrown(() =>
+        writeAll(root, writes, failingFs({ op: "renameSync", nth: lastRename }, { op: "writeFileSync", nth: restoreWrite(0) })),
+      );
       expect(e.message).toMatch(/package\.json/);
       expect(e.message).not.toMatch(/package-lock\.json/);
-      expect(e.cause?.message).toBe("injected renameSync failure #3");
-      expect(bytes("package-lock.json")).toBe(before["package-lock.json"]);
+      expect(e.cause?.message).toBe(`injected renameSync failure #${lastRename}`);
+      for (const f of names.slice(1)) {
+        expect(e.message, f).not.toContain(`restore ${f}`);
+        expect(bytes(f), f).toBe(before[f]);
+      }
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
@@ -302,9 +342,9 @@ describe("bump-version writeAll", () => {
   it("keeps a target whole when its rollback write fails partway", () => {
     const { root, writes, read, leftovers } = setup();
     try {
-      // Writes 1-3 make the temps; the 2nd rename fails; write 4, the rollback of package.json, writes half and throws.
+      // The 2nd rename fails; the first restore write, the rollback of package.json, writes half and throws.
       const e = thrown(() =>
-        writeAll(root, writes, failingFs({ op: "renameSync", nth: 2 }, { op: "writeFileSync", nth: 4, partial: true })),
+        writeAll(root, writes, failingFs({ op: "renameSync", nth: 2 }, { op: "writeFileSync", nth: restoreWrite(0), partial: true })),
       );
       expect(e.message).toMatch(/could not restore package\.json/);
       expect(e.cause?.message).toBe("injected renameSync failure #2");
@@ -319,8 +359,11 @@ describe("bump-version writeAll", () => {
   it("keeps a target whole and removes the restore temp when its rollback rename fails", () => {
     const { root, writes, read, leftovers } = setup();
     try {
-      // Renames 1-2: package.json is replaced, then package-lock.json fails; rename 3, the rollback of package.json, fails.
-      const e = thrown(() => writeAll(root, writes, failingFs({ op: "renameSync", nth: 2 }, { op: "renameSync", nth: 3 })));
+      // Renames 1-2: package.json is replaced, then package-lock.json fails; the first restore rename, the
+      // rollback of package.json, fails.
+      const e = thrown(() =>
+        writeAll(root, writes, failingFs({ op: "renameSync", nth: 2 }, { op: "renameSync", nth: restoreRename(2, 0) })),
+      );
       expect(e.message).toMatch(/could not restore package\.json/);
       expect(e.cause?.message).toBe("injected renameSync failure #2");
       expect(read("package.json")).toBe(writes[0].text);
@@ -333,8 +376,10 @@ describe("bump-version writeAll", () => {
   it("keeps a target whole when its rollback chmod fails", () => {
     const { root, writes, read, leftovers } = setup();
     try {
-      // Chmods 1-3 are the forward temps; the 2nd rename fails; chmod 4, on the rollback temp of package.json, fails.
-      const e = thrown(() => writeAll(root, writes, failingFs({ op: "renameSync", nth: 2 }, { op: "chmodSync", nth: 4 })));
+      // The 2nd rename fails; the first restore chmod, on the rollback temp of package.json, fails.
+      const e = thrown(() =>
+        writeAll(root, writes, failingFs({ op: "renameSync", nth: 2 }, { op: "chmodSync", nth: restoreChmod(0) })),
+      );
       expect(e.message).toMatch(/could not restore package\.json/);
       expect(e.cause?.message).toBe("injected renameSync failure #2");
       expect(read("package.json")).toBe(writes[0].text);
@@ -348,9 +393,11 @@ describe("bump-version writeAll", () => {
     const { root, writes, snapshot, leftovers } = setup();
     try {
       const before = snapshot();
-      // The 3rd temp write fails; removing the 1st temp fails, the 2nd must still be removed.
-      const e = thrown(() => writeAll(root, writes, failingFs({ op: "writeFileSync", nth: 3 }, { op: "rmSync", nth: 1 })));
-      expect(e.cause?.message).toBe("injected writeFileSync failure #3");
+      // The last temp write fails; removing the 1st temp fails, the others must still be removed.
+      const e = thrown(() =>
+        writeAll(root, writes, failingFs({ op: "writeFileSync", nth: lastTempWrite }, { op: "rmSync", nth: 1 })),
+      );
+      expect(e.cause?.message).toBe(`injected writeFileSync failure #${lastTempWrite}`);
       expect(e.message).toMatch(/package\.json\.bump-\d+\.tmp/);
       expect(leftovers()).toEqual([`package.json.bump-${process.pid}.tmp`]);
       expect(snapshot()).toEqual(before);
@@ -358,7 +405,7 @@ describe("bump-version writeAll", () => {
       rmSync(root, { recursive: true, force: true });
     }
   });
-});
+}
 
 describe("bump-version CLI", () => {
   it("reads NUL-separated commit messages from stdin, prints the new version and writes all three files", () => {
