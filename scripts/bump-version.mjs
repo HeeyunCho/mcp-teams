@@ -158,6 +158,9 @@ const VERSION_FILES = [
   },
 ];
 
+/** The version files' paths from the root, in table order (package.json first). */
+export const VERSION_FILE_NAMES = VERSION_FILES.map((f) => f.file);
+
 async function main() {
   const level = process.argv[2];
   const files = VERSION_FILES.map((f) => ({ ...f, ...readJson(f.file) }));
