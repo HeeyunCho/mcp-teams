@@ -154,20 +154,35 @@ export function writeAll(root, writes, fs = { chmodSync, renameSync, rmSync, sta
   }
 }
 
-/** The version files, each with how its new text is made from the old. package.json must stay first (see main). */
+/** Pretty-printed JSON, as the version files are written. */
+const json = (value) => JSON.stringify(value, null, 2);
+
+/**
+ * The version files, each with how its new text is made from the old. package.json must stay first (see main).
+ * `sample` is for tests: a minimal file holding `version` in every field `update` must replace.
+ */
 const VERSION_FILES = [
-  { file: "package.json", update: setVersion },
-  { file: "package-lock.json", update: (file, text, next) => setVersion(file, text, next, 2) }, // root + packages[""]
+  { file: "package.json", update: setVersion, sample: (version) => json({ name: "x", version }) },
+  {
+    file: "package-lock.json",
+    update: (file, text, next) => setVersion(file, text, next, 2), // root + packages[""]
+    // Also holds a dependency's version, which the update must leave alone.
+    sample: (version) => json({ name: "x", version, packages: { "": { version }, "node_modules/y": { version: "9.9.9" } } }),
+  },
   // A bump is always plain MAJOR.MINOR.PATCH, as Chrome's "version" needs; a prerelease label can only
   // be in "version_name", so one left from a hand-set prerelease is set to the release too.
   {
     file: "extension/manifest.json",
     update: (file, text, next) => setVersion(file, setVersion(file, text, next), next, 1, "version_name", true),
+    sample: (version) => json({ version }),
   },
 ];
 
 /** The version files' paths from the root, in table order (package.json first). */
 export const VERSION_FILE_NAMES = VERSION_FILES.map((f) => f.file);
+
+/** Each version file's `sample`, keyed by path, in table order. For tests. */
+export const VERSION_SAMPLES = Object.fromEntries(VERSION_FILES.map((f) => [f.file, f.sample]));
 
 async function main() {
   const level = process.argv[2];
