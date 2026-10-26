@@ -28,8 +28,7 @@
 //
 // "Before 1.0.0" means below 1.0.0 in semver order, so every 0.x prerelease and 1.0.0-rc.1 count
 // (feat: on 1.0.0-rc.1 is a patch bump and releases 1.0.0).
-import * as nodeFs from "node:fs";
-import { readFileSync } from "node:fs";
+import { chmodSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -114,19 +113,35 @@ function readJson(file) {
 }
 
 /**
- * Writes `[file, text, original]` entries under `root` all or nothing: each text goes to a temp file next
- * to its target, then the temps are renamed over the targets. If a step fails, targets already replaced
- * get their `original` text back, every temp file is removed and the error is rethrown. `fs` is for tests.
+ * Writes `{ file, text, original }` entries under `root` all or nothing: each text goes to a temp file next
+ * to its target, with the target's mode, then the temps are renamed over the targets. If a step fails,
+ * targets already replaced get their `original` text back, every temp file is removed and the error is
+ * rethrown. If some of that cleanup fails too, it throws an error naming what is left, with the first
+ * error as its `cause`. `fs` is for tests.
  */
-export function writeAll(root, writes, fs = nodeFs) {
-  const temps = writes.map(([file]) => join(root, `${file}.bump-${process.pid}.tmp`));
+export function writeAll(root, writes, fs = { chmodSync, renameSync, rmSync, statSync, writeFileSync }) {
+  const temps = writes.map(({ file }) => join(root, `${file}.bump-${process.pid}.tmp`));
   let renamed = 0;
   try {
-    writes.forEach(([, text], i) => fs.writeFileSync(temps[i], text));
-    for (; renamed < writes.length; renamed++) fs.renameSync(temps[renamed], join(root, writes[renamed][0]));
+    writes.forEach(({ file, text }, i) => {
+      fs.writeFileSync(temps[i], text);
+      fs.chmodSync(temps[i], fs.statSync(join(root, file)).mode & 0o7777);
+    });
+    for (; renamed < writes.length; renamed++) fs.renameSync(temps[renamed], join(root, writes[renamed].file));
   } catch (e) {
-    for (const [file, , original] of writes.slice(0, renamed)) fs.writeFileSync(join(root, file), original);
-    for (const temp of temps) fs.rmSync(temp, { force: true });
+    const left = [];
+    const attempt = (what, step) => {
+      try {
+        step();
+      } catch {
+        left.push(what);
+      }
+    };
+    for (const { file, original } of writes.slice(0, renamed)) {
+      attempt(`could not restore ${file}`, () => fs.writeFileSync(join(root, file), original));
+    }
+    for (const temp of temps) attempt(`could not remove ${temp}`, () => fs.rmSync(temp, { force: true }));
+    if (left.length) throw new Error(`${e.message}; then ${left.join("; ")}`, { cause: e });
     throw e;
   }
 }
@@ -146,15 +161,15 @@ async function main() {
     next = nextVersion(current, input.split("\0").filter((m) => m.trim()));
   }
   const writes = [
-    ["package.json", setVersion("package.json", pkg.text, next), pkg.text],
-    ["package-lock.json", setVersion("package-lock.json", lock.text, next, 2), lock.text], // root + packages[""]
+    { file: "package.json", text: setVersion("package.json", pkg.text, next), original: pkg.text },
+    { file: "package-lock.json", text: setVersion("package-lock.json", lock.text, next, 2), original: lock.text }, // root + packages[""]
     // A bump is always plain MAJOR.MINOR.PATCH, as Chrome's "version" needs; a prerelease label can only
     // be in "version_name", so one left from a hand-set prerelease is set to the release too.
-    [
-      "extension/manifest.json",
-      setVersion("extension/manifest.json", setVersion("extension/manifest.json", manifest.text, next), next, 1, "version_name", true),
-      manifest.text,
-    ],
+    {
+      file: "extension/manifest.json",
+      text: setVersion("extension/manifest.json", setVersion("extension/manifest.json", manifest.text, next), next, 1, "version_name", true),
+      original: manifest.text,
+    },
   ];
   writeAll(ROOT, writes);
   console.log(next);
