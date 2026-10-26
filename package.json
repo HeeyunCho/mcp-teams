@@ -1,6 +1,6 @@
 {
   "name": "mcp-teams",
-  "version": "0.3.6",
+  "version": "0.3.7",
   "description": "MCP server that lets AI assistants work with Microsoft Teams (web) through a Chrome/Edge extension bridge",
   "keywords": ["mcp", "model-context-protocol", "teams", "microsoft-teams", "microsoft-365", "chat", "claude", "chrome-extension"],
   "repository": {
