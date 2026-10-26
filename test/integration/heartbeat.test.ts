@@ -169,10 +169,10 @@ describe("2.3: peer heartbeat", { timeout: 15_000 }, () => {
     const hub = await h.session();
     const peer = await h.session();
     const hubSocket = (peer as any).hub;
-    // As the hub reads the peer's pong, everything stalls past the peer's watchdog (2 periods
-    // after the ping): when it runs, the hub's next ping has not been read yet.
+    // As the hub reads the peer's pong, everything stalls well past the peer's watchdog (due 2
+    // periods after the ping, late from 1 more): when it runs, the hub's next ping is unread.
     const peerSocket = [...(hub as any).peers][0];
-    await new Promise<void>((r) => peerSocket.once("pong", () => (stall(3 * PERIOD), r())));
+    await new Promise<void>((r) => peerSocket.once("pong", () => (stall(3.5 * PERIOD), r())));
     await new Promise((r) => setTimeout(r, 1.5 * PERIOD));
     expect((peer as any).hub === hubSocket, "the peer kept its hub connection").toBe(true);
     expect(peer.role).toBe("peer");
@@ -232,12 +232,13 @@ describe("2.3: peer heartbeat", { timeout: 15_000 }, () => {
       (err: Error) => ({ err, at: Date.now() }),
     );
     void call.then(() => (settled = true));
-    // The hub never pings. Everything stalls past the watchdog (2 periods after the welcome),
-    // then, once the watchdog has run, past the next one, and so on (at most 3 times).
+    // The hub never pings. Everything stalls well past the watchdog (due 2 periods after the
+    // welcome, late from 1 more), then, once it has run, past the next one, and so on (at most
+    // 3 times).
     const stallEnds: number[] = [];
     const stallAgain = () => {
       if (settled || stallEnds.length >= 3) return;
-      stall(3 * PERIOD);
+      stall(3.5 * PERIOD);
       stallEnds.push(Date.now());
       setTimeout(stallAgain, 0); // due after the overdue watchdog, so it runs second
     };

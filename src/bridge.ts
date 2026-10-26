@@ -145,8 +145,9 @@ export const NOT_SENT = Object.freeze({
 const MIN_HUB_SILENCE_MS = 2_000;
 
 /**
- * A liveness check (the hub's ticks, a peer's watchdog) that runs over this many heartbeat
- * periods late finds its process stalled (a busy machine, a long GC or parse, a suspend).
+ * A liveness check (the hub's ticks, a peer's watchdog) that runs later than this fraction of
+ * its own wait after it was due (a tick: one period; the watchdog: its whole wait) finds its
+ * process stalled (a busy machine, a long GC or parse, a suspend).
  * Overdue timers run before the I/O that arrived meanwhile is read, so a verdict taken then
  * would blame the other side for a ping or pong waiting unread: the check skips its verdict.
  * At most once in a row, so on a loop that runs late all the time a frozen peer, extension or
@@ -154,9 +155,9 @@ const MIN_HUB_SILENCE_MS = 2_000;
  */
 const STALL_SLACK = 0.5;
 
-/** Whether a check due at `due`, in a heartbeat of `periodMs`, ran late (see STALL_SLACK). */
-function ranLate(due: number, periodMs: number): boolean {
-  return Date.now() - due > periodMs * STALL_SLACK;
+/** Whether a check that waited `waitMs` and was due at `due` ran late (see STALL_SLACK). */
+function ranLate(due: number, waitMs: number): boolean {
+  return Date.now() - due > waitMs * STALL_SLACK;
 }
 
 /**
@@ -723,7 +724,7 @@ export class ExtensionBridge {
         const due = Date.now() + waitMs;
         watchdog = setTimeout(() => {
           if (this.hub !== ws) return;
-          if (!afterLate && ranLate(due, heartbeatMs)) return watch(true);
+          if (!afterLate && ranLate(due, waitMs)) return watch(true);
           this.rejectAll(LOST_CALL.hubSilent);
           ws.terminate();
         }, waitMs);
