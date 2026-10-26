@@ -166,12 +166,13 @@ describe("2.3: peer heartbeat", { timeout: 15_000 }, () => {
 
   it("2.3: a peer keeps its live hub when the peer stalls past its watchdog", async () => {
     h = await bridgeHarness(OPTIONS);
-    await h.session();
+    const hub = await h.session();
     const peer = await h.session();
     const hubSocket = (peer as any).hub;
-    // Once the hub has had the pong, everything stalls past the peer's watchdog (2 periods after
-    // the ping): when it runs, the hub's next ping has not been read yet.
-    await new Promise<void>((r) => hubSocket.once("ping", () => setTimeout(() => (stall(2.5 * PERIOD), r()), 200)));
+    // As the hub reads the peer's pong, everything stalls past the peer's watchdog (2 periods
+    // after the ping): when it runs, the hub's next ping has not been read yet.
+    const peerSocket = [...(hub as any).peers][0];
+    await new Promise<void>((r) => peerSocket.once("pong", () => (stall(3 * PERIOD), r())));
     await new Promise((r) => setTimeout(r, 1.5 * PERIOD));
     expect((peer as any).hub === hubSocket, "the peer kept its hub connection").toBe(true);
     expect(peer.role).toBe("peer");
@@ -182,11 +183,70 @@ describe("2.3: peer heartbeat", { timeout: 15_000 }, () => {
     const hub = await h.session();
     const ext = await h.extension();
     const socket = ext.ws;
+    // As in the peer's case: the extension pongs, then everything stalls past the hub's next tick.
     await new Promise<void>((r) => socket.once("ping", () => (stall(1.75 * PERIOD), r())));
     await new Promise((r) => setTimeout(r, 1.5 * PERIOD));
     expect(ext.ws === socket && socket.readyState === WebSocket.OPEN, "the extension kept its connection").toBe(true);
     expect(await hub.call("status", {})).toEqual({ ok: true });
   });
+
+  // A late check skips its verdict at most once in a row: on a loop that runs late all the
+  // time, a frozen peer, extension or hub is still dropped, at the second late check.
+  it("2.3: a hub that stalls at tick after tick still drops a frozen peer, at the second late tick", async () => {
+    h = await bridgeHarness(OPTIONS);
+    await h.session();
+    // A frozen peer; each time it hears a ping (at most 3 times), everything stalls past the
+    // hub's next tick, so every tick after the first runs late.
+    const peer = await rawPeer(h.port, { pong: false });
+    const stallEnds: number[] = [];
+    peer.ws.on("ping", () => stallEnds.length < 3 && (stall(1.75 * PERIOD), stallEnds.push(Date.now())));
+    await until(() => peer.closeCode !== undefined, 10 * PERIOD, "the frozen peer to be dropped");
+    const droppedAt = Date.now();
+    expect(stallEnds).toHaveLength(2);
+    expect(droppedAt - stallEnds[1]).toBeLessThan(0.5 * PERIOD);
+  }, 30_000);
+
+  it("2.3: a hub that stalls at tick after tick still drops a frozen extension, at the second late tick", async () => {
+    h = await bridgeHarness(OPTIONS);
+    await h.session();
+    // A frozen browser; each time it hears a ping (at most 3 times), everything stalls past the
+    // hub's next tick.
+    const ext = await h.extension({ pong: false, reconnect: false });
+    const socket = ext.ws;
+    let closedAt: number | undefined;
+    socket.once("close", () => (closedAt = Date.now()));
+    const stallEnds: number[] = [];
+    socket.on("ping", () => stallEnds.length < 3 && (stall(1.75 * PERIOD), stallEnds.push(Date.now())));
+    await until(() => closedAt !== undefined, 10 * PERIOD, "the frozen extension to be dropped");
+    expect(stallEnds).toHaveLength(2);
+    expect(closedAt! - stallEnds[1]).toBeLessThan(0.5 * PERIOD);
+  }, 30_000);
+
+  it("2.3: a peer whose watchdog runs late twice in a row still drops its frozen hub", async () => {
+    const hub = await frozenHub(PERIOD);
+    h = await bridgeHarness(OPTIONS, { port: hub.port });
+    const peer = await h.session();
+    let settled = false;
+    const call = peer.call("listChats", {}, 60_000).then(
+      () => null,
+      (err: Error) => ({ err, at: Date.now() }),
+    );
+    void call.then(() => (settled = true));
+    // The hub never pings. Everything stalls past the watchdog (2 periods after the welcome),
+    // then, once the watchdog has run, past the next one, and so on (at most 3 times).
+    const stallEnds: number[] = [];
+    const stallAgain = () => {
+      if (settled || stallEnds.length >= 3) return;
+      stall(3 * PERIOD);
+      stallEnds.push(Date.now());
+      setTimeout(stallAgain, 0); // due after the overdue watchdog, so it runs second
+    };
+    setTimeout(stallAgain, 0);
+    const outcome = await call;
+    expect(outcome?.err.message).toBe(LOST_CALL.hubSilent);
+    expect(stallEnds).toHaveLength(2);
+    expect(outcome!.at - stallEnds[1]).toBeLessThan(0.5 * PERIOD);
+  }, 30_000);
 
   it("2.3: the hub drops a peer that stops answering pings within 2 periods, and withdraws its calls", async () => {
     h = await bridgeHarness(OPTIONS);

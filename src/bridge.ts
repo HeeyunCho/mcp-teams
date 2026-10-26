@@ -145,13 +145,33 @@ export const NOT_SENT = Object.freeze({
 const MIN_HUB_SILENCE_MS = 2_000;
 
 /**
- * Whether a timer due at `due` ran more than `slackMs` late: the process stalled (a busy
- * machine, a long GC or parse, a suspend). Overdue timers run before the I/O that arrived
- * meanwhile is read, so a liveness verdict taken then would blame the other side for a ping or
- * pong that is waiting unread; such a timer judges nothing and gives the other side more time.
+ * A liveness check (the hub's ticks, a peer's watchdog) that runs over this many heartbeat
+ * periods late finds its process stalled (a busy machine, a long GC or parse, a suspend).
+ * Overdue timers run before the I/O that arrived meanwhile is read, so a verdict taken then
+ * would blame the other side for a ping or pong waiting unread: the check skips its verdict.
+ * At most once in a row, so on a loop that runs late all the time a frozen peer, extension or
+ * hub is still dropped, at the second late check.
  */
-function ranLate(due: number, slackMs: number): boolean {
-  return Date.now() - due > slackMs;
+const STALL_SLACK = 0.5;
+
+/** Whether a check due at `due`, in a heartbeat of `periodMs`, ran late (see STALL_SLACK). */
+function ranLate(due: number, periodMs: number): boolean {
+  return Date.now() - due > periodMs * STALL_SLACK;
+}
+
+/**
+ * For a check every `periodMs` (setInterval): call the result at each tick; true when this
+ * tick ran late and the one before didn't skip, so this one skips its verdicts.
+ */
+function lateTicks(periodMs: number): () => boolean {
+  let lastTickAt = Date.now();
+  let skipped = false;
+  return () => {
+    const due = lastTickAt + periodMs;
+    lastTickAt = Date.now();
+    skipped = !skipped && ranLate(due, periodMs);
+    return skipped;
+  };
 }
 
 /** Hub: a peer with more than this many times maxPeerBufferedBytes waiting is closed at once. */
@@ -611,11 +631,10 @@ export class ExtensionBridge {
       ws.on("pong", () => this.alive.add(ws));
     }
     clearInterval(this.keepAlive);
-    let last = Date.now();
+    const late = lateTicks(this.opts.keepAliveMs);
     this.keepAlive = setInterval(() => {
-      // After a stall a pong may wait unread: judge nothing at this tick (see ranLate).
-      const stalled = ranLate(last + this.opts.keepAliveMs, this.opts.keepAliveMs / 2);
-      last = Date.now();
+      // After a stall a pong may wait unread: no drops at this tick (see STALL_SLACK).
+      const stalled = late();
       for (const s of this.sockets.keys()) {
         if (s.readyState !== WebSocket.OPEN) continue;
         if (!stalled && !this.alive.has(s)) {
@@ -640,17 +659,16 @@ export class ExtensionBridge {
     this.alive.add(ws);
     ws.on("pong", () => this.alive.add(ws));
     if (this.peerBeat) return;
-    let last = Date.now();
+    const late = lateTicks(this.opts.keepAliveMs);
     this.peerBeat = setInterval(() => {
       if (!this.peers.size) return this.stopPeerBeat();
-      const stalled = ranLate(last + this.opts.keepAliveMs, this.opts.keepAliveMs / 2);
-      last = Date.now();
+      const stalled = late();
       for (const p of this.peers) {
         if (p.readyState !== WebSocket.OPEN) continue;
         if (stalled) {
           // This hub stalled: a pong may wait unread, and its own writes didn't drain. Judge
-          // nothing at this tick; ping, and let the next one, a period awake later, decide.
-          this.backlogged.delete(p);
+          // nothing at this tick (see STALL_SLACK), and leave the backlog as the last tick saw
+          // it; ping, and let the next tick decide.
           this.alive.delete(p);
           p.ping();
           continue;
@@ -698,14 +716,14 @@ export class ExtensionBridge {
       let watchdog: NodeJS.Timeout | undefined;
       let heartbeatMs = 0;
       // When the watchdog itself runs late, this peer stalled: the hub's ping may wait unread, so
-      // it waits once more instead (see ranLate).
-      const watch = () => {
+      // it waits once more instead, but not twice in a row (see STALL_SLACK).
+      const watch = (afterLate = false) => {
         clearTimeout(watchdog);
         const waitMs = Math.max(MIN_HUB_SILENCE_MS, 2 * heartbeatMs);
         const due = Date.now() + waitMs;
         watchdog = setTimeout(() => {
           if (this.hub !== ws) return;
-          if (ranLate(due, waitMs / 4)) return watch();
+          if (!afterLate && ranLate(due, heartbeatMs)) return watch(true);
           this.rejectAll(LOST_CALL.hubSilent);
           ws.terminate();
         }, waitMs);
