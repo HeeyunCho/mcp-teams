@@ -12,6 +12,12 @@ import { FAST, TOKEN, bridgeHarness, until, type BridgeHarness } from "../helper
 const PERIOD = 1_500;
 const OPTIONS = { ...FAST, keepAliveMs: PERIOD };
 
+/** Blocks this process (hubs, peers and fake extensions alike) for `ms`: a stalled event loop. */
+function stall(ms: number) {
+  const end = Date.now() + ms;
+  while (Date.now() < end);
+}
+
 let h: BridgeHarness | undefined;
 const extra: Array<() => unknown> = [];
 afterEach(async () => {
@@ -139,6 +145,47 @@ describe("2.3: peer heartbeat", { timeout: 15_000 }, () => {
     expect(peer.role).toBe("peer");
     expect((peer as any).hub).toBe(hubSocket);
     expect(await peer.call("status", {})).toEqual({ ok: true });
+  });
+
+  // A process that stalls (a busy machine, a GC pause, a large answer being parsed) runs its
+  // overdue timers before it reads what arrived meanwhile. A liveness verdict taken then would
+  // blame the other side for a pong or ping that is waiting unread. Hub and peer share this
+  // process, so blocking it stalls both, like CPU starvation during a full test run.
+  it("2.3: the hub keeps a peer whose pong waits unread while the hub stalls past a tick", async () => {
+    h = await bridgeHarness(OPTIONS);
+    const hub = await h.session();
+    const peer = await h.session();
+    const hubSocket = (peer as any).hub;
+    // The peer pongs as it hears the ping; then everything stalls past the hub's next tick (but
+    // not the peer's watchdog, 2 periods), so when that tick runs the pong is still unread.
+    await new Promise<void>((r) => hubSocket.once("ping", () => (stall(1.75 * PERIOD), r())));
+    await new Promise((r) => setTimeout(r, 1.5 * PERIOD));
+    expect((peer as any).hub === hubSocket, "the peer kept its hub connection").toBe(true);
+    expect((hub as any).peers.size).toBe(1);
+  });
+
+  it("2.3: a peer keeps its live hub when the peer stalls past its watchdog", async () => {
+    h = await bridgeHarness(OPTIONS);
+    await h.session();
+    const peer = await h.session();
+    const hubSocket = (peer as any).hub;
+    // Once the hub has had the pong, everything stalls past the peer's watchdog (2 periods after
+    // the ping): when it runs, the hub's next ping has not been read yet.
+    await new Promise<void>((r) => hubSocket.once("ping", () => setTimeout(() => (stall(2.5 * PERIOD), r()), 200)));
+    await new Promise((r) => setTimeout(r, 1.5 * PERIOD));
+    expect((peer as any).hub === hubSocket, "the peer kept its hub connection").toBe(true);
+    expect(peer.role).toBe("peer");
+  });
+
+  it("2.3: the hub keeps an extension whose pong waits unread while the hub stalls past a tick", async () => {
+    h = await bridgeHarness(OPTIONS);
+    const hub = await h.session();
+    const ext = await h.extension();
+    const socket = ext.ws;
+    await new Promise<void>((r) => socket.once("ping", () => (stall(1.75 * PERIOD), r())));
+    await new Promise((r) => setTimeout(r, 1.5 * PERIOD));
+    expect(ext.ws === socket && socket.readyState === WebSocket.OPEN, "the extension kept its connection").toBe(true);
+    expect(await hub.call("status", {})).toEqual({ ok: true });
   });
 
   it("2.3: the hub drops a peer that stops answering pings within 2 periods, and withdraws its calls", async () => {

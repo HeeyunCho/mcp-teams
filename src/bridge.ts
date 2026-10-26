@@ -144,6 +144,16 @@ export const NOT_SENT = Object.freeze({
 /** A peer's watchdog never waits less for its hub's ping: a busy machine runs timers late. */
 const MIN_HUB_SILENCE_MS = 2_000;
 
+/**
+ * Whether a timer due at `due` ran more than `slackMs` late: the process stalled (a busy
+ * machine, a long GC or parse, a suspend). Overdue timers run before the I/O that arrived
+ * meanwhile is read, so a liveness verdict taken then would blame the other side for a ping or
+ * pong that is waiting unread; such a timer judges nothing and gives the other side more time.
+ */
+function ranLate(due: number, slackMs: number): boolean {
+  return Date.now() - due > slackMs;
+}
+
 /** Hub: a peer with more than this many times maxPeerBufferedBytes waiting is closed at once. */
 const PEER_BUFFER_HARD_CAP = 4;
 
@@ -601,10 +611,14 @@ export class ExtensionBridge {
       ws.on("pong", () => this.alive.add(ws));
     }
     clearInterval(this.keepAlive);
+    let last = Date.now();
     this.keepAlive = setInterval(() => {
+      // After a stall a pong may wait unread: judge nothing at this tick (see ranLate).
+      const stalled = ranLate(last + this.opts.keepAliveMs, this.opts.keepAliveMs / 2);
+      last = Date.now();
       for (const s of this.sockets.keys()) {
         if (s.readyState !== WebSocket.OPEN) continue;
-        if (!this.alive.has(s)) {
+        if (!stalled && !this.alive.has(s)) {
           s.terminate();
           continue;
         }
@@ -626,10 +640,21 @@ export class ExtensionBridge {
     this.alive.add(ws);
     ws.on("pong", () => this.alive.add(ws));
     if (this.peerBeat) return;
+    let last = Date.now();
     this.peerBeat = setInterval(() => {
       if (!this.peers.size) return this.stopPeerBeat();
+      const stalled = ranLate(last + this.opts.keepAliveMs, this.opts.keepAliveMs / 2);
+      last = Date.now();
       for (const p of this.peers) {
         if (p.readyState !== WebSocket.OPEN) continue;
+        if (stalled) {
+          // This hub stalled: a pong may wait unread, and its own writes didn't drain. Judge
+          // nothing at this tick; ping, and let the next one, a period awake later, decide.
+          this.backlogged.delete(p);
+          this.alive.delete(p);
+          p.ping();
+          continue;
+        }
         const backlog = p.bufferedAmount > this.opts.maxPeerBufferedBytes;
         if (backlog && this.backlogged.has(p)) {
           this.closeSlowPeer(p);
@@ -672,13 +697,18 @@ export class ExtensionBridge {
       // 0.2.13 and older never ping peers: no watchdog.
       let watchdog: NodeJS.Timeout | undefined;
       let heartbeatMs = 0;
+      // When the watchdog itself runs late, this peer stalled: the hub's ping may wait unread, so
+      // it waits once more instead (see ranLate).
       const watch = () => {
         clearTimeout(watchdog);
+        const waitMs = Math.max(MIN_HUB_SILENCE_MS, 2 * heartbeatMs);
+        const due = Date.now() + waitMs;
         watchdog = setTimeout(() => {
           if (this.hub !== ws) return;
+          if (ranLate(due, waitMs / 4)) return watch();
           this.rejectAll(LOST_CALL.hubSilent);
           ws.terminate();
-        }, Math.max(MIN_HUB_SILENCE_MS, 2 * heartbeatMs));
+        }, waitMs);
         watchdog.unref();
       };
       ws.on("ping", () => heartbeatMs && watch());
