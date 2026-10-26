@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Bumps the version in package.json, package-lock.json and extension/manifest.json together. All three
 // are read and checked first; if any is missing, not valid JSON or lacks the "version" fields to
-// update, none is written.
+// update, none is written. The writes are all or nothing: if one fails, every file is left as it was.
 //
 //   node scripts/bump-version.mjs patch|minor|major     explicit bump
 //   git log --format=%B%x00 A..B | node scripts/bump-version.mjs
@@ -28,7 +28,8 @@
 //
 // "Before 1.0.0" means below 1.0.0 in semver order, so every 0.x prerelease and 1.0.0-rc.1 count
 // (feat: on 1.0.0-rc.1 is a patch bump and releases 1.0.0).
-import { readFileSync, writeFileSync } from "node:fs";
+import * as nodeFs from "node:fs";
+import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -112,6 +113,24 @@ function readJson(file) {
   }
 }
 
+/**
+ * Writes `[file, text, original]` entries under `root` all or nothing: each text goes to a temp file next
+ * to its target, then the temps are renamed over the targets. If a step fails, targets already replaced
+ * get their `original` text back, every temp file is removed and the error is rethrown. `fs` is for tests.
+ */
+export function writeAll(root, writes, fs = nodeFs) {
+  const temps = writes.map(([file]) => join(root, `${file}.bump-${process.pid}.tmp`));
+  let renamed = 0;
+  try {
+    writes.forEach(([, text], i) => fs.writeFileSync(temps[i], text));
+    for (; renamed < writes.length; renamed++) fs.renameSync(temps[renamed], join(root, writes[renamed][0]));
+  } catch (e) {
+    for (const [file, , original] of writes.slice(0, renamed)) fs.writeFileSync(join(root, file), original);
+    for (const temp of temps) fs.rmSync(temp, { force: true });
+    throw e;
+  }
+}
+
 async function main() {
   const level = process.argv[2];
   const pkg = readJson("package.json");
@@ -127,16 +146,17 @@ async function main() {
     next = nextVersion(current, input.split("\0").filter((m) => m.trim()));
   }
   const writes = [
-    ["package.json", setVersion("package.json", pkg.text, next)],
-    ["package-lock.json", setVersion("package-lock.json", lock.text, next, 2)], // root + packages[""]
+    ["package.json", setVersion("package.json", pkg.text, next), pkg.text],
+    ["package-lock.json", setVersion("package-lock.json", lock.text, next, 2), lock.text], // root + packages[""]
     // A bump is always plain MAJOR.MINOR.PATCH, as Chrome's "version" needs; a prerelease label can only
     // be in "version_name", so one left from a hand-set prerelease is set to the release too.
     [
       "extension/manifest.json",
       setVersion("extension/manifest.json", setVersion("extension/manifest.json", manifest.text, next), next, 1, "version_name", true),
+      manifest.text,
     ],
   ];
-  for (const [file, text] of writes) writeFileSync(join(ROOT, file), text);
+  writeAll(ROOT, writes);
   console.log(next);
 }
 

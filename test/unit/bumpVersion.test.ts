@@ -1,10 +1,11 @@
 import { execFileSync } from "node:child_process";
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import * as fs from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 // @ts-expect-error plain JS script without types
-import { levelFor, nextVersion } from "../../scripts/bump-version.mjs";
+import { levelFor, nextVersion, writeAll } from "../../scripts/bump-version.mjs";
 
 const VERSION_FILES = ["package.json", "package-lock.json", "extension/manifest.json"] as const;
 type VersionFile = (typeof VERSION_FILES)[number];
@@ -96,6 +97,59 @@ describe("bump-version CLI with a missing or broken version file", () => {
     const invalid = runCliBroken("package.json", JSON.stringify({ name: "x", version: "1.2" }, null, 2));
     expect(invalid.error?.stderr).toMatch(/invalid version "1\.2"/i);
     expect(invalid.after).toEqual(invalid.before);
+  });
+});
+
+/** Real fs whose `fail` call (e.g. the 2nd renameSync) throws instead of running. */
+function failingFs(fail: { op: "writeFileSync" | "renameSync"; nth: number }) {
+  const calls = { writeFileSync: 0, renameSync: 0 };
+  const wrap =
+    <K extends "writeFileSync" | "renameSync">(op: K) =>
+    (...args: Parameters<(typeof fs)[K]>) => {
+      if (op === fail.op && ++calls[op] === fail.nth) throw new Error(`injected ${op} failure`);
+      return (fs[op] as (...a: unknown[]) => unknown)(...args);
+    };
+  return { ...fs, writeFileSync: wrap("writeFileSync"), renameSync: wrap("renameSync") };
+}
+
+describe("bump-version writeAll", () => {
+  /** A temp root with the three version files, and the writes a bump to 0.2.17 would make. */
+  function setup() {
+    const root = makeRoot("0.2.16", { version: "0.2.16" });
+    const read = (f: string) => readFileSync(join(root, f), "utf8");
+    const writes = VERSION_FILES.map((f) => [f, read(f).replaceAll("0.2.16", "0.2.17"), read(f)] as const);
+    const snapshot = () => Object.fromEntries(VERSION_FILES.map((f) => [f, readFileSync(join(root, f)).toString("hex")]));
+    const leftovers = () => [...readdirSync(root), ...readdirSync(join(root, "extension"))].filter((n) => n.endsWith(".tmp"));
+    return { root, read, writes, snapshot, leftovers };
+  }
+
+  it("writes every file and leaves no temp files", () => {
+    const { root, read, writes, leftovers } = setup();
+    try {
+      writeAll(root, writes);
+      for (const [f, text] of writes) expect(read(f)).toBe(text);
+      expect(leftovers()).toEqual([]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it.each([
+    ["the 1st temp write", { op: "writeFileSync", nth: 1 }],
+    ["the 3rd temp write", { op: "writeFileSync", nth: 3 }],
+    ["the 1st rename", { op: "renameSync", nth: 1 }],
+    ["the 2nd rename (rolls back the 1st)", { op: "renameSync", nth: 2 }],
+    ["the 3rd rename (rolls back two)", { op: "renameSync", nth: 3 }],
+  ] as const)("fails on %s, rethrows and leaves every file untouched with no temp files", (_, fail) => {
+    const { root, writes, snapshot, leftovers } = setup();
+    try {
+      const before = snapshot();
+      expect(() => writeAll(root, writes, failingFs(fail))).toThrow(`injected ${fail.op} failure`);
+      expect(snapshot()).toEqual(before);
+      expect(leftovers()).toEqual([]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 });
 
