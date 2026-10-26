@@ -115,18 +115,22 @@ function readJson(file) {
 /**
  * Writes `{ file, text, original }` entries under `root` all or nothing: each text goes to a temp file next
  * to its target, with the target's mode, then the temps are renamed over the targets. If a step fails,
- * targets already replaced get their `original` text back, every temp file is removed and the error is
- * rethrown. If some of that cleanup fails too, it throws an error naming what is left, with the first
- * error as its `cause`. `fs` is for tests.
+ * targets already replaced get their `original` text back the same way (written to their temp, whose
+ * name is free again once renamed, then renamed over the target), so a restore that fails leaves the
+ * target holding the new text whole rather than half a file. Then every temp file is removed and the
+ * error is rethrown. If some of that cleanup fails too, it throws an error naming what is left, with
+ * the first error as its `cause`. `fs` is for tests.
  */
 export function writeAll(root, writes, fs = { chmodSync, renameSync, rmSync, statSync, writeFileSync }) {
   const temps = writes.map(({ file }) => join(root, `${file}.bump-${process.pid}.tmp`));
+  /** Writes `text` to `temp` with `file`'s mode, ready to be renamed over `file`. */
+  const stage = (file, temp, text) => {
+    fs.writeFileSync(temp, text);
+    fs.chmodSync(temp, fs.statSync(join(root, file)).mode & 0o7777);
+  };
   let renamed = 0;
   try {
-    writes.forEach(({ file, text }, i) => {
-      fs.writeFileSync(temps[i], text);
-      fs.chmodSync(temps[i], fs.statSync(join(root, file)).mode & 0o7777);
-    });
+    writes.forEach(({ file, text }, i) => stage(file, temps[i], text));
     for (; renamed < writes.length; renamed++) fs.renameSync(temps[renamed], join(root, writes[renamed].file));
   } catch (e) {
     const left = [];
@@ -137,9 +141,12 @@ export function writeAll(root, writes, fs = { chmodSync, renameSync, rmSync, sta
         left.push(what);
       }
     };
-    for (const { file, original } of writes.slice(0, renamed)) {
-      attempt(`could not restore ${file}`, () => fs.writeFileSync(join(root, file), original));
-    }
+    writes.slice(0, renamed).forEach(({ file, original }, i) =>
+      attempt(`could not restore ${file}`, () => {
+        stage(file, temps[i], original);
+        fs.renameSync(temps[i], join(root, file));
+      }),
+    );
     for (const temp of temps) attempt(`could not remove ${temp}`, () => fs.rmSync(temp, { force: true }));
     if (left.length) throw new Error(`${e.message}; then ${left.join("; ")}`, { cause: e });
     throw e;

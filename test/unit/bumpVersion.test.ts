@@ -150,15 +150,23 @@ describe("bump-version CLI with a missing or broken version file", () => {
 
 type FsOp = "writeFileSync" | "renameSync" | "rmSync";
 
-/** Real fs whose listed calls (e.g. the 2nd renameSync) throw instead of running. */
-function failingFs(...fails: { op: FsOp; nth: number }[]) {
+/**
+ * Real fs whose listed calls (e.g. the 2nd renameSync) throw instead of running. A writeFileSync marked
+ * `partial` writes the first half of its data before throwing, as a full disk or an interruption can.
+ */
+function failingFs(...fails: { op: FsOp; nth: number; partial?: true }[]) {
   const real = { writeFileSync, renameSync, rmSync };
   const calls = { writeFileSync: 0, renameSync: 0, rmSync: 0 };
   const wrap =
     (op: FsOp) =>
     (...args: unknown[]) => {
       const n = ++calls[op];
-      if (fails.some((f) => f.op === op && f.nth === n)) throw new Error(`injected ${op} failure #${n}`);
+      const fail = fails.find((f) => f.op === op && f.nth === n);
+      if (fail?.partial) {
+        const [path, data] = args as [string, string];
+        writeFileSync(path, data.slice(0, Math.floor(data.length / 2)));
+      }
+      if (fail) throw new Error(`injected ${op} failure #${n}`);
       return (real[op] as (...a: unknown[]) => unknown)(...args);
     };
   return { statSync, chmodSync, writeFileSync: wrap("writeFileSync"), renameSync: wrap("renameSync"), rmSync: wrap("rmSync") };
@@ -231,7 +239,7 @@ describe("bump-version writeAll", () => {
     const { root, writes, bytes, snapshot, leftovers } = setup();
     try {
       const before = snapshot();
-      // Writes 1-3 make the temps; the 2nd rename fails; write 4 is the rollback of package.json.
+      // Writes 1-3 make the temps; the 2nd rename fails; write 4 is the rollback temp of package.json.
       const e = thrown(() => writeAll(root, writes, failingFs({ op: "renameSync", nth: 2 }, { op: "writeFileSync", nth: 4 })));
       expect(e.message).toMatch(/package\.json/);
       expect(e.cause?.message).toBe("injected renameSync failure #2");
@@ -247,12 +255,44 @@ describe("bump-version writeAll", () => {
     const { root, writes, bytes, snapshot } = setup();
     try {
       const before = snapshot();
-      // The 3rd rename fails; write 4 (rollback of package.json) fails, write 5 (package-lock.json) must still run.
+      // The 3rd rename fails; write 4 (rollback temp of package.json) fails, write 5 and rename 4 (rollback of
+      // package-lock.json) must still run.
       const e = thrown(() => writeAll(root, writes, failingFs({ op: "renameSync", nth: 3 }, { op: "writeFileSync", nth: 4 })));
       expect(e.message).toMatch(/package\.json/);
       expect(e.message).not.toMatch(/package-lock\.json/);
       expect(e.cause?.message).toBe("injected renameSync failure #3");
       expect(bytes("package-lock.json")).toBe(before["package-lock.json"]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps a target whole when its rollback write fails partway", () => {
+    const { root, writes, read, leftovers } = setup();
+    try {
+      // Writes 1-3 make the temps; the 2nd rename fails; write 4, the rollback of package.json, writes half and throws.
+      const e = thrown(() =>
+        writeAll(root, writes, failingFs({ op: "renameSync", nth: 2 }, { op: "writeFileSync", nth: 4, partial: true })),
+      );
+      expect(e.message).toMatch(/could not restore package\.json/);
+      expect(e.cause?.message).toBe("injected renameSync failure #2");
+      // Not restored, but complete: it still holds the new text rather than half of the original.
+      expect(read("package.json")).toBe(writes[0].text);
+      expect(leftovers()).toEqual([]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps a target whole and removes the restore temp when its rollback rename fails", () => {
+    const { root, writes, read, leftovers } = setup();
+    try {
+      // Renames 1-2: package.json is replaced, then package-lock.json fails; rename 3, the rollback of package.json, fails.
+      const e = thrown(() => writeAll(root, writes, failingFs({ op: "renameSync", nth: 2 }, { op: "renameSync", nth: 3 })));
+      expect(e.message).toMatch(/could not restore package\.json/);
+      expect(e.cause?.message).toBe("injected renameSync failure #2");
+      expect(read("package.json")).toBe(writes[0].text);
+      expect(leftovers()).toEqual([]);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
