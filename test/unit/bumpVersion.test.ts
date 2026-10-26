@@ -19,32 +19,57 @@ import { describe, expect, it } from "vitest";
 import { levelFor, nextVersion, VERSION_FILE_NAMES, writeAll } from "../../scripts/bump-version.mjs";
 
 describe("bump-version VERSION_FILE_NAMES", () => {
-  it("lists the version files in order, package.json (which holds the current version) first", () => {
-    expect(VERSION_FILE_NAMES).toEqual(["package.json", "package-lock.json", "extension/manifest.json"]);
+  it("puts package.json, which holds the current version, first", () => {
+    expect(VERSION_FILE_NAMES[0]).toBe("package.json");
+  });
+
+  it("lists each file once", () => {
+    expect(new Set(VERSION_FILE_NAMES).size).toBe(VERSION_FILE_NAMES.length);
+  });
+
+  it("names files that exist in the repository", () => {
+    for (const f of VERSION_FILE_NAMES) expect(existsSync(f), f).toBe(true);
   });
 });
 
-/** The script's own list, so adding a version file there is the only change these helpers need. */
-const VERSION_FILES: readonly string[] = VERSION_FILE_NAMES;
-type VersionFile = string;
+describe("bump-version test fixtures", () => {
+  it("gives a version file without a specific fixture a generic one holding the version", () => {
+    const contents = fixtures([...VERSION_FILE_NAMES, "extra/other.json"], "1.2.3", { version: "1.2.3" });
+    expect(contents["extra/other.json"]).toBe(JSON.stringify({ version: "1.2.3" }, null, 2));
+    expect(JSON.parse(contents["package.json"])).toEqual({ name: "x", version: "1.2.3" });
+  });
+});
+
+// The helpers below take the file list from the script (VERSION_FILE_NAMES), so a new entry in its table
+// gets a generic fixture, its folder and the "every file holds the new version" check without a test edit.
+// Still tied to the three current files, on purpose: their specific fixtures in `fixtures`, the
+// broken-file cases, the pkg/lock/manifest assertions and the writeAll failure-count cases (which count
+// writes and renames for three files). A new file whose version isn't a top-level "version" field also
+// needs its own fixture there.
+
 /** The folders holding version files, relative to the root ("." for the root itself). */
-const VERSION_DIRS = [...new Set(VERSION_FILES.map((f) => dirname(f)))];
+const VERSION_DIRS = [...new Set(VERSION_FILE_NAMES.map((f: string) => dirname(f)))] as string[];
+
+/** Each named file's fixture text at `version`: the three current files have specific ones, any other a generic one. */
+function fixtures(names: readonly string[], version: string, manifest: Record<string, string>): Record<string, string> {
+  const specific: Record<string, string> = {
+    "package.json": JSON.stringify({ name: "x", version }, null, 2),
+    "package-lock.json": JSON.stringify({ name: "x", version, packages: { "": { version }, "node_modules/y": { version: "9.9.9" } } }, null, 2),
+    "extension/manifest.json": JSON.stringify(manifest, null, 2),
+  };
+  return Object.fromEntries(names.map((f) => [f, specific[f] ?? JSON.stringify({ version }, null, 2)]));
+}
 
 /** Copies the script and writes the version files into a new temporary folder; `null` leaves a file out. */
-function makeRoot(version: string, manifest: Record<string, string>, files: Partial<Record<VersionFile, string | null>> = {}) {
+function makeRoot(version: string, manifest: Record<string, string>, files: Partial<Record<string, string | null>> = {}) {
   const root = mkdtempSync(join(tmpdir(), "mcp-teams-bump-"));
   mkdirSync(join(root, "scripts"));
   for (const d of VERSION_DIRS) mkdirSync(join(root, d), { recursive: true });
   copyFileSync("scripts/bump-version.mjs", join(root, "scripts", "bump-version.mjs"));
-  const contents: Record<VersionFile, string | null> = {
-    "package.json": JSON.stringify({ name: "x", version }, null, 2),
-    "package-lock.json": JSON.stringify({ name: "x", version, packages: { "": { version }, "node_modules/y": { version: "9.9.9" } } }, null, 2),
-    "extension/manifest.json": JSON.stringify(manifest, null, 2),
-    ...files,
-  };
-  for (const f of VERSION_FILES) {
+  const contents: Record<string, string | null | undefined> = { ...fixtures(VERSION_FILE_NAMES, version, manifest), ...files };
+  for (const f of VERSION_FILE_NAMES as string[]) {
     const text = contents[f];
-    if (text !== null) writeFileSync(join(root, f), text);
+    if (text != null) writeFileSync(join(root, f), text);
   }
   return root;
 }
@@ -58,7 +83,10 @@ function runCli(version: string, args: string[], stdin = "", manifest: Record<st
   try {
     const out = runScript(root, args, stdin);
     const read = (f: string) => JSON.parse(readFileSync(join(root, f), "utf8"));
-    return { out, pkg: read("package.json"), lock: read("package-lock.json"), manifest: read("extension/manifest.json") };
+    const texts: Record<string, string> = Object.fromEntries(
+      VERSION_FILE_NAMES.map((f: string) => [f, readFileSync(join(root, f), "utf8")]),
+    );
+    return { out, texts, pkg: read("package.json"), lock: read("package-lock.json"), manifest: read("extension/manifest.json") };
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -68,7 +96,7 @@ function runCli(version: string, args: string[], stdin = "", manifest: Record<st
  * Runs `patch` with one version file left out (`null`), replaced, or made a directory (`"<dir>"`), from `version`;
  * returns the error and every file's bytes before and after.
  */
-function runCliBroken(file: VersionFile, content: string | null, version = "0.2.16") {
+function runCliBroken(file: string, content: string | null, version = "0.2.16") {
   const root = makeRoot(version, { version }, { [file]: content === "<dir>" ? null : content });
   if (content === "<dir>") mkdirSync(join(root, file));
   const bytes = (f: string) => {
@@ -76,7 +104,7 @@ function runCliBroken(file: VersionFile, content: string | null, version = "0.2.
     if (!existsSync(path)) return null;
     return statSync(path).isDirectory() ? "<dir>" : readFileSync(path).toString("hex");
   };
-  const snapshot = () => Object.fromEntries(VERSION_FILES.map((f) => [f, bytes(f)]));
+  const snapshot = () => Object.fromEntries(VERSION_FILE_NAMES.map((f: string) => [f, bytes(f)]));
   try {
     const before = snapshot();
     let error: (Error & { stderr?: string }) | undefined;
@@ -141,9 +169,9 @@ describe("bump-version writeAll", () => {
   function setup() {
     const root = makeRoot("0.2.16", { version: "0.2.16" });
     const read = (f: string) => readFileSync(join(root, f), "utf8");
-    const writes = VERSION_FILES.map((file) => ({ file, text: read(file).replaceAll("0.2.16", "0.2.17"), original: read(file) }));
+    const writes = VERSION_FILE_NAMES.map((file: string) => ({ file, text: read(file).replaceAll("0.2.16", "0.2.17"), original: read(file) }));
     const bytes = (f: string) => readFileSync(join(root, f)).toString("hex");
-    const snapshot = () => Object.fromEntries(VERSION_FILES.map((f) => [f, bytes(f)]));
+    const snapshot = () => Object.fromEntries(VERSION_FILE_NAMES.map((f: string) => [f, bytes(f)]));
     const leftovers = () => VERSION_DIRS.flatMap((d) => readdirSync(join(root, d))).filter((n) => n.endsWith(".tmp"));
     return { root, read, writes, bytes, snapshot, leftovers };
   }
@@ -255,6 +283,7 @@ describe("bump-version CLI", () => {
     expect(r.lock.packages[""].version).toBe("0.2.17");
     expect(r.lock.packages["node_modules/y"].version).toBe("9.9.9");
     expect(r.manifest.version).toBe("0.2.17");
+    for (const f of VERSION_FILE_NAMES) expect(r.texts[f], f).toContain('"0.2.17"');
   });
 
   it("takes an explicit level as given", () => {
