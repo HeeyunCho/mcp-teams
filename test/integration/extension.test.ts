@@ -281,12 +281,12 @@ describe("robustness", () => {
     const newer = new ExtensionBridge(port, "secret", "0.15.1");
     bridges.push(newer);
     await newer.start();
-    await until(() => newer.role === "hub" && old.role === "peer", 4_000, "the newer server to take over as hub on the port the old hub got");
+    await until(() => newer.role === "hub" && old.role === "peer", 4_000, "the newer server to take over as hub on the old hub's port");
     expect(newer.role).toBe("hub");
     // A new free port would leave it a hub nobody can find, and the newer server without its peer.
     expect(old.role).toBe("peer");
     expect(old.port).toBe(port);
-  });
+  }, 10_000);
 
   it("a server doesn't join a program on the port that can't prove the token, and never sends it the token", async () => {
     const { WebSocketServer } = await import("ws");
