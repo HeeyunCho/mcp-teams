@@ -144,6 +144,37 @@ export const NOT_SENT = Object.freeze({
 /** A peer's watchdog never waits less for its hub's ping: a busy machine runs timers late. */
 const MIN_HUB_SILENCE_MS = 2_000;
 
+/**
+ * A liveness check (the hub's ticks, a peer's watchdog) that runs later than this fraction of
+ * its own wait after it was due (a tick: one period; the watchdog: its whole wait) finds its
+ * process stalled (a busy machine, a long GC or parse, a suspend).
+ * Overdue timers run before the I/O that arrived meanwhile is read, so a verdict taken then
+ * would blame the other side for a ping or pong waiting unread: the check skips its verdict.
+ * At most once in a row, so on a loop that runs late all the time a frozen peer, extension or
+ * hub is still dropped, at the second late check.
+ */
+const STALL_SLACK = 0.5;
+
+/** Whether a check that waited `waitMs` and was due at `due` ran late (see STALL_SLACK). */
+function ranLate(due: number, waitMs: number): boolean {
+  return Date.now() - due > waitMs * STALL_SLACK;
+}
+
+/**
+ * For a check every `periodMs` (setInterval): call the result at each tick; true when this
+ * tick ran late and the one before didn't skip, so this one skips its verdicts.
+ */
+function lateTicks(periodMs: number): () => boolean {
+  let lastTickAt = Date.now();
+  let skipped = false;
+  return () => {
+    const due = lastTickAt + periodMs;
+    lastTickAt = Date.now();
+    skipped = !skipped && ranLate(due, periodMs);
+    return skipped;
+  };
+}
+
 /** Hub: a peer with more than this many times maxPeerBufferedBytes waiting is closed at once. */
 const PEER_BUFFER_HARD_CAP = 4;
 
@@ -601,10 +632,13 @@ export class ExtensionBridge {
       ws.on("pong", () => this.alive.add(ws));
     }
     clearInterval(this.keepAlive);
+    const late = lateTicks(this.opts.keepAliveMs);
     this.keepAlive = setInterval(() => {
+      // After a stall a pong may wait unread: no drops at this tick (see STALL_SLACK).
+      const stalled = late();
       for (const s of this.sockets.keys()) {
         if (s.readyState !== WebSocket.OPEN) continue;
-        if (!this.alive.has(s)) {
+        if (!stalled && !this.alive.has(s)) {
           s.terminate();
           continue;
         }
@@ -626,10 +660,20 @@ export class ExtensionBridge {
     this.alive.add(ws);
     ws.on("pong", () => this.alive.add(ws));
     if (this.peerBeat) return;
+    const late = lateTicks(this.opts.keepAliveMs);
     this.peerBeat = setInterval(() => {
       if (!this.peers.size) return this.stopPeerBeat();
+      const stalled = late();
       for (const p of this.peers) {
         if (p.readyState !== WebSocket.OPEN) continue;
+        if (stalled) {
+          // This hub stalled: a pong may wait unread, and its own writes didn't drain. Judge
+          // nothing at this tick (see STALL_SLACK), and leave the backlog as the last tick saw
+          // it; ping, and let the next tick decide.
+          this.alive.delete(p);
+          p.ping();
+          continue;
+        }
         const backlog = p.bufferedAmount > this.opts.maxPeerBufferedBytes;
         if (backlog && this.backlogged.has(p)) {
           this.closeSlowPeer(p);
@@ -672,13 +716,18 @@ export class ExtensionBridge {
       // 0.2.13 and older never ping peers: no watchdog.
       let watchdog: NodeJS.Timeout | undefined;
       let heartbeatMs = 0;
-      const watch = () => {
+      // When the watchdog itself runs late, this peer stalled: the hub's ping may wait unread, so
+      // it waits once more instead, but not twice in a row (see STALL_SLACK).
+      const watch = (afterLate = false) => {
         clearTimeout(watchdog);
+        const waitMs = Math.max(MIN_HUB_SILENCE_MS, 2 * heartbeatMs);
+        const due = Date.now() + waitMs;
         watchdog = setTimeout(() => {
           if (this.hub !== ws) return;
+          if (!afterLate && ranLate(due, waitMs)) return watch(true);
           this.rejectAll(LOST_CALL.hubSilent);
           ws.terminate();
-        }, Math.max(MIN_HUB_SILENCE_MS, 2 * heartbeatMs));
+        }, waitMs);
         watchdog.unref();
       };
       ws.on("ping", () => heartbeatMs && watch());
