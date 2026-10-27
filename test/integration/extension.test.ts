@@ -268,8 +268,6 @@ describe("robustness", () => {
     await newer.start();
     expect(newer.role).toBe("peer");
     await until(() => newer.role === "hub" && old.role === "peer", 5_000, "the newer server to take over as hub");
-    expect(newer.role).toBe("hub");
-    expect(old.role).toBe("peer");
     expect(old.hubVersion).toBe("0.15.1");
   }, 10_000);
 
@@ -282,9 +280,7 @@ describe("robustness", () => {
     bridges.push(newer);
     await newer.start();
     await until(() => newer.role === "hub" && old.role === "peer", 4_000, "the newer server to take over as hub on the old hub's port");
-    expect(newer.role).toBe("hub");
     // A new free port would leave it a hub nobody can find, and the newer server without its peer.
-    expect(old.role).toBe("peer");
     expect(old.port).toBe(port);
   }, 10_000);
 
