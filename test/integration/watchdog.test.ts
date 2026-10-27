@@ -4,7 +4,8 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { WebSocketServer, type WebSocket } from "ws";
 import { proof } from "../../src/bridge.js";
-import { FAST, TOKEN as HUB_TOKEN, bridgeHarness, freePort, type BridgeHarness } from "../helpers/bridgeHarness.js";
+import { FAST, TOKEN as HUB_TOKEN, bridgeHarness, type BridgeHarness } from "../helpers/bridgeHarness.js";
+import { stall } from "../helpers/timing.js";
 import { connectWorker, createFakeChrome, loadWorker, NativeWebSocket, openedSockets } from "../helpers/fakeChrome.js";
 
 const TOKEN = "watchdog-token";
@@ -25,6 +26,7 @@ afterEach(async () => {
   await h?.cleanup();
   h = undefined;
   vi.unstubAllGlobals();
+  vi.restoreAllMocks();
   openedSockets.length = 0;
 });
 
@@ -34,9 +36,10 @@ afterEach(async () => {
  * frozen hub). Records when each connection was opened, welcomed and closed.
  */
 async function scriptedHub({ heartbeatMs, pingEveryMs = 0 }: { heartbeatMs?: number; pingEveryMs?: number }) {
-  const port = await freePort();
   const connections: { openedAt: number; welcomedAt?: number; closedAt?: number }[] = [];
-  wss = new WebSocketServer({ host: "127.0.0.1", port });
+  // Port 0: the system picks a free port and this server keeps it.
+  const server = new WebSocketServer({ host: "127.0.0.1", port: 0 });
+  wss = server;
   wss.on("connection", (ws: WebSocket) => {
     const c: (typeof connections)[number] = { openedAt: Date.now() };
     connections.push(c);
@@ -51,6 +54,8 @@ async function scriptedHub({ heartbeatMs, pingEveryMs = 0 }: { heartbeatMs?: num
       if (pingEveryMs) timers.push(setInterval(() => ws.readyState === ws.OPEN && ws.send(JSON.stringify({ type: "ping" })), pingEveryMs));
     });
   });
+  await new Promise<void>((r) => server.once("listening", () => r()));
+  const { port } = server.address() as { port: number };
   return { port, connections };
 }
 
@@ -117,4 +122,55 @@ describe("2.3: extension watchdog", () => {
     expect(extensionSocket()).toBe(before);
     expect(await fake.pageMessage("popup.html", { type: "popup:status" })).toMatchObject({ state: "connected" });
   });
+
+  // A watchdog that runs more than half its wait late (the process stalled) skips its verdict,
+  // since the hub's ping may wait unread, but at most once in a row (see src/bridge.ts). stall()
+  // (test/helpers/bridgeHarness.ts) blocks this whole process, hub and worker alike, to show it.
+
+  /**
+   * When the worker closed its connection to the hub on `port` (each time). Only the worker's own
+   * sockets count: on Node 20 NativeWebSocket is the ws class, which the hub's sockets share
+   * (theirs have no url).
+   */
+  function recordCloses(port: number) {
+    const closes: number[] = [];
+    const close = NativeWebSocket.prototype.close;
+    vi.spyOn(NativeWebSocket.prototype, "close").mockImplementation(function (this: WebSocket, ...args: unknown[]) {
+      if (String(this.url ?? "").startsWith(`ws://127.0.0.1:${port}`)) closes.push(Date.now());
+      return (close as (...a: unknown[]) => void).apply(this, args);
+    });
+    return closes;
+  }
+
+  it("2.3: the worker keeps its live hub when it stalls past its watchdog", async () => {
+    const hub = await scriptedHub({ heartbeatMs: PERIOD, pingEveryMs: PERIOD });
+    await connectedWorker(hub.port, () => hub.connections[0]?.welcomedAt !== undefined);
+    // Everything stalls well past the watchdog (due 2.25 periods after the welcome, late from
+    // 1.125 more): when it runs, the hub's pings sent meanwhile are still unread. Then past the
+    // once-more wait it took (2.25 periods), so those pings re-armed it.
+    stall(4 * PERIOD);
+    await new Promise((r) => setTimeout(r, 3 * PERIOD));
+    expect(hub.connections).toHaveLength(1);
+    expect(hub.connections[0].closedAt).toBeUndefined();
+  }, 15_000);
+
+  it("2.3: a worker whose watchdog runs late twice in a row still drops its frozen hub", async () => {
+    const hub = await scriptedHub({ heartbeatMs: PERIOD });
+    await connectedWorker(hub.port, () => hub.connections[0]?.welcomedAt !== undefined);
+    const closes = recordCloses(hub.port);
+    // The hub never pings. Everything stalls well past the watchdog, then, once it has run, past
+    // the next one, and so on (at most 3 times).
+    const stallEnds: number[] = [];
+    const stallAgain = () => {
+      if (closes.length || stallEnds.length >= 3) return;
+      stall(4 * PERIOD);
+      stallEnds.push(Date.now());
+      setTimeout(stallAgain, 0); // due after the overdue watchdog, so it runs second
+    };
+    setTimeout(stallAgain, 0);
+    await vi.waitFor(() => expect(closes.length).toBeGreaterThan(0), { timeout: 20 * PERIOD });
+    expect(stallEnds).toHaveLength(2);
+    expect(closes[0] - stallEnds[1]).toBeGreaterThanOrEqual(0);
+    expect(closes[0] - stallEnds[1]).toBeLessThan(0.5 * PERIOD);
+  }, 30_000);
 });

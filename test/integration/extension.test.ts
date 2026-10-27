@@ -7,13 +7,27 @@ import { ExtensionBridge, isNewer, proof } from "../../src/bridge.js";
 import { EXTENSION_ID, EXTENSION_ORIGIN, extensionIdFromKey, installedVersion, syncExtension, writePairing } from "../../src/extension.js";
 // @ts-expect-error plain JS module shared with the extension
 import { pairingProof } from "../../extension/teams.js";
-import { freePort } from "../helpers/bridgeHarness.js";
+import { until } from "../helpers/timing.js";
 
-// A free port per test, so test files and worktrees can run side by side.
+// Each test's port: 0 until its first bridge listens (the system picks a free port and the
+// bridge keeps it), then that bridge's port. A "free" port picked and closed before a bridge
+// binds it could be taken by a test file or worktree running alongside (#23).
 let PORT: number;
-beforeEach(async () => {
-  PORT = await freePort();
+beforeEach(() => {
+  PORT = 0;
 });
+
+/** A bridge on this test's port; the first one started sets PORT to the port it got. */
+class TestBridge extends ExtensionBridge {
+  constructor(...[token, version, options]: Tail<ConstructorParameters<typeof ExtensionBridge>>) {
+    super(PORT, token, version, options);
+  }
+  override async start(): Promise<void> {
+    await super.start();
+    PORT ||= this.port;
+  }
+}
+type Tail<T extends unknown[]> = T extends [unknown, ...infer R] ? R : never;
 
 describe("extension id", () => {
   it("matches the key in the manifest, so Chrome gives the extension this id", () => {
@@ -72,7 +86,7 @@ describe("pairing", () => {
   });
 
   it("accepts our extension when it proves the token, proves itself back, and records where it connected from", async () => {
-    bridge = new ExtensionBridge(PORT, "secret", "0.15.0");
+    bridge = new TestBridge("secret", "0.15.0");
     await bridge.start();
     const ext = extension(EXTENSION_ORIGIN, "secret");
     const welcome = await ext.welcome;
@@ -82,7 +96,7 @@ describe("pairing", () => {
   });
 
   it("turns away anything with our extension's origin but a wrong proof", async () => {
-    bridge = new ExtensionBridge(PORT, "secret", "0.15.0");
+    bridge = new TestBridge("secret", "0.15.0");
     await bridge.start();
     const ext = extension(EXTENSION_ORIGIN, "guess");
     expect(await ext.welcome).toBeNull();
@@ -90,7 +104,7 @@ describe("pairing", () => {
   });
 
   it("only asks our extension of 0.2.0 or older (no token, no proof) to reload, once, and sends it no calls", async () => {
-    bridge = new ExtensionBridge(PORT, "secret", "0.15.0");
+    bridge = new TestBridge("secret", "0.15.0");
     await bridge.start();
     const got: string[] = [];
     const old = extension(EXTENSION_ORIGIN, null, { onRequest: (_, msg) => got.push(msg.method) });
@@ -106,7 +120,7 @@ describe("pairing", () => {
   });
 
   it("still needs the token from any other extension", async () => {
-    bridge = new ExtensionBridge(PORT, "secret", "0.15.0");
+    bridge = new TestBridge("secret", "0.15.0");
     await bridge.start();
     expect(await hello("chrome-extension://someotherextensionidxxxxxxxxxxxx", null)).toEqual({ welcomed: false, code: 4401 });
     expect(await hello("chrome-extension://someotherextensionidxxxxxxxxxxxx", "secret")).toEqual({ welcomed: true });
@@ -118,7 +132,7 @@ describe("two copies of the extension", () => {
   afterEach(async () => bridge?.close());
 
   it("keeps our extension connected and turns an older copy away", async () => {
-    bridge = new ExtensionBridge(PORT, "secret", "0.15.0");
+    bridge = new TestBridge("secret", "0.15.0");
     await bridge.start();
     const ours = extension(EXTENSION_ORIGIN, "secret");
     await ours.welcome;
@@ -148,16 +162,13 @@ describe("several browsers at once", () => {
     });
     return { ws, got };
   };
-  const until = async (cond: () => boolean) => {
-    for (let i = 0; i < 100 && !cond(); i++) await new Promise((r) => setTimeout(r, 20));
-  };
 
   it("keeps both connected and sends calls to the browser where Teams is signed in", async () => {
-    bridge = new ExtensionBridge(PORT, "secret", "0.15.0");
+    bridge = new TestBridge("secret", "0.15.0");
     await bridge.start();
     const edge = browser("Edge", "edge-1", true);
     const chrome = browser("Chrome", "chrome-1", false);
-    await until(() => bridge!.extensions.length === 2);
+    await until(() => bridge!.extensions.length === 2, 3_000, "both browsers to connect");
     expect(bridge.extensions.map((e) => e.browser).sort()).toEqual(["Chrome", "Edge"]);
     await expect(bridge.call("listTeams")).resolves.toEqual({ from: "Edge" });
     // It sticks with the browser that answered, without asking again.
@@ -167,17 +178,17 @@ describe("several browsers at once", () => {
 
     // When that browser goes away, calls go to the other one.
     edge.ws.close();
-    await until(() => bridge!.extensions.length === 1);
+    await until(() => bridge!.extensions.length === 1, 3_000, "the bridge to drop the closed Edge connection");
     await expect(bridge.call("listTeams")).resolves.toEqual({ from: "Chrome" });
     chrome.ws.close();
   });
 
   it("reloads every browser, and a reconnect replaces only that browser's connection", async () => {
-    bridge = new ExtensionBridge(PORT, "secret", "0.15.0");
+    bridge = new TestBridge("secret", "0.15.0");
     await bridge.start();
     const edge = browser("Edge", "edge-1", true);
     const chrome = browser("Chrome", "chrome-1", false);
-    await until(() => bridge!.extensions.length === 2);
+    await until(() => bridge!.extensions.length === 2, 3_000, "both browsers to connect");
     await expect(bridge.call("reloadAll")).resolves.toEqual({ reloading: 2 });
     expect(edge.got).toContain("reload");
     expect(chrome.got).toContain("reload");
@@ -185,7 +196,11 @@ describe("several browsers at once", () => {
     const closed = new Promise((r) => chrome.ws.on("close", r));
     const chromeAgain = browser("Chrome", "chrome-1", false);
     expect(await closed).toBe(4000);
-    await until(() => bridge!.extensions.length === 2 && chromeAgain.ws.readyState === WebSocket.OPEN);
+    await until(
+      () => bridge!.extensions.length === 2 && chromeAgain.ws.readyState === WebSocket.OPEN,
+      3_000,
+      "the reconnected Chrome to replace its old connection",
+    );
     expect(bridge.extensions.map((e) => e.instance).sort()).toEqual(["chrome-1", "edge-1"]);
     edge.ws.close();
     chromeAgain.ws.close();
@@ -217,7 +232,7 @@ describe("robustness", () => {
   });
 
   it("fails a call at once when its extension connection is replaced", async () => {
-    const hub = new ExtensionBridge(PORT, "secret", "0.15.0");
+    const hub = new TestBridge("secret", "0.15.0");
     bridges.push(hub);
     await hub.start();
     const first = await silent("profile-1");
@@ -232,7 +247,7 @@ describe("robustness", () => {
   });
 
   it("ignores a local client that sends JSON null", async () => {
-    const hub = new ExtensionBridge(PORT, "secret", "0.15.0");
+    const hub = new TestBridge("secret", "0.15.0");
     bridges.push(hub);
     await hub.start();
     const ws = new WebSocket(`ws://127.0.0.1:${PORT}`);
@@ -244,19 +259,30 @@ describe("robustness", () => {
   });
 
   it("an older hub hands the port to a newer server that joins", async () => {
-    const old = new ExtensionBridge(PORT, "secret", "0.15.0");
+    const old = new TestBridge("secret", "0.15.0");
     bridges.push(old);
     await old.start();
     expect(old.role).toBe("hub");
-    const newer = new ExtensionBridge(PORT, "secret", "0.15.1");
+    const newer = new TestBridge("secret", "0.15.1");
     bridges.push(newer);
     await newer.start();
     expect(newer.role).toBe("peer");
-    for (const end = Date.now() + 5_000; Date.now() < end && (newer.role !== "hub" || old.role !== "peer"); ) await sleep(100);
-    expect(newer.role).toBe("hub");
-    expect(old.role).toBe("peer");
+    await until(() => newer.role === "hub" && old.role === "peer", 5_000, "the newer server to take over as hub");
     expect(old.hubVersion).toBe("0.15.1");
-  });
+  }, 10_000);
+
+  it("23: a hub that took port 0 keeps the port it got when it hands over, and joins the newer server there", async () => {
+    const old = new ExtensionBridge(0, "secret", "0.15.0");
+    bridges.push(old);
+    await old.start();
+    const port = old.port;
+    const newer = new ExtensionBridge(port, "secret", "0.15.1");
+    bridges.push(newer);
+    await newer.start();
+    await until(() => newer.role === "hub" && old.role === "peer", 4_000, "the newer server to take over as hub on the old hub's port");
+    // A new free port would leave it a hub nobody can find, and the newer server without its peer.
+    expect(old.port).toBe(port);
+  }, 10_000);
 
   it("a server doesn't join a program on the port that can't prove the token, and never sends it the token", async () => {
     const { WebSocketServer } = await import("ws");
@@ -270,7 +296,8 @@ describe("robustness", () => {
       });
     });
     await new Promise((r) => rogue.once("listening", r));
-    const server = new ExtensionBridge(PORT, "secret", "0.15.0");
+    PORT = (rogue.address() as { port: number }).port;
+    const server = new TestBridge("secret", "0.15.0");
     bridges.push(server);
     await server.start();
     expect(server.role).toBe("none");
@@ -281,11 +308,11 @@ describe("robustness", () => {
   });
 
   it("a hub doesn't step down for a peer of the same or an older version", async () => {
-    const hub = new ExtensionBridge(PORT, "secret", "0.15.0");
+    const hub = new TestBridge("secret", "0.15.0");
     bridges.push(hub);
     await hub.start();
-    const same = new ExtensionBridge(PORT, "secret", "0.15.0");
-    const older = new ExtensionBridge(PORT, "secret", "0.14.1");
+    const same = new TestBridge("secret", "0.15.0");
+    const older = new TestBridge("secret", "0.14.1");
     bridges.push(same, older);
     await same.start();
     await older.start();

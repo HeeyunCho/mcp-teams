@@ -64,7 +64,11 @@ function capText<T extends Message>(messages: T[], maxLength: number): T[] {
   return messages.map(cut) as T[];
 }
 
-export function registerTools(server: McpServer, bridge: ExtensionBridge, config: Config) {
+/** What the tools use from the config; autoSendTo may be left out (no auto-send). */
+export type ToolsConfig = Omit<Config, "autoSendTo"> & { autoSendTo?: string[] };
+
+export function registerTools(server: McpServer, bridge: ExtensionBridge, config: ToolsConfig) {
+  const autoSendTo = config.autoSendTo ?? [];
   server.registerTool(
     "get_version",
     {
@@ -91,7 +95,8 @@ export function registerTools(server: McpServer, bridge: ExtensionBridge, config
         // hub: this session owns the port; peer: it forwards through another session's server.
         role: bridge.role,
         ...(bridge.role === "peer" ? { hubServer: bridge.hubVersion } : {}),
-        port: config.port,
+        // The port the bridge uses (with port 0 configured, the free one it got).
+        port: bridge.port,
         teams,
       });
     }),
@@ -308,7 +313,11 @@ export function registerTools(server: McpServer, bridge: ExtensionBridge, config
     {
       title: "Send a message (needs your click)",
       description:
-        "Asks to post a message in an existing chat or channel (conversation), to reply to a channel post, or to start a chat with people (to): one person for a 1:1 chat, several for a group chat. If a chat with exactly those people already exists, the message goes there. The extension shows a confirmation window with the message, where it goes and who is in a new chat; nothing is posted, and no chat is created, unless the user clicks Send there. Returns whether it was sent. Plain text; line breaks are kept and links become clickable.",
+        "Asks to post a message in an existing chat or channel (conversation), to reply to a channel post, or to start a chat with people (to): one person for a 1:1 chat, several for a group chat. If a chat with exactly those people already exists, the message goes there. The extension shows a confirmation window with the message, where it goes and who is in a new chat; nothing is posted, and no chat is created, unless the user clicks Send there. Returns whether it was sent. Plain text; line breaks are kept and links become clickable." +
+        // Only with autoSendTo set, so the default description (and the tool contract) stays as it is.
+        (autoSendTo.length
+          ? " Exception set in the user's config (autoSendTo): a message to the user alone (their notes-to-self chat, or to: their own address) is posted without the window; the result then says autoSent."
+          : ""),
       inputSchema: {
         conversation: conversation.optional(),
         to: z
@@ -329,13 +338,19 @@ export function registerTools(server: McpServer, bridge: ExtensionBridge, config
     safe(async ({ conversation, to, title, text: message, reply_to, subject }, extra) => {
       if (!conversation === !to) throw new Error("Give either conversation (an existing chat or channel) or to (people to start a chat with).");
       try {
-        return text(await bridge.call("requestSend", { conversation, to, title, text: message, threadId: reply_to, subject }, SEND_TIMEOUT_MS, extra.signal));
+        // The allowlist travels with each request rather than in the connection's hello: a peer's
+        // call is relayed through the hub, so only the request carries the config of the server
+        // that made it. It is only a permission: the extension posts without the window only
+        // after resolving the target itself to the signed-in user alone, with an allowed address.
+        const params = { conversation, to, title, text: message, threadId: reply_to, subject, ...(autoSendTo.length ? { autoSendTo } : {}) };
+        return text(await bridge.call("requestSend", params, SEND_TIMEOUT_MS, extra.signal));
       } catch (err) {
         const message = (err as Error).message;
         // The bridge lost the call after it was sent (its own messages, also as relayed by a hub):
         // the user may have clicked Send just before, so retrying blindly could post twice.
         if (!isLostCall(message)) throw err;
-        throw new Error(`${message} The message may have been posted if the user had just clicked Send: check with read_messages before sending again.`);
+        const self = autoSendTo.length ? " (or, to the user alone, without asking: autoSendTo)" : "";
+        throw new Error(`${message} The message may have been posted if the user had just clicked Send${self}: check with read_messages before sending again.`);
       }
     }),
   );

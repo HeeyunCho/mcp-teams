@@ -1,15 +1,22 @@
 // Sessions share the Teams tab fairly: the hub lets a limited number of calls run on each
 // extension at once, and a freed turn goes round the sessions (the hub's own calls are one
 // session, each peer another), so one session's long scans can't starve another's quick read.
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { isLostCall, NOT_SENT } from "../../src/bridge.js";
-import { bridgeHarness, FAST, until, type BridgeHarness, type FakeExtension, type Request } from "../helpers/bridgeHarness.js";
+import { bridgeHarness, FAST, TOKEN, type BridgeHarness, type FakeExtension, type Request } from "../helpers/bridgeHarness.js";
+import { until } from "../helpers/timing.js";
+import { connectWorker, createFakeChrome, loadWorker, openedSockets, reply } from "../helpers/fakeChrome.js";
 
 let h: BridgeHarness | undefined;
+let link: { disconnect: () => Promise<void> } | undefined;
 
 afterEach(async () => {
+  await link?.disconnect();
+  link = undefined;
   await h?.cleanup();
   h = undefined;
+  vi.unstubAllGlobals();
+  openedSockets.length = 0;
 });
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -225,4 +232,78 @@ describe("calls that never wait for a turn", () => {
     tab2.letGo();
     await scan;
   });
+});
+
+describe("throttled calls and turns", () => {
+  it("35: four reads waiting out a throttle hold no turn: another session's call to a service that isn't throttled finishes promptly", async () => {
+    h = await bridgeHarness({ ...FAST, maxConcurrentCalls: 4 });
+    const hub = await h.session(); // session A
+    let busy = true;
+    // csa throttles for 3 s; substrate (people search) isn't throttled.
+    const csa = () =>
+      busy
+        ? reply(429, { message: "Too many requests" }, { headers: { "retry-after": "3" } })
+        : { teams: [], chats: [{ id: "19:contoso-launch@thread.v2", title: "Contoso launch", chatType: "chat", members: [] }] };
+    const substrate = () => ({ Groups: [{ Suggestions: [{ DisplayName: "Alex Doe", EmailAddresses: ["alex.doe@contoso.example"] }] }] });
+    const fake = createFakeChrome({ services: { csa, substrate }, local: { token: TOKEN, port: h.port } });
+    const worker = await loadWorker(fake);
+    worker.registerListeners();
+    link = await connectWorker(fake, () => hub.connected);
+    const peer = await h.session(); // session B
+    await until(() => peer.connected, 3_000, "the peer sees the extension");
+
+    let readsDone = 0;
+    const reads = Array.from({ length: 4 }, () => hub.call("listTeams", {}, 30_000).then((r) => (readsDone++, r)));
+    for (const r of reads) r.catch(() => {}); // awaited below
+    await until(() => fake.count("csa") >= 1 && hub.inFlight.pending === 4, 3_000, "A's four reads reach the extension, and csa throttles");
+    await sleep(200); // they now wait at csa's gate
+
+    const t0 = Date.now();
+    await expect(peer.call("findPeople", { query: "Alex" }, 30_000)).resolves.toMatchObject({ people: [{ name: "Alex Doe" }] });
+    expect(Date.now() - t0, "B's call didn't wait for A's throttle").toBeLessThan(1_500);
+    expect(readsDone, "A's reads still wait out the throttle").toBe(0);
+    expect(fake.count("substrate")).toBe(1);
+
+    busy = false;
+    for (const r of await Promise.all(reads)) expect(r).toMatchObject({ teams: [] });
+  }, 15_000);
+
+  it("35: a call that got its turn back checks the gate again: it doesn't send while another call's 429 has shut it", async () => {
+    h = await bridgeHarness({ ...FAST, maxConcurrentCalls: 2 });
+    const hub = await h.session(); // session A
+    // csa throttles the first read for 1 s and the second for 2 s, then answers.
+    const csaAt: number[] = [];
+    const csa = () => {
+      csaAt.push(Date.now());
+      if (csaAt.length > 2) return { teams: [], chats: [] };
+      const s = String(csaAt.length);
+      return reply(429, { message: "Too many requests" }, { headers: { "retry-after": s } });
+    };
+    // People search (not throttled) answers when the test lets it go, so B holds its turns.
+    const held: (() => void)[] = [];
+    const substrate = () =>
+      new Promise((r) => held.push(() => r({ Groups: [{ Suggestions: [{ DisplayName: "Alex Doe", EmailAddresses: ["alex.doe@contoso.example"] }] }] })));
+    const fake = createFakeChrome({ services: { csa, substrate }, local: { token: TOKEN, port: h.port } });
+    const worker = await loadWorker(fake);
+    worker.registerListeners();
+    link = await connectWorker(fake, () => hub.connected);
+    const b = await h.session();
+    const c = await h.session();
+    await until(() => b.connected && c.connected, 3_000, "both peers see the extension");
+
+    const x = hub.call("listTeams", {}, 30_000); // 429 for 1 s: X waits at the gate, its turn given back
+    x.catch(() => {}); // settled below
+    await until(() => csaAt.length === 1, 3_000, "A's read is throttled");
+    await sleep(200);
+    const bs = [b.call("findPeople", { query: "Alex" }, 30_000), b.call("findPeople", { query: "Alex" }, 30_000)];
+    await until(() => held.length === 2, 3_000, "B's two calls hold both turns");
+    const z = c.call("listTeams", {}, 30_000); // C's read waits for a turn, ahead of X's rejoin
+    z.catch(() => {});
+    await sleep(1_300); // X's gate is open again: X waits for its turn back, behind C
+    held.shift()!(); // C's read takes the freed turn, gets a 429 for 2 s and gives its turn back to X
+    await until(() => csaAt.length >= 3, 5_000, "A's read goes to csa again");
+    held.shift()!();
+    await Promise.allSettled([x, z, ...bs]);
+    expect(csaAt[2], "A's read went to csa while C's 429 had shut the gate").toBeGreaterThanOrEqual(csaAt[1] + 2_000);
+  }, 20_000);
 });

@@ -1,10 +1,43 @@
 // Self-tests of test/helpers/bridgeHarness.ts: hubs, peers and the scripted fake extension.
+import { createServer, type Server } from "node:net";
 import { afterEach, describe, expect, it } from "vitest";
-import { bridgeHarness, type BridgeHarness, until } from "../helpers/bridgeHarness.js";
+import { bridgeHarness, type BridgeHarness } from "../helpers/bridgeHarness.js";
+import { until } from "../helpers/timing.js";
 
 describe("bridge harness", () => {
   let h: BridgeHarness;
-  afterEach(async () => h?.cleanup());
+  let other: Server | undefined;
+  afterEach(async () => {
+    await h?.cleanup();
+    await new Promise<void>((r) => (other ? other.close(() => r()) : r()));
+    other = undefined;
+  });
+
+  /**
+   * Another test file (or program) running alongside listens on a port: the one the harness
+   * reports, if it reports one before anything of its own holds it; else any free port.
+   */
+  async function listenAlongside(of: BridgeHarness): Promise<Server> {
+    let port = 0;
+    try {
+      port = of.port;
+    } catch {}
+    const srv = createServer((socket) => socket.destroy());
+    await new Promise<void>((resolve, reject) => {
+      srv.once("error", reject);
+      srv.listen(port, "127.0.0.1", () => resolve());
+    });
+    return srv;
+  }
+
+  it("23: a program listening alongside can't take the harness's port before its first session starts", async () => {
+    h = await bridgeHarness();
+    other = await listenAlongside(h);
+    const hub = await h.session();
+    expect(hub.role).toBe("hub");
+    await h.extension();
+    expect(hub.connected).toBe(true);
+  });
 
   it("a peer's call reaches the scripted fake extension through the hub", async () => {
     h = await bridgeHarness();
