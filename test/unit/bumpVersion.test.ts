@@ -61,9 +61,10 @@ describe("bump-version VERSION_SAMPLES", () => {
 
 // The helpers below take the file list and each file's fixture from the script (VERSION_FILE_NAMES and the
 // entries' samples), so a new entry in its table, whatever its shape, gets its fixture, its folder, the
-// round-trip check and the "every file holds the new version" check without a test edit; the writeAll
-// failure cases derive which fs call to fail from the number of files (they assume only that there are at
-// least three, so the 2nd rename is neither first nor last, and that package.json comes first, as the
+// round-trip check and the "every file holds the new version" check without a test edit. The writeAll
+// success and failure cases take the file list as a parameter and also run with a fourth, fictional file;
+// the failure cases derive which fs call to fail from the number of files (they assume only that there are
+// at least three, so the 2nd rename is neither first nor last, and that package.json comes first, as the
 // script requires). Still tied to the three current files, on purpose: the broken-file cases and the
 // pkg/lock/manifest assertions.
 
@@ -236,13 +237,26 @@ function writeAllSetup(names: readonly string[], extra: Record<string, string> =
 }
 
 describe("bump-version writeAll", () => {
-  const setup = () => writeAllSetup(VERSION_FILE_NAMES);
+  successCases(VERSION_FILE_NAMES);
+  failureCases(VERSION_FILE_NAMES);
+});
+
+describe("bump-version writeAll with a fourth, fictional version file", () => {
+  const names = [...VERSION_FILE_NAMES, "extra/other.json"];
+  const extra = { "extra/other.json": '{ "version": "0.2.16" }\n' };
+  successCases(names, extra);
+  failureCases(names, extra);
+});
+
+/** Registers writeAll's success cases for the version files in `names` (`extra` as in writeAllSetup). */
+function successCases(names: readonly string[], extra: Record<string, string> = {}) {
+  const setup = () => writeAllSetup(names, extra);
 
   it("writes every file and leaves no temp files", () => {
     const { root, read, writes, leftovers } = setup();
     try {
       writeAll(root, writes);
-      for (const { file, text } of writes) expect(read(file)).toBe(text);
+      for (const { file, text } of writes) expect(read(file), file).toBe(text);
       expect(leftovers()).toEqual([]);
     } finally {
       rmSync(root, { recursive: true, force: true });
@@ -250,23 +264,20 @@ describe("bump-version writeAll", () => {
   });
 
   // Windows has no POSIX mode bits to keep.
-  it.skipIf(process.platform === "win32")("keeps the target's file mode", () => {
+  it.skipIf(process.platform === "win32")("keeps each target's file mode", () => {
     const { root, writes } = setup();
+    // A different mode per file, so a file given another file's mode shows.
+    const modes = [0o755, 0o600, 0o640, 0o700];
+    const modeOf = (i: number) => modes[i % modes.length];
     try {
-      chmodSync(join(root, "package.json"), 0o755);
+      names.forEach((f, i) => chmodSync(join(root, f), modeOf(i)));
       writeAll(root, writes);
-      expect(statSync(join(root, "package.json")).mode & 0o777).toBe(0o755);
+      names.forEach((f, i) => expect(statSync(join(root, f)).mode & 0o777, f).toBe(modeOf(i)));
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
   });
-
-  failureCases(VERSION_FILE_NAMES);
-});
-
-describe("bump-version writeAll with a fourth, fictional version file", () => {
-  failureCases([...VERSION_FILE_NAMES, "extra/other.json"], { "extra/other.json": '{ "version": "0.2.16" }\n' });
-});
+}
 
 /** Registers writeAll's failure cases for the version files in `names` (`extra` as in writeAllSetup). */
 function failureCases(names: readonly string[], extra: Record<string, string> = {}) {
