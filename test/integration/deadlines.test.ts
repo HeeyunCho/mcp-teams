@@ -126,7 +126,7 @@ describe("cancellation from the AI app", () => {
     h = await bridgeHarness();
     const hub = await h.session();
     const ext = await h.extension({ silent: true });
-    await until(() => hub.connected);
+    await until(() => hub.connected, 3_000, "the hub sees the extension");
     const server = new McpServer({ name: "mcp-teams", version: "0.0.0" });
     registerTools(server, hub, { port: h.port, token: TOKEN });
     const client = new Client({ name: "test", version: "0.0.0" });

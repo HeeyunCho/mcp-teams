@@ -1,6 +1,7 @@
 import { describe, expect, it, afterEach, beforeEach } from "vitest";
 import WebSocket from "ws";
 import { DEFAULT_BRIDGE_OPTIONS, ExtensionBridge } from "../../src/bridge.js";
+import { until } from "../helpers/timing.js";
 
 // Each test's port: 0 until its first bridge listens (the system picks a free port and the
 // bridge keeps it), then that bridge's port. A "free" port picked and closed before a bridge
@@ -28,12 +29,6 @@ function connectExt(token: string, origin = ORIGIN) {
   ws.on("open", () => ws.send(JSON.stringify({ type: "hello", token, version: "0.1.0", browser: "Edge" })));
   return ws;
 }
-const waitFor = (cond: () => boolean) =>
-  new Promise<void>((res, rej) => {
-    const t0 = Date.now();
-    const tick = () => (cond() ? res() : Date.now() - t0 > 3000 ? rej(new Error("timeout")) : setTimeout(tick, 20));
-    tick();
-  });
 
 describe("ExtensionBridge", () => {
   let bridge: ExtensionBridge | undefined;
@@ -49,7 +44,7 @@ describe("ExtensionBridge", () => {
         ws.send(JSON.stringify({ type: "response", id: msg.id, ok: true, result: { echo: msg.method, p: msg.params } }));
       }
     });
-    await waitFor(() => bridge!.connected);
+    await until(() => bridge!.connected, 3_000, "the extension to connect");
     expect(bridge.extension).toEqual({ version: "0.1.0", browser: "Edge", origin: ORIGIN });
     await expect(bridge.call("ping", { a: 1 })).resolves.toEqual({ echo: "ping", p: { a: 1 } });
     ws.close();
@@ -63,7 +58,7 @@ describe("ExtensionBridge", () => {
       const msg = JSON.parse(raw.toString());
       if (msg.type === "request") ws.send(JSON.stringify({ type: "response", id: msg.id, ok: false, error: "boom" }));
     });
-    await waitFor(() => bridge!.connected);
+    await until(() => bridge!.connected, 3_000, "the extension to connect");
     await expect(bridge.call("x")).rejects.toThrow("boom");
     ws.close();
   });
@@ -72,7 +67,7 @@ describe("ExtensionBridge", () => {
     bridge = new TestBridge("secret", "0.1.0", { cancelGraceMs: 1_500 });
     await bridge.start();
     const ws = connectExt("secret"); // never answers
-    await waitFor(() => bridge!.connected);
+    await until(() => bridge!.connected, 3_000, "the extension to connect");
     const t0 = Date.now();
     await expect(bridge.call("listChats", {}, 200)).rejects.toThrow(/timed out/);
     expect(Date.now() - t0).toBeLessThan(1_000);
@@ -110,16 +105,16 @@ describe("ExtensionBridge", () => {
     const big = connectExt("secret");
     big.on("error", () => {});
     reply(big, 4096);
-    await waitFor(() => bridge!.connected);
+    await until(() => bridge!.connected, 3_000, "the extension to connect");
     await expect(bridge.call("big")).rejects.toThrow(/too large/);
-    await waitFor(() => !bridge!.connected);
+    await until(() => !bridge!.connected, 3_000, "the bridge to drop the extension");
 
     const small = connectExt("secret");
     reply(small, 10);
-    await waitFor(() => bridge!.connected);
+    await until(() => bridge!.connected, 3_000, "the extension to connect");
     await expect(bridge.call("small")).resolves.toBe("x".repeat(10));
     small.close();
-  });
+  }, 10_000);
 
   it("reloads the extension and waits until the new version is connected", async () => {
     bridge = new TestBridge("secret", "0.2.0");
@@ -140,9 +135,9 @@ describe("ExtensionBridge", () => {
         setTimeout(() => ext("0.2.0"), 200);
       }, 250);
     });
-    await waitFor(() => bridge!.connected);
+    await until(() => bridge!.connected, 3_000, "the extension to connect");
     await expect(bridge.reloadExtension(5_000)).resolves.toEqual({ before: "0.1.0", after: "0.2.0" });
-  });
+  }, 10_000);
 
   it("fails calls clearly when no extension is connected", async () => {
     bridge = new TestBridge("secret", "0.1.0");
@@ -183,7 +178,7 @@ describe("ExtensionBridge with several sessions", () => {
     expect(peer.connected).toBe(false);
 
     fakeExtension();
-    await waitFor(() => peer.connected); // the hub tells peers when the extension connects
+    await until(() => peer.connected, 3_000, "the peer to see the extension"); // the hub tells peers when the extension connects
     // Peers learn where the extension connected from too (setup checks it is ours).
     expect(peer.extension).toEqual({ version: "0.1.0", browser: "Edge", origin: ORIGIN });
     await expect(peer.call("search", { q: 1 })).resolves.toEqual({ echo: "search", p: { q: 1 } });
@@ -199,7 +194,7 @@ describe("ExtensionBridge with several sessions", () => {
       const msg = JSON.parse(raw.toString());
       if (msg.type === "request") ws.send(JSON.stringify({ type: "response", id: msg.id, ok: false, error: "boom" }));
     });
-    await waitFor(() => peer.connected);
+    await until(() => peer.connected, 3_000, "the peer to see the extension");
     await expect(peer.call("x")).rejects.toThrow("boom");
   });
 
@@ -207,15 +202,15 @@ describe("ExtensionBridge with several sessions", () => {
     const hub = await make();
     const peer = await make();
     fakeExtension();
-    await waitFor(() => peer.connected);
+    await until(() => peer.connected, 3_000, "the peer to see the extension");
 
     await hub.close();
-    await waitFor(() => peer.role === "hub");
+    await until(() => peer.role === "hub", 3_000, "the peer to take over as hub");
     expect(peer.connected).toBe(false);
     fakeExtension(); // the real extension retries every 30 s
-    await waitFor(() => peer.connected);
+    await until(() => peer.connected, 3_000, "the peer to see the extension");
     await expect(peer.call("after")).resolves.toEqual({ echo: "after", p: {} });
-  });
+  }, 10_000);
 
   it("a server with another token does not join", async () => {
     await make("secret");
@@ -260,7 +255,7 @@ describe("ExtensionBridge options", () => {
     expect(bridge.role).toBe("hub");
     expect(bridge.port).toBeGreaterThan(0);
     const ws = helloExt(bridge.port);
-    await waitFor(() => bridge!.connected);
+    await until(() => bridge!.connected, 3_000, "the extension to connect");
     ws.close();
   });
 
@@ -269,10 +264,10 @@ describe("ExtensionBridge options", () => {
     await bridge.start();
     const ws = helloExt(bridge.port, false);
     const closed = new Promise<number>((r) => ws.on("close", (code) => r(code)));
-    await waitFor(() => bridge!.connected);
-    await waitFor(() => !bridge!.connected);
+    await until(() => bridge!.connected, 3_000, "the extension to connect");
+    await until(() => !bridge!.connected, 3_000, "the bridge to drop the extension");
     expect(await closed).toBe(1006); // terminated, not closed politely
-  });
+  }, 10_000);
 
   it("keeps the defaults for options given as undefined", async () => {
     bridge = new ExtensionBridge(0, "secret", "0.1.0", {
@@ -288,7 +283,7 @@ describe("ExtensionBridge options", () => {
     // A frozen extension (no pongs) and a socket that never authenticates: with the default
     // 20 s keep-alive and 5 s auth timeout, both are still there 500 ms later.
     const frozen = helloExt(bridge.port, false);
-    await waitFor(() => bridge!.connected);
+    await until(() => bridge!.connected, 3_000, "the extension to connect");
     const silent = new WebSocket(`ws://127.0.0.1:${bridge.port}`, { origin: ORIGIN });
     let silentClosed = false;
     silent.on("close", () => (silentClosed = true));
