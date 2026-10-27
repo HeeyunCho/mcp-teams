@@ -1248,15 +1248,30 @@ let retryTimer = null;
 export const HEARTBEAT_TIMEOUT_MS = 45_000;
 /** The watchdog never waits less: a busy machine runs timers late, and that isn't a frozen hub. */
 const MIN_HEARTBEAT_TIMEOUT_MS = 2_000;
+/**
+ * A watchdog that runs later than this fraction of its wait after it was due finds the worker
+ * stalled. Overdue timers run before the messages that came meanwhile are read, so the hub's ping
+ * may wait unread: it waits once more instead, but not twice in a row, so a frozen hub is still
+ * dropped (as in src/bridge.ts).
+ */
+const STALL_SLACK = 0.5;
+
+/** Whether a check that waited `waitMs` and was due at `due` ran late (see STALL_SLACK). */
+function ranLate(due, waitMs) {
+  return Date.now() - due > waitMs * STALL_SLACK;
+}
+
 let watchdog = null; // { socket, ms, timer } of the current connection
 
 /** (Re)starts the watchdog of `socket`: no ping within `ms` drops it and connects again. */
-function watchHeartbeat(socket, ms) {
+function watchHeartbeat(socket, ms, afterLate = false) {
   clearTimeout(watchdog?.timer);
+  const due = Date.now() + ms;
   const timer = setTimeout(() => {
     if (watchdog?.timer !== timer) return;
     watchdog = null;
     if (ws !== socket) return;
+    if (!afterLate && ranLate(due, ms)) return watchHeartbeat(socket, ms, true);
     // Its close may never complete: nobody can be told the outcome of what came on it, now.
     withdrawAll(socket);
     reconnectNow();
