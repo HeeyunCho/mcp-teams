@@ -1,7 +1,8 @@
 // Self-tests of test/helpers/bridgeHarness.ts: hubs, peers and the scripted fake extension.
 import { createServer, type Server } from "node:net";
 import { afterEach, describe, expect, it } from "vitest";
-import { bridgeHarness, type BridgeHarness, until } from "../helpers/bridgeHarness.js";
+import { bridgeHarness, type BridgeHarness } from "../helpers/bridgeHarness.js";
+import { until } from "../helpers/timing.js";
 
 describe("bridge harness", () => {
   let h: BridgeHarness;

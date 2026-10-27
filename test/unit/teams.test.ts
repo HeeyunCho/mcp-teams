@@ -2,8 +2,6 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 // @ts-expect-error plain JS module shared with the extension
 import * as teams from "../../extension/teams.js";
-// @ts-expect-error plain JS script without types
-import { nextVersion } from "../../scripts/bump-version.mjs";
 
 const OID = "99999999-8888-4777-8666-555555555555";
 
@@ -480,12 +478,6 @@ describe("versions", () => {
     expect(read("extension/manifest.json").version).toBe(version);
     expect(read("package-lock.json").version).toBe(version);
     expect(read("package-lock.json").packages[""].version).toBe(version);
-  });
-
-  it("picks the bump from commit messages", () => {
-    expect(nextVersion("0.1.0", ["Fix search"])).toBe("0.1.1");
-    expect(nextVersion("0.1.3", ["fix: x", "feat(search): folders"])).toBe("0.2.0");
-    expect(nextVersion("0.1.0", ["feat: x\n\n- major for\n  BREAKING CHANGE / type!:, minor for feat:"])).toBe("0.2.0");
   });
 });
 

@@ -8,7 +8,8 @@ import { afterEach, describe, expect, it } from "vitest";
 import { WebSocketServer, type WebSocket } from "ws";
 import { proof, type ExtensionBridge } from "../../src/bridge.js";
 import { registerTools } from "../../src/tools.js";
-import { bridgeHarness, TOKEN, until, type BridgeHarness, type FakeExtension } from "../helpers/bridgeHarness.js";
+import { bridgeHarness, TOKEN, type BridgeHarness, type FakeExtension } from "../helpers/bridgeHarness.js";
+import { until } from "../helpers/timing.js";
 
 const SEND = { conversation: "19:contoso-launch@thread.v2", text: "Hi Alex" };
 

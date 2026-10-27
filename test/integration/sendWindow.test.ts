@@ -6,7 +6,8 @@ import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { registerTools } from "../../src/tools.js";
-import { bridgeHarness, TOKEN, until, type BridgeHarness } from "../helpers/bridgeHarness.js";
+import { bridgeHarness, TOKEN, type BridgeHarness } from "../helpers/bridgeHarness.js";
+import { until } from "../helpers/timing.js";
 import { connectWorker, createFakeChrome, loadWorker, ME_OID, networkError, openedSockets, reply, timedOut, type FakeChrome, type SentRequest, type Worker } from "../helpers/fakeChrome.js";
 
 const CHAT = "19:contoso-launch@thread.v2";

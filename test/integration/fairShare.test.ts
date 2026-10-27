@@ -3,7 +3,8 @@
 // session, each peer another), so one session's long scans can't starve another's quick read.
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { isLostCall, NOT_SENT } from "../../src/bridge.js";
-import { bridgeHarness, FAST, TOKEN, until, type BridgeHarness, type FakeExtension, type Request } from "../helpers/bridgeHarness.js";
+import { bridgeHarness, FAST, TOKEN, type BridgeHarness, type FakeExtension, type Request } from "../helpers/bridgeHarness.js";
+import { until } from "../helpers/timing.js";
 import { connectWorker, createFakeChrome, loadWorker, openedSockets, reply } from "../helpers/fakeChrome.js";
 
 let h: BridgeHarness | undefined;

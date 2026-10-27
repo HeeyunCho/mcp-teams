@@ -935,17 +935,24 @@ export const handlers = {
    */
   async reload() {
     if (pendingSends.size) throw new Error("A message is waiting for your decision in the confirmation window; reload after that.");
+    if (autoSending) throw new Error("A message is being posted; reload after that.");
     setTimeout(() => chrome.runtime.reload(), 250); // after this response is sent
     return { reloading: true, version: VERSION };
   },
 
-  async requestSend({ conversation, to, title, text, threadId, subject }, ctx) {
+  async requestSend({ conversation, to, title, text, threadId, subject, autoSendTo }, ctx) {
     if (!String(text ?? "").trim()) throw new Error("The message is empty.");
+    // The server's allowlist (config autoSendTo) only permits; whether this send goes without the
+    // window is decided below from the target as resolved here (see sendsToMeAlone, isMeAlone).
+    const allow = teams.normalizeAddresses(autoSendTo);
     if (to?.length) {
       if (conversation) throw new Error("Give either a conversation or people (to), not both.");
       if (threadId || subject) throw new Error("reply_to and subject are for channels; a new chat takes people and an optional title.");
       const me = await myMri();
       if (!me) throw new Error("Teams hasn't shown who is signed in yet. Reload the Teams tab and try again.");
+      if (allow.length && !title && (await sendsToMeAlone(to, me, allow, ctx))) {
+        return sendWithoutConfirming({ conversation: NOTES_TO_SELF, text: String(text) }, ctx);
+      }
       const people = await resolvePeople(to, me, ctx);
       if (title && people.length < 2) throw new Error("A title is only for group chats (two or more people besides you).");
       const existing = teams.findExistingChat((await teamsAndChats(true, ctx)).chats, people.map((p) => p.mri), me, title);
@@ -963,6 +970,7 @@ export const handlers = {
       replyingTo = root ? teams.parseMessage(root) : { id: threadId };
     }
     const request = { conversation: conv, text: String(text), threadId: threadId ?? null, subject: subject ?? null, replyingTo };
+    if (allow.length && !threadId && !subject && (await isMeAlone(conv, allow, ctx))) return sendWithoutConfirming(request, ctx);
     return askUserToConfirm(request, ctx);
   },
 };
@@ -1027,6 +1035,85 @@ async function sendMessage({ conversation, newChat, people, text, threadId, subj
   return { sent: true, conversation: conversation.title ?? conversation.id, time: r?.OriginalArrivalTime ? new Date(r.OriginalArrivalTime).toISOString() : null };
 }
 
+// ------------------------------------------------------------ auto-send to self (autoSendTo)
+
+/**
+ * With autoSendTo in the server's config, a message to the signed-in user alone is posted
+ * without the confirmation window. The server only passes the allowlist; the decision is made
+ * here, from the target as resolved here: Teams' notes-to-self chat (48:notes), a chat whose
+ * only member is me, or `to` naming just me. And one of my own addresses (email or UPN, from
+ * my profile) must be on the list. Anything else (a group, meeting or channel, other people, a
+ * chat whose members aren't known, a failed lookup) gets the window as usual.
+ */
+const NOTES_TO_SELF = { id: "48:notes", kind: "self", title: "Notes to self" };
+const AUTO_SENT_NOTE = "Sent without confirmation (auto-send to self): it went only to you, and your address is in autoSendTo in the mcp-teams config.";
+let myAddressCache = null; // { me, addresses }
+let autoSending = 0; // auto-sends being posted (reload waits for them as for a window)
+
+/** The signed-in user's own addresses (email, UPN), from their mt short profile. */
+async function myAddresses(me, ctx) {
+  if (myAddressCache?.me === me) return myAddressCache.addresses;
+  const json = await api("mt", "/beta/users/fetchShortProfile?isMailAddress=false&enableGuest=true&includeIBBarredUsers=true&skypeTeamsInfo=true", {
+    method: "POST",
+    body: [me],
+    ctx,
+    repeatable: true,
+  });
+  const addresses = teams.profileAddresses(json, me);
+  if (addresses.length) myAddressCache = { me, addresses };
+  return addresses;
+}
+
+/** myAddresses, or none when they can't be looked up (then the window shows). */
+async function myAddressesOrNone(me, ctx) {
+  return myAddresses(me, ctx).catch(() => {
+    ctx?.check(); // a withdrawn request ends here
+    return [];
+  });
+}
+
+/** `to` is just me (my MRI, or one of my own addresses), and one of my addresses is allowed. */
+async function sendsToMeAlone(to, me, allow, ctx) {
+  if (to.length !== 1) return false;
+  const q = String(to[0]).trim().toLowerCase();
+  const isMyMri = q === me.toLowerCase();
+  if (!isMyMri && !q.includes("@")) return false; // a name is never auto-sent
+  const mine = await myAddressesOrNone(me, ctx);
+  if (!isMyMri && !mine.includes(q)) return false;
+  return mine.some((a) => allow.includes(a));
+}
+
+/** The resolved conversation reaches me alone, and one of my addresses is allowed. */
+async function isMeAlone(conv, allow, ctx) {
+  const me = await myMri();
+  if (!me) return false;
+  let alone = conv.id === NOTES_TO_SELF.id;
+  if (!alone && conv.kind !== "channel" && conv.kind !== "meeting") {
+    // Members from a fresh list: a chat that has anyone else in it is never auto-sent.
+    const data = await teamsAndChats(true, ctx).catch(() => {
+      ctx?.check();
+      return null;
+    });
+    const chat = data?.chats.find((c) => c.id === conv.id);
+    const members = [...new Set(chat?.members ?? [])];
+    alone = !!chat && chat.kind !== "meeting" && chat.kind !== "channel" && members.length === 1 && members[0] === me;
+  }
+  return alone && (await myAddressesOrNone(me, ctx)).some((a) => allow.includes(a));
+}
+
+/** Posts without the window (see above). Once started, the post runs to the end, as after a click. */
+async function sendWithoutConfirming(request, ctx) {
+  if (ctx?.cancelled) return WITHDRAWN;
+  autoSending++;
+  try {
+    return { ...(await sendMessage(request)), autoSent: true, note: AUTO_SENT_NOTE };
+  } catch (err) {
+    return { sent: false, autoSent: true, reason: sendFailure(err) };
+  } finally {
+    autoSending--;
+  }
+}
+
 // ------------------------------------------------------------ send confirmation
 
 /**
@@ -1082,6 +1169,17 @@ async function askUserToConfirm(request, ctx) {
   });
 }
 
+/** Why a post failed, as told to the AI. */
+function sendFailure(err) {
+  // Without an answer the post may have gone through: saying it failed would invite a second one.
+  const cause = /[.!?]$/.test(err.message) ? err.message : `${err.message}.`;
+  return err.chatMayExist
+    ? `Creating the chat did not finish: ${cause} The chat may have been created, without the message: check with list_chats before trying again.`
+    : err.outcomeUnknown
+      ? `Sending did not finish: ${cause} The message may have been posted: check with read_messages before sending again.`
+      : `Sending failed: ${err.message}`;
+}
+
 function onWindowRemoved(windowId) {
   for (const p of pendingSends.values()) {
     if (p.windowId === windowId) p.finish({ sent: false, reason: "The user closed the confirmation window; nothing was sent." });
@@ -1108,14 +1206,7 @@ function onConfirmMessage(msg, sender, sendResponse) {
         p.finish(await sendMessage(p.request), true);
         sendResponse({ ok: true });
       } catch (err) {
-        // Without an answer the post may have gone through: saying it failed would invite a second one.
-        const cause = /[.!?]$/.test(err.message) ? err.message : `${err.message}.`;
-        const reason = err.chatMayExist
-          ? `Creating the chat did not finish: ${cause} The chat may have been created, without the message: check with list_chats before trying again.`
-          : err.outcomeUnknown
-            ? `Sending did not finish: ${cause} The message may have been posted: check with read_messages before sending again.`
-            : `Sending failed: ${err.message}`;
-        p.finish({ sent: false, reason }, true);
+        p.finish({ sent: false, reason: sendFailure(err) }, true);
         sendResponse({ ok: false, error: err.message });
       }
     })();
@@ -1157,15 +1248,30 @@ let retryTimer = null;
 export const HEARTBEAT_TIMEOUT_MS = 45_000;
 /** The watchdog never waits less: a busy machine runs timers late, and that isn't a frozen hub. */
 const MIN_HEARTBEAT_TIMEOUT_MS = 2_000;
+/**
+ * A watchdog that runs later than this fraction of its wait after it was due finds the worker
+ * stalled. Overdue timers run before the messages that came meanwhile are read, so the hub's ping
+ * may wait unread: it waits once more instead, but not twice in a row, so a frozen hub is still
+ * dropped (as in src/bridge.ts).
+ */
+const STALL_SLACK = 0.5;
+
+/** Whether a check that waited `waitMs` and was due at `due` ran late (see STALL_SLACK). */
+function ranLate(due, waitMs) {
+  return Date.now() - due > waitMs * STALL_SLACK;
+}
+
 let watchdog = null; // { socket, ms, timer } of the current connection
 
 /** (Re)starts the watchdog of `socket`: no ping within `ms` drops it and connects again. */
-function watchHeartbeat(socket, ms) {
+function watchHeartbeat(socket, ms, afterLate = false) {
   clearTimeout(watchdog?.timer);
+  const due = Date.now() + ms;
   const timer = setTimeout(() => {
     if (watchdog?.timer !== timer) return;
     watchdog = null;
     if (ws !== socket) return;
+    if (!afterLate && ranLate(due, ms)) return watchHeartbeat(socket, ms, true);
     // Its close may never complete: nobody can be told the outcome of what came on it, now.
     withdrawAll(socket);
     reconnectNow();

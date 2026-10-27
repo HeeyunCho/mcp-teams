@@ -102,13 +102,16 @@ Every AI session starts its own mcp-teams server, and they share the one extensi
 |---|---|---|
 | `token` | — | random, generated once; the server, its peers and the extension prove to each other that they know it |
 | `port` | `TEAMS_MCP_PORT` | `47393` (also set it in the extension popup) |
+| `autoSendTo` | — | `[]`: every send shows the confirmation window |
+
+`autoSendTo` is a list of your own email addresses (or UPNs), compared without regard to case or surrounding spaces, e.g. `"autoSendTo": ["you@example.com"]`. With it, `send_message` posts without the confirmation window when the message goes to you alone: your notes-to-self chat, a chat whose only member is you, or `to` with just your own address. The extension decides this itself after resolving the target: it looks up your profile and posts without asking only if one of your own addresses is on the list. Anything else (other people, group chats you are in, meetings, channels, a chat or profile it can't look up) shows the window as usual. The result then says `autoSent: true`. A value that isn't a list of email addresses stops the server with an error. Restart the AI session after changing it.
 
 ## Security notes
 
 - The bridge listens only on `127.0.0.1`. Web pages can't connect to it, because only extension origins are accepted.
 - The server and the extension prove to each other that they know the pairing token in `~/.mcp-teams/config.json`, without sending it. Setup copies it into the installed extension folder as `pairing.json`; both files can be read only by your user. So a program that takes the port while no AI app runs gets nothing from the extension, and a program posing as the extension gets no calls.
 - Teams' tokens are only ever sent to the service they were captured from.
-- Messages can contain prompt injection. The send-confirmation window is the safeguard, so read it before clicking Send.
+- Messages can contain prompt injection. The send-confirmation window is the safeguard, so read it before clicking Send. With `autoSendTo` set, messages to yourself alone skip it (see Configuration).
 - The extension may observe requests to Microsoft hosts (`*.microsoft.com`, `*.office.com`, `*.sharepoint.com` and similar), but it only records requests made by the Teams tab, and only names, for `api_traffic`. It runs requests only in Teams tabs, and in SharePoint tabs to read transcripts.
 - If you also give an AI direct control of your browser or desktop, it could click the confirmation button itself. Don't combine the two if you rely on the confirmation step.
 
@@ -129,6 +132,6 @@ npm test                   # builds, then runs unit, integration and system test
 npm run probe -- status    # calls one extension method through the bridge (see scripts/probe.mjs)
 ```
 
-Versions are bumped automatically. On every push to `main` (except Markdown-only changes), the **Version bump** GitHub Action runs the tests, then bumps `package.json`, `package-lock.json` and `extension/manifest.json`, commits `chore(release): vX.Y.Z` and tags it. `feat:` commits bump the minor version, anything else the patch. Stay on 0.x: don't use `type!:` or a `BREAKING CHANGE:` footer.
+Versions are bumped automatically. On every push to `main` (except Markdown-only changes), the **Version bump** GitHub Action runs the tests, then bumps `package.json`, `package-lock.json` and `extension/manifest.json`, commits `chore(release): vX.Y.Z` and tags it. While the version is below 1.0.0, a breaking change (`type!:` or a `BREAKING CHANGE:` footer) bumps the minor version and anything else, `feat:` included, the patch. From 1.0.0 on it's standard semver: breaking → major, `feat:` → minor, anything else → patch.
 
 Every pull request and every push to `main` is also scanned for committed secrets by the **Secret scan** GitHub Action (gitleaks). Known false positives go in `.gitleaksignore`.
