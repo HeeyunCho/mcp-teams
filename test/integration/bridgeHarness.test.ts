@@ -1,7 +1,7 @@
 // Self-tests of test/helpers/bridgeHarness.ts: hubs, peers and the scripted fake extension.
 import { createServer, type Server } from "node:net";
 import { afterEach, describe, expect, it } from "vitest";
-import { bridgeHarness, type BridgeHarness, until } from "../helpers/bridgeHarness.js";
+import { bridgeHarness, type BridgeHarness, stall, until } from "../helpers/bridgeHarness.js";
 
 describe("bridge harness", () => {
   let h: BridgeHarness;
@@ -76,5 +76,12 @@ describe("bridge harness", () => {
     await hub.close();
     await until(() => peer.role === "hub" && peer.connected, 5_000, "the peer to take over");
     await expect(peer.call("status")).resolves.toBe("from the extension");
+  });
+
+  it("stall holds back a due timer for at least the given time", async () => {
+    const t0 = performance.now();
+    const fired = new Promise<number>((r) => setTimeout(() => r(performance.now()), 0));
+    stall(100);
+    expect((await fired) - t0).toBeGreaterThanOrEqual(100);
   });
 });
