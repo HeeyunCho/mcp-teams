@@ -7,6 +7,7 @@ import { ExtensionBridge, isNewer, proof } from "../../src/bridge.js";
 import { EXTENSION_ID, EXTENSION_ORIGIN, extensionIdFromKey, installedVersion, syncExtension, writePairing } from "../../src/extension.js";
 // @ts-expect-error plain JS module shared with the extension
 import { pairingProof } from "../../extension/teams.js";
+import { until } from "../helpers/timing.js";
 
 // Each test's port: 0 until its first bridge listens (the system picks a free port and the
 // bridge keeps it), then that bridge's port. A "free" port picked and closed before a bridge
@@ -161,16 +162,13 @@ describe("several browsers at once", () => {
     });
     return { ws, got };
   };
-  const until = async (cond: () => boolean) => {
-    for (let i = 0; i < 100 && !cond(); i++) await new Promise((r) => setTimeout(r, 20));
-  };
 
   it("keeps both connected and sends calls to the browser where Teams is signed in", async () => {
     bridge = new TestBridge("secret", "0.15.0");
     await bridge.start();
     const edge = browser("Edge", "edge-1", true);
     const chrome = browser("Chrome", "chrome-1", false);
-    await until(() => bridge!.extensions.length === 2);
+    await until(() => bridge!.extensions.length === 2, 3_000, "both browsers to connect");
     expect(bridge.extensions.map((e) => e.browser).sort()).toEqual(["Chrome", "Edge"]);
     await expect(bridge.call("listTeams")).resolves.toEqual({ from: "Edge" });
     // It sticks with the browser that answered, without asking again.
@@ -180,7 +178,7 @@ describe("several browsers at once", () => {
 
     // When that browser goes away, calls go to the other one.
     edge.ws.close();
-    await until(() => bridge!.extensions.length === 1);
+    await until(() => bridge!.extensions.length === 1, 3_000, "the bridge to drop the closed Edge connection");
     await expect(bridge.call("listTeams")).resolves.toEqual({ from: "Chrome" });
     chrome.ws.close();
   });
@@ -190,7 +188,7 @@ describe("several browsers at once", () => {
     await bridge.start();
     const edge = browser("Edge", "edge-1", true);
     const chrome = browser("Chrome", "chrome-1", false);
-    await until(() => bridge!.extensions.length === 2);
+    await until(() => bridge!.extensions.length === 2, 3_000, "both browsers to connect");
     await expect(bridge.call("reloadAll")).resolves.toEqual({ reloading: 2 });
     expect(edge.got).toContain("reload");
     expect(chrome.got).toContain("reload");
@@ -198,7 +196,11 @@ describe("several browsers at once", () => {
     const closed = new Promise((r) => chrome.ws.on("close", r));
     const chromeAgain = browser("Chrome", "chrome-1", false);
     expect(await closed).toBe(4000);
-    await until(() => bridge!.extensions.length === 2 && chromeAgain.ws.readyState === WebSocket.OPEN);
+    await until(
+      () => bridge!.extensions.length === 2 && chromeAgain.ws.readyState === WebSocket.OPEN,
+      3_000,
+      "the reconnected Chrome to replace its old connection",
+    );
     expect(bridge.extensions.map((e) => e.instance).sort()).toEqual(["chrome-1", "edge-1"]);
     edge.ws.close();
     chromeAgain.ws.close();
