@@ -186,23 +186,24 @@ export const VERSION_SAMPLES = Object.fromEntries(VERSION_FILES.map((f) => [f.fi
 
 /**
  * Bumps the version files under `root` and returns the new version: by `level` if it is patch, minor or major,
- * else from the NUL-separated commit messages `readMessages()` resolves to (called only then). What the CLI
- * runs, with the repository root and stdin; tests call it on a temporary root, in-process.
+ * else from the commit messages in the string `readInput()` resolves to, NUL-separated (called only then). What
+ * the CLI runs, with the repository root and stdin; tests call it on a temporary root, in-process.
  */
-export async function bumpFiles(root, level, readMessages) {
+export async function bumpFiles(root, level, readInput) {
   const files = VERSION_FILES.map((f) => ({ ...f, ...readJson(root, f.file) }));
   const current = files[0].json.version; // package.json, the first entry, holds the current version
   let next;
   if (["patch", "minor", "major"].includes(level)) {
     next = increment(current, level);
   } else {
-    const input = await readMessages();
+    const input = await readInput();
     next = nextVersion(current, input.split("\0").filter((m) => m.trim()));
   }
   writeAll(root, files.map(({ file, text, update }) => ({ file, text: update(file, text, next), original: text })));
   return next;
 }
 
+/** Reads all of stdin as one string (the CLI's `readInput`). */
 async function readStdin() {
   let input = "";
   for await (const chunk of process.stdin) input += chunk;
