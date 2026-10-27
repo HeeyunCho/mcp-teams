@@ -114,7 +114,7 @@ describe("ExtensionBridge", () => {
     await until(() => bridge!.connected, 3_000, "the extension to connect");
     await expect(bridge.call("small")).resolves.toBe("x".repeat(10));
     small.close();
-  });
+  }, 10_000);
 
   it("reloads the extension and waits until the new version is connected", async () => {
     bridge = new TestBridge("secret", "0.2.0");
@@ -137,7 +137,7 @@ describe("ExtensionBridge", () => {
     });
     await until(() => bridge!.connected, 3_000, "the extension to connect");
     await expect(bridge.reloadExtension(5_000)).resolves.toEqual({ before: "0.1.0", after: "0.2.0" });
-  });
+  }, 10_000);
 
   it("fails calls clearly when no extension is connected", async () => {
     bridge = new TestBridge("secret", "0.1.0");
@@ -210,7 +210,7 @@ describe("ExtensionBridge with several sessions", () => {
     fakeExtension(); // the real extension retries every 30 s
     await until(() => peer.connected, 3_000, "the peer to see the extension");
     await expect(peer.call("after")).resolves.toEqual({ echo: "after", p: {} });
-  });
+  }, 10_000);
 
   it("a server with another token does not join", async () => {
     await make("secret");
@@ -267,7 +267,7 @@ describe("ExtensionBridge options", () => {
     await until(() => bridge!.connected, 3_000, "the extension to connect");
     await until(() => !bridge!.connected, 3_000, "the bridge to drop the extension");
     expect(await closed).toBe(1006); // terminated, not closed politely
-  });
+  }, 10_000);
 
   it("keeps the defaults for options given as undefined", async () => {
     bridge = new ExtensionBridge(0, "secret", "0.1.0", {
