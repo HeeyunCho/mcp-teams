@@ -168,7 +168,7 @@ describe("several browsers at once", () => {
     await bridge.start();
     const edge = browser("Edge", "edge-1", true);
     const chrome = browser("Chrome", "chrome-1", false);
-    await until(() => bridge!.extensions.length === 2, undefined, "both browsers to connect");
+    await until(() => bridge!.extensions.length === 2, 3_000, "both browsers to connect");
     expect(bridge.extensions.map((e) => e.browser).sort()).toEqual(["Chrome", "Edge"]);
     await expect(bridge.call("listTeams")).resolves.toEqual({ from: "Edge" });
     // It sticks with the browser that answered, without asking again.
@@ -178,7 +178,7 @@ describe("several browsers at once", () => {
 
     // When that browser goes away, calls go to the other one.
     edge.ws.close();
-    await until(() => bridge!.extensions.length === 1, undefined, "the bridge to drop the closed Edge connection");
+    await until(() => bridge!.extensions.length === 1, 3_000, "the bridge to drop the closed Edge connection");
     await expect(bridge.call("listTeams")).resolves.toEqual({ from: "Chrome" });
     chrome.ws.close();
   });
@@ -188,7 +188,7 @@ describe("several browsers at once", () => {
     await bridge.start();
     const edge = browser("Edge", "edge-1", true);
     const chrome = browser("Chrome", "chrome-1", false);
-    await until(() => bridge!.extensions.length === 2, undefined, "both browsers to connect");
+    await until(() => bridge!.extensions.length === 2, 3_000, "both browsers to connect");
     await expect(bridge.call("reloadAll")).resolves.toEqual({ reloading: 2 });
     expect(edge.got).toContain("reload");
     expect(chrome.got).toContain("reload");
@@ -198,7 +198,7 @@ describe("several browsers at once", () => {
     expect(await closed).toBe(4000);
     await until(
       () => bridge!.extensions.length === 2 && chromeAgain.ws.readyState === WebSocket.OPEN,
-      undefined,
+      3_000,
       "the reconnected Chrome to replace its old connection",
     );
     expect(bridge.extensions.map((e) => e.instance).sort()).toEqual(["chrome-1", "edge-1"]);
