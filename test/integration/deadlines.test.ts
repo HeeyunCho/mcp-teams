@@ -7,7 +7,8 @@ import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { registerTools } from "../../src/tools.js";
-import { bridgeHarness, TOKEN, until, type BridgeHarness } from "../helpers/bridgeHarness.js";
+import { bridgeHarness, TOKEN, type BridgeHarness } from "../helpers/bridgeHarness.js";
+import { until } from "../helpers/timing.js";
 import { connectWorker, createFakeChrome, loadWorker, never, openedSockets, type Worker } from "../helpers/fakeChrome.js";
 
 const csa = () => ({ teams: [], chats: [{ id: "19:contoso-launch@thread.v2", title: "Contoso launch", chatType: "chat", members: [] }] });
