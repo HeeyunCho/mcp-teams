@@ -14,11 +14,11 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeEach, describe, expect, it } from "vitest";
 // @ts-expect-error plain JS script without types
 import * as bump from "../../scripts/bump-version.mjs";
 
-const { levelFor, nextVersion, writeAll } = bump;
+const { bumpFiles, increment, levelFor, nextVersion, writeAll } = bump;
 const VERSION_FILE_NAMES: readonly string[] = bump.VERSION_FILE_NAMES;
 const VERSION_SAMPLES: Readonly<Record<string, (version: string) => string>> = bump.VERSION_SAMPLES;
 
@@ -52,8 +52,10 @@ describe("bump-version VERSION_SAMPLES", () => {
 
   // A sample missing a field its entry's update must replace makes the bump throw ("has fewer than N
   // fields"); one holding the old version in a field the update skips doesn't match the new sample.
-  it.each(VERSION_FILE_NAMES)("%s sample round-trips through a real bump to the new version", (f) => {
-    const r = runCli("0.2.16", ["patch"]);
+  // One bump serves every file's case: the first case to run makes it, the others reuse its result.
+  let bumped: ReturnType<typeof runBump> | undefined;
+  it.each(VERSION_FILE_NAMES)("%s sample round-trips through a real bump to the new version", async (f) => {
+    const r = await (bumped ??= runBump("0.2.16", ["patch"]));
     expect(r.out).toBe("0.2.17");
     expect(r.texts[f]).toBe(VERSION_SAMPLES[f]("0.2.17"));
   });
@@ -92,14 +94,50 @@ function makeRoot(version: string, files: FileOverrides = {}) {
   return root;
 }
 
-const runScript = (root: string, args: string[], stdin = "") =>
-  execFileSync(process.execPath, [join(root, "scripts", "bump-version.mjs"), ...args], { input: stdin, encoding: "utf8", stdio: "pipe" }).trim();
+// Each run of the script is a new node process: ~0.2 s on an idle machine, but 0.8 s (up to 2.6 s) with the CPU
+// oversubscribed and 6-18 s once memory runs short, as in a full `npm test` on a busy Windows machine. Two in one
+// test took 5.2 s there, past vitest's 5 s timeout. So the bumps run in-process (bumpFiles), and only the tests
+// of the command line itself (arguments, stdin, exit code) start the script, once each.
+const MAX_SCRIPT_RUNS_PER_TEST = 1;
+const MAX_SCRIPT_RUNS = 2;
+let spawns = 0;
+let totalSpawns = 0;
+beforeEach(() => {
+  spawns = 0;
+});
+afterEach(() => {
+  expect(spawns, "script runs (node processes) in this test; split the test or test in-process").toBeLessThanOrEqual(MAX_SCRIPT_RUNS_PER_TEST);
+});
+afterAll(() => {
+  expect(totalSpawns, "script runs (node processes) in this file; test the bump in-process with bumpFiles").toBeLessThanOrEqual(MAX_SCRIPT_RUNS);
+});
 
-/** Runs the script on a copy of the repository's version files in a temporary folder. */
-function runCli(version: string, args: string[], stdin = "", files: FileOverrides = {}) {
+const runScript = (root: string, args: string[], stdin = "") => {
+  spawns++;
+  totalSpawns++;
+  return execFileSync(process.execPath, [join(root, "scripts", "bump-version.mjs"), ...args], { input: stdin, encoding: "utf8", stdio: "pipe" }).trim();
+};
+
+/** How a test runs a bump on a root: in-process through bumpFiles, as the CLI does, or as the CLI itself (a new process). */
+type Via = "bumpFiles" | "process";
+
+type RunBumpOptions = {
+  /** What the CLI would read on stdin: NUL-separated commit messages. */
+  stdin?: string;
+  /** Fixture overrides, as in makeRoot. */
+  files?: FileOverrides;
+  /** In-process (the default) or as a new process. */
+  via?: Via;
+};
+
+/**
+ * Runs a bump with the CLI's arguments on a copy of the repository's version files in a temporary folder;
+ * `out` is what the CLI prints (the new version).
+ */
+async function runBump(version: string, args: string[], { stdin = "", files = {}, via = "bumpFiles" }: RunBumpOptions = {}) {
   const root = makeRoot(version, files);
   try {
-    const out = runScript(root, args, stdin);
+    const out: string = via === "process" ? runScript(root, args, stdin) : await bumpFiles(root, args[0], async () => stdin);
     const read = (f: string) => JSON.parse(readFileSync(join(root, f), "utf8"));
     const texts: Record<string, string> = Object.fromEntries(
       VERSION_FILE_NAMES.map((f) => [f, readFileSync(join(root, f), "utf8")]),
@@ -112,9 +150,9 @@ function runCli(version: string, args: string[], stdin = "", files: FileOverride
 
 /**
  * Runs `patch` with one version file left out (`null`), replaced, or made a directory (`"<dir>"`), from `version`;
- * returns the error and every file's bytes before and after.
+ * returns the error (its message is what the CLI prints) and every file's bytes before and after.
  */
-function runCliBroken(file: string, content: string | null, version = "0.2.16") {
+async function runBumpBroken(file: string, content: string | null, version = "0.2.16") {
   const root = makeRoot(version, { [file]: content === "<dir>" ? null : content });
   if (content === "<dir>") mkdirSync(join(root, file));
   const bytes = (f: string) => {
@@ -125,11 +163,11 @@ function runCliBroken(file: string, content: string | null, version = "0.2.16") 
   const snapshot = () => Object.fromEntries(VERSION_FILE_NAMES.map((f) => [f, bytes(f)]));
   try {
     const before = snapshot();
-    let error: (Error & { stderr?: string }) | undefined;
+    let error: Error | undefined;
     try {
-      runScript(root, ["patch"]);
+      await bumpFiles(root, "patch", async () => "");
     } catch (e) {
-      error = e as Error & { stderr?: string };
+      error = e as Error;
     }
     return { error, before, after: snapshot() };
   } finally {
@@ -137,7 +175,7 @@ function runCliBroken(file: string, content: string | null, version = "0.2.16") 
   }
 }
 
-describe("bump-version CLI with a missing or broken version file", () => {
+describe("bump-version bumpFiles with a missing or broken version file", () => {
   it.each([
     ["package-lock.json", null, /package-lock\.json/],
     ["extension/manifest.json", null, /manifest\.json/],
@@ -149,20 +187,20 @@ describe("bump-version CLI with a missing or broken version file", () => {
     ["package-lock.json", JSON.stringify({ name: "x", packages: {} }, null, 2), /package-lock\.json/],
     ["package-lock.json", JSON.stringify({ name: "x", version: "0.2.16", packages: {} }, null, 2), /package-lock\.json/],
     ["extension/manifest.json", JSON.stringify({ name: "x" }, null, 2), /manifest\.json/],
-  ] as const)("fails on %s = %j, naming the file, and leaves every file untouched", (file, content, message) => {
-    const r = runCliBroken(file, content);
+  ] as const)("fails on %s = %j, naming the file, and leaves every file untouched", async (file, content, message) => {
+    const r = await runBumpBroken(file, content);
     expect(r.error).toBeDefined();
-    expect(r.error?.stderr).toMatch(message);
+    expect(r.error?.message).toMatch(message);
     expect(r.after).toEqual(r.before);
   });
 
-  it("leaves every file untouched when the new version can't be computed", () => {
-    const tooBig = runCliBroken("package.json", JSON.stringify({ name: "x", version: "1.2.65535" }, null, 2), "1.2.65535");
-    expect(tooBig.error?.stderr).toMatch(/65535/);
-    expect(tooBig.after).toEqual(tooBig.before);
-    const invalid = runCliBroken("package.json", JSON.stringify({ name: "x", version: "1.2" }, null, 2));
-    expect(invalid.error?.stderr).toMatch(/invalid version "1\.2"/i);
-    expect(invalid.after).toEqual(invalid.before);
+  it.each([
+    ["1.2.65535", /65535/],
+    ["1.2", /invalid version "1\.2"/i],
+  ] as const)("leaves every file untouched when the new version can't be computed from %s", async (version, message) => {
+    const r = await runBumpBroken("package.json", JSON.stringify({ name: "x", version }, null, 2), version);
+    expect(r.error?.message).toMatch(message);
+    expect(r.after).toEqual(r.before);
   });
 });
 
@@ -421,8 +459,9 @@ function failureCases(names: readonly string[], extra: Record<string, string> = 
 }
 
 describe("bump-version CLI", () => {
-  it("reads NUL-separated commit messages from stdin, prints the new version and writes all three files", () => {
-    const r = runCli("0.2.16", [], "feat: autoSendTo\n\n\0fix: y\n\n\0");
+  // A real process: the script's entry, stdin and stdout, as the version workflow runs it.
+  it("reads NUL-separated commit messages from stdin, prints the new version and writes all three files", async () => {
+    const r = await runBump("0.2.16", [], { stdin: "feat: autoSendTo\n\n\0fix: y\n\n\0", via: "process" });
     expect(r.out).toBe("0.2.17");
     expect(r.pkg.version).toBe("0.2.17");
     expect(r.lock.version).toBe("0.2.17");
@@ -432,15 +471,18 @@ describe("bump-version CLI", () => {
     for (const f of VERSION_FILE_NAMES) expect(r.texts[f], f).toContain('"0.2.17"');
   });
 
-  it("takes an explicit level as given", () => {
-    expect(runCli("0.2.16", ["minor"]).out).toBe("0.3.0");
-    expect(runCli("0.2.16", ["major"]).out).toBe("1.0.0");
+  it.each([
+    ["minor", "0.3.0"],
+    ["major", "1.0.0"],
+  ])("takes an explicit level as given (%s)", async (level, expected) => {
+    expect((await runBump("0.2.16", [level])).out).toBe(expected);
   });
 
-  it("replaces a prerelease in every file, and a manifest version_name with the released version", () => {
+  it("replaces a prerelease in every file, and a manifest version_name with the released version", async () => {
     // Chrome's manifest "version" takes only 1-4 dot-separated integers; a prerelease can only sit in "version_name".
-    const r = runCli("0.3.0-beta.1", [], "fix: y\n\n\0", {
-      "extension/manifest.json": JSON.stringify({ version: "0.3.0", version_name: "0.3.0-beta.1" }, null, 2),
+    const r = await runBump("0.3.0-beta.1", [], {
+      stdin: "fix: y\n\n\0",
+      files: { "extension/manifest.json": JSON.stringify({ version: "0.3.0", version_name: "0.3.0-beta.1" }, null, 2) },
     });
     expect(r.out).toBe("0.3.0");
     expect(r.pkg.version).toBe("0.3.0");
@@ -500,8 +542,9 @@ describe("nextVersion from a prerelease (semver.inc / npm version)", () => {
   it("releases X.0.0 on a major bump when minor and patch are 0, else moves to the next major", () => {
     expect(nextVersion("2.0.0-alpha", ["feat!: x"])).toBe("2.0.0");
     expect(nextVersion("1.2.3-rc.1", ["feat!: x"])).toBe("2.0.0");
-    expect(runCli("0.3.0-beta.1", ["major"]).out).toBe("1.0.0");
-    expect(runCli("1.0.0-rc.1", ["major"]).out).toBe("1.0.0");
+    // An explicit `major`, as the CLI applies it (see "takes an explicit level as given").
+    expect(increment("0.3.0-beta.1", "major")).toBe("1.0.0");
+    expect(increment("1.0.0-rc.1", "major")).toBe("1.0.0");
   });
 
   it("drops build metadata", () => {
@@ -533,7 +576,8 @@ describe("nextVersion with an invalid version", () => {
     expect(() => nextVersion("0.0.65535", ["fix: x"])).toThrow(/65535/);
   });
 
-  it("makes the CLI exit with an error naming the bad version", () => {
-    expect(() => runCli("1.2", ["patch"])).toThrow(/invalid version "1\.2"/i);
+  // A real process: the workflow relies on the script exiting non-zero.
+  it("makes the CLI exit with an error naming the bad version", async () => {
+    await expect(runBump("1.2", ["patch"], { via: "process" })).rejects.toThrow(/invalid version "1\.2"/i);
   });
 });

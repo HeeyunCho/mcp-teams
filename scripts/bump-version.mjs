@@ -97,11 +97,11 @@ function setVersion(file, text, version, count = 1, field = "version", optional 
   return out;
 }
 
-/** Reads a version file and checks it is JSON, throwing an error that names the file. */
-function readJson(file) {
+/** Reads a version file under `root` and checks it is JSON, throwing an error that names the file. */
+function readJson(root, file) {
   let text;
   try {
-    text = readFileSync(join(ROOT, file), "utf8");
+    text = readFileSync(join(root, file), "utf8");
   } catch (e) {
     throw new Error(`Cannot read ${file}: ${e.message}`);
   }
@@ -184,20 +184,34 @@ export const VERSION_FILE_NAMES = VERSION_FILES.map((f) => f.file);
 /** Each version file's `sample`, keyed by path, in table order. For tests. */
 export const VERSION_SAMPLES = Object.fromEntries(VERSION_FILES.map((f) => [f.file, f.sample]));
 
-async function main() {
-  const level = process.argv[2];
-  const files = VERSION_FILES.map((f) => ({ ...f, ...readJson(f.file) }));
+/**
+ * Bumps the version files under `root` and returns the new version: by `level` if it is patch, minor or major,
+ * else from the commit messages in the string `readInput()` resolves to, NUL-separated (called only then). What
+ * the CLI runs, with the repository root and stdin; tests call it on a temporary root, in-process.
+ */
+export async function bumpFiles(root, level, readInput) {
+  const files = VERSION_FILES.map((f) => ({ ...f, ...readJson(root, f.file) }));
   const current = files[0].json.version; // package.json, the first entry, holds the current version
   let next;
   if (["patch", "minor", "major"].includes(level)) {
     next = increment(current, level);
   } else {
-    let input = "";
-    for await (const chunk of process.stdin) input += chunk;
+    const input = await readInput();
     next = nextVersion(current, input.split("\0").filter((m) => m.trim()));
   }
-  writeAll(ROOT, files.map(({ file, text, update }) => ({ file, text: update(file, text, next), original: text })));
-  console.log(next);
+  writeAll(root, files.map(({ file, text, update }) => ({ file, text: update(file, text, next), original: text })));
+  return next;
+}
+
+/** Reads all of stdin as one string (the CLI's `readInput`). */
+async function readStdin() {
+  let input = "";
+  for await (const chunk of process.stdin) input += chunk;
+  return input;
+}
+
+async function main() {
+  console.log(await bumpFiles(ROOT, process.argv[2], readStdin));
 }
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) await main();
