@@ -4,7 +4,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { WebSocketServer, type WebSocket } from "ws";
 import { proof } from "../../src/bridge.js";
-import { FAST, TOKEN as HUB_TOKEN, bridgeHarness, type BridgeHarness } from "../helpers/bridgeHarness.js";
+import { FAST, TOKEN as HUB_TOKEN, bridgeHarness, stall, type BridgeHarness } from "../helpers/bridgeHarness.js";
 import { connectWorker, createFakeChrome, loadWorker, NativeWebSocket, openedSockets } from "../helpers/fakeChrome.js";
 
 const TOKEN = "watchdog-token";
@@ -123,12 +123,8 @@ describe("2.3: extension watchdog", () => {
   });
 
   // A watchdog that runs more than half its wait late (the process stalled) skips its verdict,
-  // since the hub's ping may wait unread, but at most once in a row (see src/bridge.ts).
-  /** Blocks this whole process (hub and worker alike), as a busy machine or a long GC does. */
-  function stall(ms: number) {
-    const end = Date.now() + ms;
-    while (Date.now() < end);
-  }
+  // since the hub's ping may wait unread, but at most once in a row (see src/bridge.ts). stall()
+  // (test/helpers/bridgeHarness.ts) blocks this whole process, hub and worker alike, to show it.
 
   /**
    * When the worker closed its connection to the hub on `port` (each time). Only the worker's own

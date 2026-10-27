@@ -7,16 +7,10 @@ import { randomUUID } from "node:crypto";
 import { afterEach, describe, expect, it } from "vitest";
 import WebSocket, { WebSocketServer } from "ws";
 import { LOST_CALL, isLostCall, proof } from "../../src/bridge.js";
-import { FAST, TOKEN, bridgeHarness, until, type BridgeHarness } from "../helpers/bridgeHarness.js";
+import { FAST, TOKEN, bridgeHarness, stall, until, type BridgeHarness } from "../helpers/bridgeHarness.js";
 
 const PERIOD = 1_500;
 const OPTIONS = { ...FAST, keepAliveMs: PERIOD };
-
-/** Blocks this process (hubs, peers and fake extensions alike) for `ms`: a stalled event loop. */
-function stall(ms: number) {
-  const end = Date.now() + ms;
-  while (Date.now() < end);
-}
 
 let h: BridgeHarness | undefined;
 const extra: Array<() => unknown> = [];
