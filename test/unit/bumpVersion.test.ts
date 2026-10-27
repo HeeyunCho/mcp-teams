@@ -14,11 +14,11 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 // @ts-expect-error plain JS script without types
 import * as bump from "../../scripts/bump-version.mjs";
 
-const { levelFor, nextVersion, writeAll } = bump;
+const { increment, levelFor, nextVersion, writeAll } = bump;
 const VERSION_FILE_NAMES: readonly string[] = bump.VERSION_FILE_NAMES;
 const VERSION_SAMPLES: Readonly<Record<string, (version: string) => string>> = bump.VERSION_SAMPLES;
 
@@ -52,8 +52,10 @@ describe("bump-version VERSION_SAMPLES", () => {
 
   // A sample missing a field its entry's update must replace makes the bump throw ("has fewer than N
   // fields"); one holding the old version in a field the update skips doesn't match the new sample.
+  // One bump serves every file's case: the first case to run makes it, the others reuse its result.
+  let bumped: ReturnType<typeof runCli> | undefined;
   it.each(VERSION_FILE_NAMES)("%s sample round-trips through a real bump to the new version", (f) => {
-    const r = runCli("0.2.16", ["patch"]);
+    const r = (bumped ??= runCli("0.2.16", ["patch"]));
     expect(r.out).toBe("0.2.17");
     expect(r.texts[f]).toBe(VERSION_SAMPLES[f]("0.2.17"));
   });
@@ -92,8 +94,21 @@ function makeRoot(version: string, files: FileOverrides = {}) {
   return root;
 }
 
-const runScript = (root: string, args: string[], stdin = "") =>
-  execFileSync(process.execPath, [join(root, "scripts", "bump-version.mjs"), ...args], { input: stdin, encoding: "utf8", stdio: "pipe" }).trim();
+// Each run of the script is a new node process: ~0.2 s on an idle machine, but 0.8 s (up to 2.6 s) with the CPU
+// oversubscribed, as in a full `npm test` on a busy Windows machine. Two in one test took 5.2 s there, past
+// vitest's 5 s timeout, so each test may run it at most once; logic that needs no process is tested in-process.
+let spawns = 0;
+beforeEach(() => {
+  spawns = 0;
+});
+afterEach(() => {
+  expect(spawns, "script runs (node processes) in this test; split the test or test in-process").toBeLessThanOrEqual(1);
+});
+
+const runScript = (root: string, args: string[], stdin = "") => {
+  spawns++;
+  return execFileSync(process.execPath, [join(root, "scripts", "bump-version.mjs"), ...args], { input: stdin, encoding: "utf8", stdio: "pipe" }).trim();
+};
 
 /** Runs the script on a copy of the repository's version files in a temporary folder. */
 function runCli(version: string, args: string[], stdin = "", files: FileOverrides = {}) {
@@ -156,13 +171,13 @@ describe("bump-version CLI with a missing or broken version file", () => {
     expect(r.after).toEqual(r.before);
   });
 
-  it("leaves every file untouched when the new version can't be computed", () => {
-    const tooBig = runCliBroken("package.json", JSON.stringify({ name: "x", version: "1.2.65535" }, null, 2), "1.2.65535");
-    expect(tooBig.error?.stderr).toMatch(/65535/);
-    expect(tooBig.after).toEqual(tooBig.before);
-    const invalid = runCliBroken("package.json", JSON.stringify({ name: "x", version: "1.2" }, null, 2));
-    expect(invalid.error?.stderr).toMatch(/invalid version "1\.2"/i);
-    expect(invalid.after).toEqual(invalid.before);
+  it.each([
+    ["1.2.65535", /65535/],
+    ["1.2", /invalid version "1\.2"/i],
+  ] as const)("leaves every file untouched when the new version can't be computed from %s", (version, message) => {
+    const r = runCliBroken("package.json", JSON.stringify({ name: "x", version }, null, 2), version);
+    expect(r.error?.stderr).toMatch(message);
+    expect(r.after).toEqual(r.before);
   });
 });
 
@@ -432,9 +447,11 @@ describe("bump-version CLI", () => {
     for (const f of VERSION_FILE_NAMES) expect(r.texts[f], f).toContain('"0.2.17"');
   });
 
-  it("takes an explicit level as given", () => {
-    expect(runCli("0.2.16", ["minor"]).out).toBe("0.3.0");
-    expect(runCli("0.2.16", ["major"]).out).toBe("1.0.0");
+  it.each([
+    ["minor", "0.3.0"],
+    ["major", "1.0.0"],
+  ])("takes an explicit level as given (%s)", (level, expected) => {
+    expect(runCli("0.2.16", [level]).out).toBe(expected);
   });
 
   it("replaces a prerelease in every file, and a manifest version_name with the released version", () => {
@@ -500,8 +517,9 @@ describe("nextVersion from a prerelease (semver.inc / npm version)", () => {
   it("releases X.0.0 on a major bump when minor and patch are 0, else moves to the next major", () => {
     expect(nextVersion("2.0.0-alpha", ["feat!: x"])).toBe("2.0.0");
     expect(nextVersion("1.2.3-rc.1", ["feat!: x"])).toBe("2.0.0");
-    expect(runCli("0.3.0-beta.1", ["major"]).out).toBe("1.0.0");
-    expect(runCli("1.0.0-rc.1", ["major"]).out).toBe("1.0.0");
+    // An explicit `major`, as the CLI applies it (see "takes an explicit level as given").
+    expect(increment("0.3.0-beta.1", "major")).toBe("1.0.0");
+    expect(increment("1.0.0-rc.1", "major")).toBe("1.0.0");
   });
 
   it("drops build metadata", () => {
