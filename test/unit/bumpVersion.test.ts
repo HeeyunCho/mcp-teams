@@ -7,9 +7,11 @@ import {
   mkdtempSync,
   readdirSync,
   readFileSync,
+  realpathSync,
   renameSync,
   rmSync,
   statSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -99,7 +101,7 @@ function makeRoot(version: string, files: FileOverrides = {}) {
 // test took 5.2 s there, past vitest's 5 s timeout. So the bumps run in-process (bumpFiles), and only the tests
 // of the command line itself (arguments, stdin, exit code) start the script, once each.
 const MAX_SCRIPT_RUNS_PER_TEST = 1;
-const MAX_SCRIPT_RUNS = 2;
+const MAX_SCRIPT_RUNS = 3;
 let spawns = 0;
 let totalSpawns = 0;
 beforeEach(() => {
@@ -490,6 +492,21 @@ describe("bump-version CLI", () => {
     expect(r.lock.packages[""].version).toBe("0.3.0");
     expect(r.lock.packages["node_modules/y"].version).toBe("9.9.9");
     expect(r.manifest).toEqual({ version: "0.3.0", version_name: "0.3.0" });
+  });
+
+  // argv[1] keeps a symlinked path, import.meta.url is the real one (macOS's TMPDIR is under the /var symlink).
+  // Windows may need privileges to create a symlink.
+  it.skipIf(process.platform === "win32")("runs when started through a symlinked path", () => {
+    const root = realpathSync(makeRoot("0.2.16"));
+    const linkDir = realpathSync(mkdtempSync(join(tmpdir(), "mcp-teams-bump-link-")));
+    try {
+      const link = join(linkDir, "root");
+      symlinkSync(root, link, "dir");
+      expect(runScript(link, ["patch"])).toBe("0.2.17");
+    } finally {
+      rmSync(linkDir, { recursive: true, force: true });
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 });
 
