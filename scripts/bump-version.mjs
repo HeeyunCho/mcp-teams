@@ -28,7 +28,7 @@
 //
 // "Before 1.0.0" means below 1.0.0 in semver order, so every 0.x prerelease and 1.0.0-rc.1 count
 // (feat: on 1.0.0-rc.1 is a patch bump and releases 1.0.0).
-import { chmodSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -214,4 +214,5 @@ async function main() {
   console.log(await bumpFiles(ROOT, process.argv[2], readStdin));
 }
 
-if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) await main();
+// Compares real paths: argv[1] keeps any symlink in the path the script was started by, import.meta.url doesn't.
+if (process.argv[1] && realpathSync(fileURLToPath(import.meta.url)) === realpathSync(process.argv[1])) await main();
