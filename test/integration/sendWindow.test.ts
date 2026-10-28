@@ -259,7 +259,7 @@ describe("send confirmation window", () => {
   it("1.2: a replaced extension connection is told to cancel its pending calls before it closes", async () => {
     h = await bridgeHarness();
     const hub = await h.session();
-    const old = await h.extension({ instance: "profile-1", reconnect: false, handle: () => new Promise(() => {}) });
+    const old = await h.extension({ instance: "profile-1", version: "0.2.13", reconnect: false, handle: () => new Promise(() => {}) });
     const call = hub.call("requestSend", SEND, 60_000);
     call.catch(() => {});
     await until(() => old.requests().length === 1, 3_000, "the send reaches the extension");

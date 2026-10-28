@@ -1,7 +1,7 @@
 // The extension's service worker (extension/background.js) against a fake chrome with Teams
 // open (test/helpers/fakeChrome.ts). These are also the fake's self-tests.
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { BASES, createFakeChrome, loadWorker, ME_OID, networkError, never, openedSockets, reply, timedOut, type SentRequest } from "../helpers/fakeChrome.js";
+import { BASES, createFakeChrome, EXTENSION_VERSION, loadWorker, ME_OID, networkError, never, openedSockets, reply, timedOut, type SentRequest } from "../helpers/fakeChrome.js";
 
 const CHAT = "19:contoso-launch@thread.v2";
 const ALEX = "8:orgid:00000000-0000-4000-8000-00000000000a";
@@ -58,7 +58,7 @@ describe("service worker outside Chrome", () => {
     const send = vi.fn();
     await worker.dispatch({ type: "request", id: "r1", method: "status", params: {} }, send);
     expect(send).toHaveBeenCalledTimes(1);
-    expect(send.mock.calls[0][0]).toMatchObject({ type: "response", id: "r1", ok: true, result: { extensionVersion: "0.0.0-test", teamsTabs: 1 } });
+    expect(send.mock.calls[0][0]).toMatchObject({ type: "response", id: "r1", ok: true, result: { extensionVersion: EXTENSION_VERSION, teamsTabs: 1 } });
   });
 
   it("dispatch answers an unknown method with an error", async () => {

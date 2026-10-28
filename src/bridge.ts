@@ -130,16 +130,35 @@ export const DEFAULT_BRIDGE_OPTIONS: Readonly<Required<BridgeOptions>> = Object.
  */
 const UNQUEUED = new Set(["status", "reload", "reloadAll", "requestSend"]);
 
+/** The oldest extension that closes a send's confirmation window on {type:"cancel"} (1.2). Sends need it. */
+export const MIN_SEND_EXTENSION = "0.2.13";
+
 /**
- * What a call fails with when it waited for a turn and was never sent: nothing reached Teams,
- * so none of these is a lost call (isLostCall is false for each).
+ * What a call fails with when it was never sent (it waited for a turn, or was refused before it
+ * reached the extension): nothing reached Teams, so none of these is a lost call (isLostCall is
+ * false for each).
  */
 export const NOT_SENT = Object.freeze({
   cancelled: "Cancelled while it waited for its turn; it was not sent.",
   waitedOut: (running: number) =>
     `Busy: this call waited its whole time limit for a turn (${running} calls at once run on the Teams tab, shared between AI sessions) and was not sent; try again shortly.`,
   gone: "The connection to the browser extension closed before this call's turn came; it was not sent. Try again.",
+  /** A send on an extension that can't close its confirmation window when the send is withdrawn. */
+  extensionTooOld: (version: unknown) =>
+    `Nothing was sent: the browser extension (${String(version)}) is older than ${MIN_SEND_EXTENSION} and can't close its confirmation window when the AI stops waiting, so a late click could still post. Update it with reload_extension (it loads the version mcp-teams put in its folder), or run \`npx mcp-teams setup\` if it was loaded from another folder, then send again.`,
 });
+
+/** True when an extension of `version` closes its confirmation window on a cancel (an unreadable version doesn't). */
+export function closesSendWindow(version: unknown): boolean {
+  return typeof version === "string" && /^\d+\.\d+\.\d+$/.test(version) && !isNewer(MIN_SEND_EXTENSION, version);
+}
+
+/** The version to name when a send is refused: of the extensions that can't close the window, the oldest (an unreadable one first). */
+function oldestTooOld(extensions: ExtensionInfo[]): string {
+  const tooOld = extensions.map((e) => e.version).filter((v) => !closesSendWindow(v));
+  const unreadable = tooOld.find((v) => !/^\d+\.\d+\.\d+$/.test(v));
+  return unreadable ?? tooOld.reduce<string | undefined>((a, v) => (a === undefined || isNewer(a, v) ? v : a), undefined) ?? "unknown";
+}
 
 /** A peer's watchdog never waits less for its hub's ping: a busy machine runs timers late. */
 const MIN_HUB_SILENCE_MS = 2_000;
@@ -235,6 +254,8 @@ export class ExtensionBridge {
   listenError?: string;
   /** Peer only: version of the hub server it forwards through. */
   hubVersion?: string;
+  /** Peer only: whether that hub checks the browser it picks for a send (#22); hubs before it don't. */
+  hubChecksSend = false;
 
   private wss?: WebSocketServer;
   private sockets = new Map<WebSocket, ExtensionInfo>(); // hub: the extensions
@@ -497,6 +518,7 @@ export class ExtensionBridge {
         extension: this.extension ?? null,
         extensions: this.extensions,
         heartbeatMs: this.opts.keepAliveMs,
+        checksSend: true,
         ...welcome,
       }),
     );
@@ -752,6 +774,7 @@ export class ExtensionBridge {
           clearTimeout(timer);
           this.hub = ws;
           this.hubVersion = String(msg.serverVersion ?? "unknown");
+          this.hubChecksSend = msg.checksSend === true;
           this.extension = msg.extension ?? undefined;
           this.extensions = msg.extensions ?? (msg.extension ? [msg.extension] : []);
           heartbeatMs = Number(msg.heartbeatMs) > 0 ? Number(msg.heartbeatMs) : 0;
@@ -783,6 +806,7 @@ export class ExtensionBridge {
         // The hub went away: take over the port or join whoever did.
         this.hub = undefined;
         this.hubVersion = undefined;
+        this.hubChecksSend = false;
         this.extension = undefined;
         this.extensions = [];
         this.role = "none";
@@ -816,6 +840,19 @@ export class ExtensionBridge {
           ? (this.listenError ?? "Connecting to the mcp-teams bridge; try again in a few seconds.")
           : "Browser extension is not connected. Open Chrome or Edge with the mcp-teams extension installed (run `mcp-teams setup`).";
       throw new Error(reason);
+    }
+    // A send opens a window that must close once nobody waits for it: an extension that ignores
+    // cancel would leave it open for a late click. The hub checks the extension it picked (for its
+    // own sends and its peers'). A peer behind a hub that doesn't say it checks (one from before
+    // #22) checks what that hub reported: it can't know which browser the hub will pick, so every
+    // one must close the window.
+    if (method === "requestSend") {
+      if (this.role === "hub") {
+        const version = this.sockets.get(target)?.version;
+        if (!closesSendWindow(version)) throw new Error(NOT_SENT.extensionTooOld(version ?? "unknown"));
+      } else if (!this.hubChecksSend && (!this.extensions.length || !this.extensions.every((e) => closesSendWindow(e.version)))) {
+        throw new Error(NOT_SENT.extensionTooOld(oldestTooOld(this.extensions)));
+      }
     }
     let result: T;
     if (this.role === "hub" && !UNQUEUED.has(method)) {
