@@ -1,7 +1,7 @@
 // The extension's service worker (extension/background.js) against a fake chrome with Teams
 // open (test/helpers/fakeChrome.ts). These are also the fake's self-tests.
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { BASES, createFakeChrome, EXTENSION_VERSION, loadWorker, ME_OID, networkError, never, openedSockets, reply, timedOut, type SentRequest } from "../helpers/fakeChrome.js";
+import { BASES, createFakeChrome, EXTENSION_VERSION, loadWorker, ME_OID, networkError, never, openedSockets, reply, TEAMS_ORIGIN, timedOut, type SentRequest } from "../helpers/fakeChrome.js";
 
 const CHAT = "19:contoso-launch@thread.v2";
 const ALEX = "8:orgid:00000000-0000-4000-8000-00000000000a";
@@ -114,8 +114,9 @@ describe("fake chrome", () => {
     expect(fake.tabs).toEqual([]);
   });
 
-  it("a Teams tab closed between finding it and running in it fails the call with Chrome's error", async () => {
+  it("a Teams tab closed between finding it and running in it: a read looks the tabs up again and runs in the Teams tab still open", async () => {
     const fake = createFakeChrome({ services: { csa } });
+    fake.tabs.push({ id: 2, url: `${TEAMS_ORIGIN}/v2/`, status: "complete" });
     const worker = await loadWorker(fake);
     // The worker finds tab 1, then the user closes it before the request runs there.
     const query = fake.spies.tabsQuery.getMockImplementation()!;
@@ -126,8 +127,8 @@ describe("fake chrome", () => {
     });
     const send = vi.fn();
     await worker.dispatch({ type: "request", id: "r3", method: "listChats", params: {} }, send);
-    expect(send).toHaveBeenCalledWith({ type: "response", id: "r3", ok: false, error: "No tab with id: 1." });
-    expect(fake.sent).toEqual([]);
+    expect(send).toHaveBeenCalledWith(expect.objectContaining({ type: "response", id: "r3", ok: true }));
+    expect(fake.sent.map((r) => r.tabId)).toEqual([2]);
   });
 
   it("networkError() is a fetch that failed in the page: the worker's 'Could not reach Teams' error with the reason", async () => {

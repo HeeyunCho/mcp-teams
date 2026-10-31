@@ -54,6 +54,31 @@ export function pickHeaders(requestHeaders) {
   return headers.authorization || headers.authentication || headers["x-skypetoken"] ? headers : null;
 }
 
+const GUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
+/**
+ * The object id (lowercase GUID) of the user a request's token was issued to, or null.
+ * Teams' tokens are JWTs: an AAD bearer token carries `oid`, a skype token
+ * `skypeid: "orgid:<oid>"`. An object id belongs to one tenant (a guest has its own in each),
+ * so it tells accounts and tenants apart. Only the payload is decoded, locally and without
+ * verifying; nothing else of the token is kept.
+ */
+export function tokenOid(headers) {
+  for (const value of [headers?.authorization, headers?.authentication, headers?.["x-skypetoken"]]) {
+    const jwt = /([A-Za-z0-9_-]+)\.([A-Za-z0-9_-]+)\.[A-Za-z0-9_-]*$/.exec(String(value ?? ""));
+    if (!jwt) continue;
+    let claims;
+    try {
+      claims = JSON.parse(atob(jwt[2].replace(/-/g, "+").replace(/_/g, "/")));
+    } catch {
+      continue;
+    }
+    const oid = String(claims?.oid ?? /^orgid:(.+)$/i.exec(String(claims?.skypeid ?? ""))?.[1] ?? "").toLowerCase();
+    if (GUID.test(oid)) return oid;
+  }
+  return null;
+}
+
 /** A paging link from chatsvc (often on its own host) on the base we send requests to. */
 export function rebase(link, base) {
   const i = link.indexOf("/v1/");
@@ -835,6 +860,57 @@ export function filterTraffic(list, { filter, limit = 100 } = {}) {
     .reverse()
     .slice(0, limit)
     .map(({ key, ...e }) => ({ ...e, lastAt: new Date(e.lastAt).toISOString() }));
+}
+
+// ------------------------------------------------------------ caches
+
+/**
+ * A least-recently-used cache bounded by bytes, not by entries: set() takes each value's size
+ * (the caller's measure, e.g. the length of the text it was parsed from) and evicts the least
+ * recently used entries until the total fits the cap. A value bigger than the cap isn't
+ * cached at all, and evicts nothing.
+ */
+export class ByteCache {
+  #map = new Map(); // key -> { value, bytes }, least recently used first
+  #bytes = 0;
+  constructor(maxBytes) {
+    this.maxBytes = maxBytes;
+  }
+  get bytes() {
+    return this.#bytes;
+  }
+  get size() {
+    return this.#map.size;
+  }
+  get(key) {
+    const e = this.#map.get(key);
+    if (!e) return undefined;
+    this.#map.delete(key);
+    this.#map.set(key, e);
+    return e.value;
+  }
+  set(key, value, bytes) {
+    this.delete(key);
+    if (bytes > this.maxBytes) return;
+    for (const [k, e] of this.#map) {
+      if (this.#bytes + bytes <= this.maxBytes) break;
+      this.#map.delete(k);
+      this.#bytes -= e.bytes;
+    }
+    this.#map.set(key, { value, bytes });
+    this.#bytes += bytes;
+  }
+  delete(key) {
+    const e = this.#map.get(key);
+    if (!e) return false;
+    this.#map.delete(key);
+    this.#bytes -= e.bytes;
+    return true;
+  }
+  clear() {
+    this.#map.clear();
+    this.#bytes = 0;
+  }
 }
 
 // ------------------------------------------------------------ meetings

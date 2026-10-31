@@ -28,6 +28,7 @@
     "test:system": "tsc -p tsconfig.json && vitest run test/system",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "probe": "node scripts/probe.mjs",
+    "measure-memory": "tsc -p tsconfig.json && node scripts/measure-memory.mjs",
     "update": "node scripts/update.mjs",
     "prepublishOnly": "npm test"
   },

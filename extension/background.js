@@ -28,11 +28,58 @@ function captureSession(details) {
   if (!svc) return;
   const headers = teams.pickHeaders(details.requestHeaders);
   if (!headers) return;
-  const capture = { base: svc.base, region: svc.region ?? null, headers, at: Date.now() };
-  const update = { [`capture:${svc.service}`]: capture };
-  if (svc.oid) update.oid = svc.oid;
-  chrome.storage.session.set(update);
+  // Whose session it is: the user its token was issued to (an object id is one tenant's).
+  const oid = teams.tokenOid(headers) ?? svc.oid ?? null;
+  const capture = { base: svc.base, region: svc.region ?? null, headers, at: Date.now(), oid };
+  return (captureQueue = captureQueue.then(() => storeCapture(svc.service, capture)).catch(() => {}));
 }
+
+const CAPTURED_SERVICES = ["chatsvc", "csa", "mt", "substrate"];
+let captureQueue = Promise.resolve(); // one capture at a time, so a switch is seen in order
+
+/**
+ * Stores a capture. One from another user than the signed-in one (the user switched Teams to
+ * another tenant or account) retires the other services' sessions, which belong to the
+ * previous one (or to nobody known), and the caches of what that user saw: the next request
+ * to those services waits for Teams' own request as the new user.
+ *
+ * The same session again (same base, headers and user: every request Teams, or this worker in
+ * its tab, makes with it) isn't written: it only marks the stored one as seen now (`seenAt`).
+ */
+async function storeCapture(service, capture) {
+  const key = `capture:${service}`;
+  const { [key]: held, oid: was } = await chrome.storage.session.get([key, "oid"]);
+  if (sameSession(held, capture) && (!capture.oid || capture.oid === was)) {
+    seenAt.set(service, capture.at);
+    for (const f of [...captureSeen]) f(service);
+    return;
+  }
+  seenAt.delete(service);
+  const update = { [key]: capture };
+  if (capture.oid) {
+    if (was && was !== capture.oid) {
+      const others = CAPTURED_SERVICES.filter((s) => s !== service).map((s) => `capture:${s}`);
+      const held = await chrome.storage.session.get(others);
+      const stale = others.filter((k) => held[k] && held[k].oid !== capture.oid);
+      if (stale.length) await chrome.storage.session.remove(stale);
+      forgetAccount();
+    }
+    update.oid = capture.oid;
+  }
+  await chrome.storage.session.set(update);
+}
+
+// service -> when Teams last sent the stored session again (in memory: no storage write for it)
+const seenAt = new Map();
+// Called with the service whenever its stored session is seen again (see waitForCapture).
+const captureSeen = new Set();
+
+const sameHeaders = (a = {}, b = {}) => {
+  const keys = Object.keys(a);
+  return keys.length === Object.keys(b).length && keys.every((k) => a[k] === b[k]);
+};
+/** Whether two captures hold the same session (when they were seen aside). */
+const sameSession = (a, b) => !!a && a.base === b.base && (a.region ?? null) === (b.region ?? null) && (a.oid ?? null) === (b.oid ?? null) && sameHeaders(a.headers, b.headers);
 
 const captureFilter = {
   urls: [
@@ -47,18 +94,35 @@ const captureFilter = {
  * Which endpoints Teams uses for meetings, recaps and files is not documented, so we log
  * the calls the Teams tab makes (method, host, path, header *names*, auth scheme) for the
  * api_traffic tool. Kept in chrome.storage.session, so a browser restart clears it.
+ * Recorded only while api_traffic turned recording on (record: true), for at most
+ * TRAFFIC_RECORD_MS; when it ends is kept in chrome.storage.session too, so it survives a
+ * restart of this worker.
  */
 const TRAFFIC_KEY = "traffic";
+const TRAFFIC_UNTIL_KEY = "trafficUntil";
+const TRAFFIC_RECORD_MS = 30 * 60_000;
 let traffic = null;
 let trafficSave = null;
 let trafficQueue = Promise.resolve();
+let trafficUntil = null; // ms since 1970 when recording ends (0: off); null until read from storage
 
-/** Applies fn to the log one update at a time, so events that land together don't overwrite each other. */
-function updateTraffic(fn) {
+async function recordingUntil() {
+  trafficUntil ??= (await chrome.storage.session.get(TRAFFIC_UNTIL_KEY))[TRAFFIC_UNTIL_KEY] ?? 0;
+  return trafficUntil;
+}
+
+/**
+ * Applies fn to the log one update at a time, so events that land together don't overwrite
+ * each other. `ifRecording`: only while recording is on. Saved only when fn changed the log.
+ */
+function updateTraffic(fn, { ifRecording = false } = {}) {
   trafficQueue = trafficQueue
     .then(async () => {
+      if (ifRecording && Date.now() >= (await recordingUntil())) return;
       traffic ??= (await chrome.storage.session.get(TRAFFIC_KEY))[TRAFFIC_KEY] ?? [];
-      traffic = fn(traffic);
+      const next = fn(traffic);
+      if (next === traffic) return;
+      traffic = next;
       clearTimeout(trafficSave);
       trafficSave = setTimeout(() => chrome.storage.session.set({ [TRAFFIC_KEY]: traffic }), 500);
     })
@@ -71,30 +135,53 @@ const trafficFilter = { urls: teams.TRAFFIC_URLS, types: ["xmlhttprequest", "oth
 function recordRequest(details) {
   if (!teams.isTeamsOrigin(details.initiator)) return;
   const entry = teams.summarizeRequest(details);
-  updateTraffic((list) => teams.recordTraffic(list, entry));
+  updateTraffic((list) => teams.recordTraffic(list, entry), { ifRecording: true });
 }
 
 function recordCompleted(details) {
   if (!teams.isTeamsOrigin(details.initiator)) return;
   const url = new URL(details.url);
   const key = `${details.method} ${url.host}${url.pathname.slice(0, 300)}`;
-  updateTraffic((list) => teams.recordStatus(list, key, details.statusCode));
+  updateTraffic((list) => teams.recordStatus(list, key, details.statusCode), { ifRecording: true });
 }
 
+/** The service's captured session; its `at` is when Teams last sent it (stored, or seen again since). */
 async function getCapture(service) {
   const key = `capture:${service}`;
-  return (await chrome.storage.session.get(key))[key] ?? null;
+  const cap = (await chrome.storage.session.get(key))[key] ?? null;
+  const seen = seenAt.get(service);
+  return cap && seen > cap.at ? { ...cap, at: seen } : cap;
 }
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-/** Waits until a session newer than `since` is captured for the service; null on timeout. */
-async function waitForCapture(service, since, timeoutMs) {
-  for (const end = Date.now() + timeoutMs; Date.now() < end; await sleep(250)) {
-    const cap = await getCapture(service);
-    if (cap && cap.at > since) return cap;
-  }
-  return null;
+/**
+ * Waits until Teams sends the service a session after `since` (a new one, or the stored one
+ * again); null on timeout. Listens for the capture instead of asking for it.
+ */
+function waitForCapture(service, since, timeoutMs) {
+  const key = `capture:${service}`;
+  return new Promise((resolve) => {
+    let done = false;
+    const finish = (cap) => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      chrome.storage.onChanged.removeListener(onChanged);
+      captureSeen.delete(onSeen);
+      resolve(cap);
+    };
+    const check = async () => {
+      const cap = await getCapture(service);
+      if (cap && cap.at > since) finish(cap);
+    };
+    const onChanged = (changes, area) => area === "session" && changes[key]?.newValue && check();
+    const onSeen = (s) => s === service && check();
+    const timer = setTimeout(() => finish(null), timeoutMs);
+    chrome.storage.onChanged.addListener(onChanged);
+    captureSeen.add(onSeen);
+    check();
+  });
 }
 
 const OPEN_TAB_WAIT_MS = 60_000;
@@ -129,10 +216,30 @@ function openTeamsTab() {
   return opening;
 }
 
+// The tabs a request can run in: Teams, and SharePoint (transcripts), found with one lookup.
+const TEAMS_TAB = /^https:\/\/(teams\.cloud\.microsoft|teams\.microsoft\.com)\//;
+const TAB_URLS = [...TEAMS_URLS, "https://*.sharepoint.com/*"];
+
+/**
+ * The open Teams and SharePoint tabs. A call (`ctx`) looks them up once and reuses the list
+ * (with the tabs it opened added, see knownTab); without one, every time.
+ */
+function openTabs(ctx) {
+  if (!ctx) return chrome.tabs.query({ url: TAB_URLS });
+  ctx.tabs ??= chrome.tabs.query({ url: TAB_URLS });
+  return ctx.tabs;
+}
+
+/** Adds a tab the call opened (or found ready) to its list, so its next request finds it. */
+function knownTab(ctx, tab) {
+  if (ctx?.tabs) ctx.tabs = ctx.tabs.then((list) => [...list.filter((t) => t.id !== tab.id), tab]);
+  return tab;
+}
+
 /** The Teams tab to run requests in: one on the origin of the service's capture, else any. */
-async function findTeamsTab(origin) {
-  const tabs = await chrome.tabs.query({ url: TEAMS_URLS });
-  if (!tabs.length) return openTeamsTab();
+async function findTeamsTab(origin, ctx = null) {
+  const tabs = (await openTabs(ctx)).filter((t) => TEAMS_TAB.test(t.url ?? ""));
+  if (!tabs.length) return knownTab(ctx, await openTeamsTab());
   const sameOrigin = tabs.filter((t) => origin && t.url?.startsWith(origin));
   const pool = sameOrigin.length ? sameOrigin : tabs;
   return pool.find((t) => !t.discarded && t.status === "complete") ?? pool[0];
@@ -141,12 +248,35 @@ async function findTeamsTab(origin) {
 // Teams keeps routing for a moment after the page has loaded.
 const SETTLE_MS = 1_000;
 
+/**
+ * Waits until the tab is `ready(tab)`, listening for its updates: resolves with the tab, null
+ * once it is closed, or undefined after timeoutMs.
+ */
+function waitForTab(tabId, ready, timeoutMs) {
+  return new Promise((resolve) => {
+    let done = false;
+    const finish = (result) => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      chrome.tabs.onUpdated.removeListener(onUpdated);
+      chrome.tabs.onRemoved.removeListener(onRemoved);
+      resolve(result);
+    };
+    const onUpdated = (id, _change, tab) => id === tabId && ready(tab) && finish(tab);
+    const onRemoved = (id) => id === tabId && finish(null);
+    const timer = setTimeout(() => finish(undefined), timeoutMs);
+    chrome.tabs.onUpdated.addListener(onUpdated);
+    chrome.tabs.onRemoved.addListener(onRemoved);
+    chrome.tabs.get(tabId).then(
+      (t) => ready(t) && finish(t),
+      () => finish(null),
+    );
+  });
+}
+
 async function waitForTabLoaded(tabId, timeoutMs = 30_000) {
-  for (const end = Date.now() + timeoutMs; Date.now() < end; await sleep(250)) {
-    const t = await chrome.tabs.get(tabId).catch(() => null);
-    if (!t) return;
-    if (t.status === "complete") return sleep(SETTLE_MS);
-  }
+  if (await waitForTab(tabId, (t) => t.status === "complete", timeoutMs)) await sleep(SETTLE_MS);
 }
 
 const refreshing = new Map(); // service -> Promise<capture|null>, so parallel calls reload once
@@ -214,6 +344,16 @@ function unanswered(message) {
 }
 
 /**
+ * unanswered, because of the tab: its script failed (`tabFailed: "script"`: closed, reloaded,
+ * gone elsewhere) or its fetch failed without a timeout (`"fetch"`: e.g. a page that isn't Teams
+ * any more). The call's next request looks the tabs up again.
+ */
+function tabFailed(kind, message, ctx) {
+  if (ctx) ctx.tabs = null;
+  return Object.assign(unanswered(message), { tabFailed: kind });
+}
+
+/**
  * One fetch in the tab, by REQUEST_TIMEOUT_MS or the request's deadline (ctx), whichever
  * comes first. Nothing starts once the request was withdrawn, and a tab that doesn't run
  * the script in time (frozen, discarded) fails the call instead of holding it.
@@ -240,7 +380,7 @@ async function runInTab(tab, url, method, headers, body, ctx = null) {
     })
     // E.g. the tab closed or reloaded while the request ran: it may have reached Teams.
     .catch((err) => {
-      throw unanswered(String(err?.message ?? err));
+      throw tabFailed("script", String(err?.message ?? err), ctx);
     });
   let injection;
   try {
@@ -249,15 +389,12 @@ async function runInTab(tab, url, method, headers, body, ctx = null) {
     clearTimeout(timer);
   }
   const res = injection?.result;
-  if (!res) throw unanswered("Could not run inside the Teams tab. Reload the Teams tab and try again.");
+  if (!res) throw tabFailed("script", "Could not run inside the Teams tab. Reload the Teams tab and try again.", ctx);
   if (res.status === 0) {
     ctx?.check(); // the deadline passed: say that rather than "Teams did not answer"
     // A fetch that failed may have been sent already (a reset connection, no answer in time).
-    throw unanswered(
-      res.error === "timeout"
-        ? `Teams did not answer within ${seconds} s. Reload the Teams tab and try again.`
-        : `Could not reach Teams: ${res.error}`,
-    );
+    if (res.error === "timeout") throw unanswered(`Teams did not answer within ${seconds} s. Reload the Teams tab and try again.`);
+    throw tabFailed("fetch", `Could not reach Teams: ${res.error}`, ctx);
   }
   return res;
 }
@@ -314,20 +451,39 @@ async function passGate(key, ctx, wait) {
   if (gaveBack && gatedFor(key) > 0) return passGate(key, ctx, wait);
 }
 
+const originOf = (tab) => (tab?.url ? new URL(tab.url).origin : null);
+
 /**
- * runInTab through the gate `key`. A 429 closes the gate for its Retry-After. Teams refused
- * that request without running it, so a read (a GET, or a POST that only reads: `repeatable`)
- * goes once more after the wait (when `wait` and it fits the deadline). Anything else, such as
- * a post, is never sent again: the caller hears that Teams is busy.
+ * runInTab in `tab` through the gate `key`. A 429 closes the gate for its Retry-After. Teams
+ * refused that request without running it, so a read (a GET, or a POST that only reads:
+ * `repeatable`) goes once more after the wait (when `wait` and it fits the deadline). Anything
+ * else, such as a post, is never sent again: the caller hears that Teams is busy.
+ *
+ * A tab that failed under a read (see tabFailed: closed or reloaded since the call looked it up,
+ * or gone to another page) is looked up again with `findTab`, and the read goes once more there,
+ * by the same deadline. A fetch that failed in the same tab, still on the same page (e.g.
+ * offline), isn't sent again. A post never is: it may have reached Teams.
  */
-async function sendTo(key, tab, url, method, headers, body, ctx, wait, repeatable = method === "GET") {
-  for (let attempt = 0; ; attempt++) {
+async function sendTo(key, tab, findTab, url, method, headers, body, ctx, wait, repeatable = method === "GET") {
+  let foundAgain = false;
+  for (let attempt = 0; ; ) {
     await passGate(key, ctx, wait);
-    const res = await runInTab(tab, url, method, headers, body, ctx);
+    let res;
+    try {
+      res = await runInTab(tab, url, method, headers, body, ctx);
+    } catch (err) {
+      if (!err?.tabFailed || !repeatable || foundAgain) throw err;
+      foundAgain = true;
+      const again = await guarded(findTab(), ctx);
+      if (err.tabFailed === "fetch" && again.id === tab.id && originOf(again) === originOf(tab)) throw err;
+      if (again.status === "loading") await guarded(waitForTabLoaded(again.id), ctx);
+      tab = again;
+      continue;
+    }
     if (res.status !== 429) return res;
     const until = Math.max(gates.get(key) ?? 0, Date.now() + teams.retryAfterMs(res.retryAfter));
     gates.set(key, until);
-    if (!repeatable || attempt > 0) throw busy(until);
+    if (!repeatable || attempt++ > 0) throw busy(until);
   }
 }
 
@@ -338,25 +494,32 @@ async function sendTo(key, tab, url, method, headers, body, ctx, wait, repeatabl
  * that can be done without) fails at once as busy instead. `repeatable`: a POST that only
  * reads (a search, a profile lookup), sent again after a 429 like a GET.
  */
-async function api(service, path, { method = "GET", body, raw = false, withLocation = false, ctx = null, wait = true, repeatable = method === "GET" } = {}) {
+async function api(service, path, { method = "GET", body, raw = false, withLocation = false, ctx = null, wait = true, repeatable = method === "GET", onCapture } = {}) {
   ctx?.check();
   let cap = await getCapture(service);
   // Opening a tab or waiting for a session can take a minute; a withdrawn request stops waiting.
-  let tab = await guarded(findTeamsTab(cap ? new URL(cap.base).origin : null), ctx);
+  let tab = await guarded(findTeamsTab(cap ? new URL(cap.base).origin : null, ctx), ctx);
   if (!cap) {
     cap = await guarded(refreshSession(service, tab, { quickWaitMs: service === "substrate" ? 2_000 : 4_000 }), ctx);
     if (!cap) throw new Error(SERVICE_HELP[service]);
   }
   const urlFor = (c) => teams.serviceUrl(path, c.base);
-  let res = await sendTo(gateKey(service, cap.base), tab, urlFor(cap), method, cap.headers, body, ctx, wait, repeatable);
+  const findTab = () => findTeamsTab(new URL(cap.base).origin, ctx);
+  await onCapture?.(cap); // may refuse the session (it throws), before anything is sent
+  let res = await sendTo(gateKey(service, cap.base), tab, findTab, urlFor(cap), method, cap.headers, body, ctx, wait, repeatable);
   if (res.status === 401) {
     // Rejected before running (expired token), so trying once more is safe. A 403 is a
     // real answer (e.g. no longer a member of that chat).
-    meetingSessionsCache.clear(); // the session (maybe the account) is changing
+    // The session (maybe the account) is changing: lists read with it are read again.
+    dropList();
+    meetingSessionsCache.clear();
     cap = await guarded(refreshSession(service, tab, { quickWaitMs: 0 }), ctx);
     if (!cap) throw new Error(SERVICE_HELP[service]);
-    tab = await guarded(findTeamsTab(new URL(cap.base).origin), ctx);
-    res = await sendTo(gateKey(service, cap.base), tab, urlFor(cap), method, cap.headers, body, ctx, wait, repeatable);
+    // The tab reloaded (or was closed meanwhile): look the tabs up again.
+    if (ctx) ctx.tabs = null;
+    tab = await guarded(findTab(), ctx);
+    await onCapture?.(cap);
+    res = await sendTo(gateKey(service, cap.base), tab, findTab, urlFor(cap), method, cap.headers, body, ctx, wait, repeatable);
   }
   if (raw) return res;
   if (res.status >= 400) {
@@ -388,18 +551,50 @@ async function myMri() {
   return oid ? `8:orgid:${oid}` : null;
 }
 
-const LIST_CACHE_MS = 60_000;
-let listCache = null; // { until, data: { teams, chats, meetings, namesMissing } }
+/**
+ * Whose data a capture reads: "<base>\n<oid>", the service's base (origin and region) and the
+ * user its token was issued to. An object id is one tenant's, so two tenants (or accounts) in
+ * the same region still get different keys. null without a capture.
+ */
+const accountKey = (cap) => (cap ? `${cap.base}\n${cap.oid ?? ""}` : null);
 
 /**
- * Teams, channels and chats (csa), with names for untitled chats. Cached for a minute, but
+ * The user switched Teams to another account or tenant: forget what the previous one saw.
+ * (Throttle gates stay: they are Teams' limits per service and base, not anyone's data.)
+ */
+function forgetAccount() {
+  dropList();
+  names.clear();
+  transcripts.clear();
+  meetingSessionsCache.clear();
+  myAddressCache = null;
+}
+
+/** A read that a switch of the signed-in Teams account overtook: what it read, and what a retry reads. */
+const ACCOUNT_CHANGED_WHILE = (what, retry) => `The signed-in Teams account changed while ${what}; it's now signed in as another account, so a retry ${retry}.`;
+
+const LIST_CACHE_MS = 60_000;
+let listCache = null; // { key: accountKey of csa, until, data: { teams, chats, meetings, namesMissing } }
+let listGeneration = 0; // bumped by dropList: a read that started before a drop doesn't store its (older) list
+
+/** Empties the list cache, also for a read under way: it can't put the list from before this back. */
+function dropList() {
+  listCache = null;
+  listGeneration++;
+}
+
+/**
+ * Teams, channels and chats (csa), with names for untitled chats. Cached for a minute for the
+ * account it was read as (a 401 empties it), but
  * when names are missing (`namesMissing`: { chats, organizers }, see lookupNames) only until
  * Teams' throttle is over, or not at all after another failure, so they are looked up again.
  * A meeting whose organizer's name is missing that way has `organizerNameMissing`.
  */
 async function teamsAndChats(fresh = false, ctx = null) {
-  if (!fresh && listCache && Date.now() < listCache.until) return listCache.data;
-  const json = await api("csa", "/api/v1/teams/users/me?isPrefetch=false&enableMembershipSummary=true&enableRC2Fetch=false", { ctx });
+  if (!fresh && listCache && Date.now() < listCache.until && listCache.key === accountKey(await getCapture("csa"))) return listCache.data;
+  let readAs = null; // the session the list was read with
+  const generation = listGeneration;
+  const json = await api("csa", "/api/v1/teams/users/me?isPrefetch=false&enableMembershipSummary=true&enableRC2Fetch=false", { ctx, onCapture: (c) => (readAs = c) });
   const data = { teams: teams.parseTeams(json), chats: teams.parseCsaChats(json), meetings: teams.parseCsaMeetings(json) };
   const chats = await nameChats(data.chats, ctx);
   const organizers = await lookupNames(data.meetings.map((m) => m.organizer), ctx);
@@ -410,7 +605,11 @@ async function teamsAndChats(fresh = false, ctx = null) {
   data.namesMissing = { chats, organizers };
   const missing = [chats, organizers].filter(Boolean);
   const until = missing.some((x) => !x.throttled) ? 0 : missing.length ? Math.max(...missing.map((x) => x.until)) : Date.now() + LIST_CACHE_MS;
-  listCache = { until, data };
+  // Filed under the account it was read as. A switch while it was read leaves nothing of the
+  // old account for the new one: not cached, and not used (its chats aren't the new account's).
+  const key = accountKey(readAs);
+  if (key !== accountKey(await getCapture("csa"))) throw new Error(ACCOUNT_CHANGED_WHILE("the chat list was read", "reads that account's chats"));
+  if (generation === listGeneration) listCache = { key, until, data };
   return data;
 }
 
@@ -443,18 +642,26 @@ async function lookupNames(mris, ctx = null, { wait = false } = {}) {
     // Names that can't be looked up are left out, but a withdrawn request ends here (and isn't cached).
     ctx?.check();
     const batch = unknown.slice(i, i + 100);
+    let readAs = null; // the session the names were looked up with
     const json = await api("mt", "/beta/users/fetchShortProfile?isMailAddress=false&enableGuest=true&includeIBBarredUsers=true&skypeTeamsInfo=true", {
       method: "POST",
       body: batch,
       ctx,
       wait,
       repeatable: true,
+      onCapture: (c) => (readAs = c),
     }).catch((err) => {
       ctx?.check(); // a withdrawn request ends here (and isn't cached)
       missing = err?.throttled ? { throttled: true, until: err.until } : (missing ?? { error: err?.message ?? String(err) });
       for (const m of batch) notAsked.add(m);
       return null;
     });
+    // Names looked up as an account that is no longer signed in aren't kept.
+    if (json && accountKey(readAs) !== accountKey(await getCapture("mt"))) {
+      missing ??= { error: ACCOUNT_CHANGED_WHILE("names were looked up", "looks them up as that account") };
+      for (const m of batch) notAsked.add(m);
+      continue;
+    }
     if (names.size > NAMES_MAX) names.clear();
     for (const p of teams.parseProfiles(json)) if (p.mri && p.name) names.set(p.mri, p.name);
   }
@@ -555,8 +762,8 @@ const spOpening = new Map(); // origin -> Promise of that tab, so parallel calls
  * organizer's OneDrive, which doesn't answer the Teams page across origins. Opens the
  * origin in a pinned background tab when none is open.
  */
-async function sharepointTab(origin) {
-  const open = (await chrome.tabs.query({ url: `${origin}/*` })).filter((t) => !t.discarded);
+async function sharepointTab(origin, ctx = null) {
+  const open = (await openTabs(ctx)).filter((t) => !t.discarded && t.url?.startsWith(`${origin}/`));
   const ready = open.find((t) => t.status === "complete") ?? open[0];
   if (ready) return ready;
   if (!spOpening.has(origin)) {
@@ -570,16 +777,14 @@ async function sharepointTab(origin) {
         spTabs.set(origin, tab.id);
       }
       // Single sign-on goes through login.microsoftonline.com and comes back.
-      for (const end = Date.now() + OPEN_TAB_WAIT_MS; Date.now() < end; await sleep(500)) {
-        const t = await chrome.tabs.get(tab.id).catch(() => null);
-        if (!t) throw new Error("The SharePoint tab that was opened was closed. Try again.");
-        if (t.status === "complete" && t.url?.startsWith(`${origin}/`)) return t;
-      }
-      throw new Error(`OneDrive (${origin}) was opened in a background tab but isn't signed in yet. Sign in there, then try again.`);
+      const t = await waitForTab(tab.id, (x) => x.status === "complete" && !!x.url?.startsWith(`${origin}/`), OPEN_TAB_WAIT_MS);
+      if (t === null) throw new Error("The SharePoint tab that was opened was closed. Try again.");
+      if (!t) throw new Error(`OneDrive (${origin}) was opened in a background tab but isn't signed in yet. Sign in there, then try again.`);
+      return t;
     })().finally(() => spOpening.delete(origin));
     spOpening.set(origin, p);
   }
-  return spOpening.get(origin);
+  return knownTab(ctx, await spOpening.get(origin));
 }
 
 /** A GET on SharePoint with the browser's own SharePoint session. */
@@ -587,15 +792,21 @@ async function sharepointGet(url, ctx = null) {
   if (!SHAREPOINT_URL.test(url)) throw new Error("Not a SharePoint URL");
   ctx?.check();
   const origin = new URL(url).origin;
-  return sendTo(gateKey("sharepoint", origin), await guarded(sharepointTab(origin), ctx), url, "GET", {}, null, ctx, true);
+  const findTab = () => sharepointTab(origin, ctx);
+  return sendTo(gateKey("sharepoint", origin), await guarded(findTab(), ctx), findTab, url, "GET", {}, null, ctx, true);
 }
 
-const transcripts = new Map(); // transcript URL -> parsed transcript; a finished transcript doesn't change
-const TRANSCRIPTS_MAX = 50;
+// "<accountKey of chatsvc>\n<transcript URL>" -> parsed transcript; a finished transcript doesn't
+// change, but what one user may read isn't another's. Bounded by size: each counts the length
+// of the response text it was parsed from, least recently used out first, and one longer than
+// the cap isn't kept at all.
+const TRANSCRIPTS_MAX_BYTES = 8 * 1024 * 1024;
+const transcripts = new teams.ByteCache(TRANSCRIPTS_MAX_BYTES);
 
 /** A call's transcript (Stream transcript.json) from the organizer's OneDrive. */
 async function transcriptOf(info, session, ctx = null) {
-  const cached = transcripts.get(session.transcriptUrl);
+  const key = `${accountKey(await getCapture("chatsvc")) ?? ""}\n${session.transcriptUrl}`;
+  const cached = transcripts.get(key);
   if (cached) return cached;
   const url = session.transcriptUrl + (session.transcriptUrl.includes("?") ? "&" : "?") + "format=json";
   const res = await sharepointGet(url, ctx);
@@ -604,8 +815,9 @@ async function transcriptOf(info, session, ctx = null) {
   }
   if (res.status >= 400) throw new Error(`OneDrive HTTP ${res.status} while reading the transcript.`);
   const json = JSON.parse(res.text);
-  if (transcripts.size >= TRANSCRIPTS_MAX) transcripts.delete(transcripts.keys().next().value);
-  transcripts.set(session.transcriptUrl, json);
+  // Not kept for an account that signed in while it was read.
+  if (key !== `${accountKey(await getCapture("chatsvc")) ?? ""}\n${session.transcriptUrl}`) return json;
+  transcripts.set(key, json, res.text.length);
   return json;
 }
 
@@ -619,9 +831,9 @@ async function resolveMeeting(meeting, ctx = null) {
 
 const SESSIONS_CACHE_MS = 60_000;
 const SESSIONS_CACHE_MAX = 50;
-/** "<chatsvc base>\n<meeting id>" -> { at, sessions }: one tenant's meetings never answer another's. */
+/** "<accountKey of chatsvc>\n<meeting id>" -> { at, sessions }: one tenant's meetings never answer another's. */
 const meetingSessionsCache = new Map();
-const sessionsKey = (cap, id) => (cap ? `${cap.base}\n${id}` : null);
+const sessionsKey = (cap, id) => (cap ? `${accountKey(cap)}\n${id}` : null);
 
 /**
  * The calls held in a meeting chat (see teams.meetingSessions). Cached for a minute, so
@@ -632,12 +844,12 @@ async function sessionsOf(info, ctx = null) {
   const hit = key && meetingSessionsCache.get(key);
   if (hit && Date.now() - hit.at < SESSIONS_CACHE_MS) return hit.sessions;
   const sessions = await readSessions(info, ctx);
-  // Filed under the base the chat was read from (a 401 on the way may have changed it).
-  const keyNow = sessionsKey(await getCapture("chatsvc"), info.id);
-  if (keyNow) {
-    meetingSessionsCache.delete(keyNow);
+  // Kept only when the chat was read as the account it is filed under: a session that changed
+  // meanwhile (a switch, or a 401 that brought another base) may have read part of it.
+  if (key && key === sessionsKey(await getCapture("chatsvc"), info.id)) {
+    meetingSessionsCache.delete(key);
     if (meetingSessionsCache.size >= SESSIONS_CACHE_MAX) meetingSessionsCache.delete(meetingSessionsCache.keys().next().value);
-    meetingSessionsCache.set(keyNow, { at: Date.now(), sessions });
+    meetingSessionsCache.set(key, { at: Date.now(), sessions });
   }
   return sessions;
 }
@@ -722,12 +934,13 @@ export const handlers = {
     };
   },
 
-  async listTeams(_, ctx) {
-    return { teams: (await teamsAndChats(true, ctx)).teams };
+  // The three lists share teamsAndChats' one-minute cache; `refresh` reads it again first.
+  async listTeams({ refresh = false } = {}, ctx) {
+    return { teams: (await teamsAndChats(refresh === true, ctx)).teams };
   },
 
-  async listChats({ query, limit = 30, unreadOnly = false }, ctx) {
-    const data = await teamsAndChats(true, ctx);
+  async listChats({ query, limit = 30, unreadOnly = false, refresh = false }, ctx) {
+    const data = await teamsAndChats(refresh === true, ctx);
     let chats = data.chats;
     if (unreadOnly) chats = chats.filter((c) => c.unread);
     if (query) chats = chats.filter((c) => teams.matchesWords(c.title, query) || c.memberNames?.some((n) => teams.matchesWords(n, query)));
@@ -796,8 +1009,8 @@ export const handlers = {
     return { count: people.length, people };
   },
 
-  async listMeetings({ query, limit = 20, transcriptOnly = false }, ctx) {
-    const data = await teamsAndChats(true, ctx);
+  async listMeetings({ query, limit = 20, transcriptOnly = false, refresh = false }, ctx) {
+    const data = await teamsAndChats(refresh === true, ctx);
     let meetings = data.meetings;
     if (query) meetings = meetings.filter((m) => teams.matchesWords(m.title, query) || teams.matchesWords(m.organizerName, query));
     if (transcriptOnly) meetings = meetings.filter((m) => m.hasTranscript);
@@ -920,13 +1133,30 @@ export const handlers = {
     return { status: res.status, text: res.text.slice(0, 20_000_000) };
   },
 
-  async apiTraffic({ filter, limit = 100, clear = false }) {
+  async apiTraffic({ filter, limit = 100, clear = false, record }) {
+    if (typeof record === "boolean") {
+      // In the log's queue, so events already reported are recorded (or not) under the old setting.
+      await (trafficQueue = trafficQueue.then(async () => {
+        trafficUntil = record ? Date.now() + TRAFFIC_RECORD_MS : 0;
+        await chrome.storage.session.set({ [TRAFFIC_UNTIL_KEY]: trafficUntil });
+      }).catch(() => {}));
+    }
     let list;
     await updateTraffic((l) => {
       list = l;
-      return clear ? [] : l;
+      return clear && l.length ? [] : l;
     });
-    return { recorded: list.length, requests: teams.filterTraffic(list, { filter, limit }) };
+    const until = await recordingUntil();
+    const recording = Date.now() < until;
+    return {
+      recording,
+      ...(recording ? { recordingUntil: new Date(until).toISOString() } : {}),
+      recorded: list.length,
+      requests: teams.filterTraffic(list, { filter, limit }),
+      ...(recording
+        ? {}
+        : { note: "Recording is off. Call api_traffic with record: true, use the feature in the Teams tab, then call api_traffic again to list its requests." }),
+    };
   },
 
   /**
@@ -942,6 +1172,8 @@ export const handlers = {
 
   async requestSend({ conversation, to, title, text, threadId, subject, autoSendTo }, ctx) {
     if (!String(text ?? "").trim()) throw new Error("The message is empty.");
+    // Who the window (or an auto-send) is for: taken before anything is looked up for it.
+    const account = await signedInAccount();
     // The server's allowlist (config autoSendTo) only permits; whether this send goes without the
     // window is decided below from the target as resolved here (see sendsToMeAlone, isMeAlone).
     const allow = teams.normalizeAddresses(autoSendTo);
@@ -951,7 +1183,7 @@ export const handlers = {
       const me = await myMri();
       if (!me) throw new Error("Teams hasn't shown who is signed in yet. Reload the Teams tab and try again.");
       if (allow.length && !title && (await sendsToMeAlone(to, me, allow, ctx))) {
-        return sendWithoutConfirming({ conversation: NOTES_TO_SELF, text: String(text) }, ctx);
+        return sendWithoutConfirming({ conversation: NOTES_TO_SELF, text: String(text) }, ctx, account);
       }
       const people = await resolvePeople(to, me, ctx);
       if (title && people.length < 2) throw new Error("A title is only for group chats (two or more people besides you).");
@@ -959,7 +1191,7 @@ export const handlers = {
       const request = existing
         ? { conversation: { id: existing.id, kind: existing.kind, title: existing.title }, people, text: String(text), existingChat: true }
         : { conversation: null, newChat: { members: people.map((p) => p.mri), title: title ?? null }, people, text: String(text) };
-      return askUserToConfirm(request, ctx);
+      return askUserToConfirm(request, ctx, account);
     }
     const conv = await resolve(conversation, ctx);
     if (threadId && conv.kind !== "channel") throw new Error("reply_to is only for channel posts; in a chat, just send the message.");
@@ -970,8 +1202,8 @@ export const handlers = {
       replyingTo = root ? teams.parseMessage(root) : { id: threadId };
     }
     const request = { conversation: conv, text: String(text), threadId: threadId ?? null, subject: subject ?? null, replyingTo };
-    if (allow.length && !threadId && !subject && (await isMeAlone(conv, allow, ctx))) return sendWithoutConfirming(request, ctx);
-    return askUserToConfirm(request, ctx);
+    if (allow.length && !threadId && !subject && (await isMeAlone(conv, allow, ctx))) return sendWithoutConfirming(request, ctx, account);
+    return askUserToConfirm(request, ctx, account);
   },
 };
 
@@ -979,7 +1211,7 @@ export const handlers = {
  * Creates a chat with these members and me (called only after the user clicked Send).
  * A 1:1 chat that already exists on Teams' side comes back as that chat.
  */
-async function createChat({ members, title }) {
+async function createChat({ members, title }, account = null) {
   const me = await myMri();
   const oneOnOne = members.length === 1;
   const body = {
@@ -991,25 +1223,48 @@ async function createChat({ members, title }) {
       ...(title ? { topic: title } : {}),
     },
   };
-  const { json, location } = await api("chatsvc", "/v1/threads", { method: "POST", body, withLocation: true });
+  let answer;
+  try {
+    answer = await api("chatsvc", "/v1/threads", { method: "POST", body, withLocation: true, onCapture: asConfirmed(account) });
+  } finally {
+    // The chat list changed, or may have: without an answer the chat may exist, and the
+    // list_chats the AI is told to check with must not show the list from before it.
+    dropList();
+  }
+  const { json, location } = answer;
   const id = teams.threadIdFrom(location, json) ?? (oneOnOne ? teams.oneOnOneId(me, members[0]) : null);
   if (!id) throw new Error("Teams created no chat (its answer had no chat id).");
-  listCache = null; // the chat list changed
   return id;
 }
 
-async function sendMessage({ conversation, newChat, people, text, threadId, subject }) {
+/**
+ * An onCapture check for a post confirmed as `account` (an oid, or null when Teams hadn't shown
+ * who was signed in): fails before anything is sent when the session it would go out with is
+ * another account's (Teams switched since the click).
+ */
+const asConfirmed = (account) => async (cap) => {
+  if (account && (cap.oid ?? (await signedInAccount())) !== account) throw Object.assign(new Error(ACCOUNT_CHANGED), { accountChanged: true });
+};
+
+/** Posts a confirmed message; `account`: who confirmed it (see asConfirmed). */
+async function sendMessage({ conversation, newChat, people, text, threadId, subject }, account = null) {
   if (newChat) {
     let id;
     try {
-      id = await createChat(newChat);
+      id = await createChat(newChat, account);
     } catch (err) {
       // Without an answer the chat may exist, but the message was never sent.
       if (err.outcomeUnknown) err.chatMayExist = true;
       throw err;
     }
     const title = newChat.title ?? people.map((p) => p.name).join(", ");
-    const r = await sendMessage({ conversation: { id, title }, text });
+    let r;
+    try {
+      r = await sendMessage({ conversation: { id, title }, text }, account);
+    } catch (err) {
+      if (err.accountChanged) err.chatCreated = true;
+      throw err;
+    }
     return { ...r, newChat: true, conversationId: id };
   }
   const target = threadId ? `${conversation.id};messageid=${threadId}` : conversation.id;
@@ -1031,7 +1286,8 @@ async function sendMessage({ conversation, newChat, people, text, threadId, subj
     postType: "Standard",
     crossPostChannels: [],
   };
-  const r = await api("chatsvc", `/v1/users/ME/conversations/${encodeURIComponent(target)}/messages`, { method: "POST", body });
+  const r = await api("chatsvc", `/v1/users/ME/conversations/${encodeURIComponent(target)}/messages`, { method: "POST", body, onCapture: asConfirmed(account) });
+  dropList(); // its last message changed: a list_chats right after must not show the old one
   return { sent: true, conversation: conversation.title ?? conversation.id, time: r?.OriginalArrivalTime ? new Date(r.OriginalArrivalTime).toISOString() : null };
 }
 
@@ -1101,12 +1357,16 @@ async function isMeAlone(conv, allow, ctx) {
   return alone && (await myAddressesOrNone(me, ctx)).some((a) => allow.includes(a));
 }
 
-/** Posts without the window (see above). Once started, the post runs to the end, as after a click. */
-async function sendWithoutConfirming(request, ctx) {
+/**
+ * Posts without the window (see above). Once started, the post runs to the end, as after a click.
+ * `account`: who it was judged to reach alone; as after a click, it isn't posted as another (3.3).
+ */
+async function sendWithoutConfirming(request, ctx, account = null) {
   if (ctx?.cancelled) return WITHDRAWN;
   autoSending++;
   try {
-    return { ...(await sendMessage(request)), autoSent: true, note: AUTO_SENT_NOTE };
+    if (account && (await signedInAccount()) !== account) return { sent: false, autoSent: true, reason: ACCOUNT_CHANGED };
+    return { ...(await sendMessage(request, account)), autoSent: true, note: AUTO_SENT_NOTE };
   } catch (err) {
     return { sent: false, autoSent: true, reason: sendFailure(err) };
   } finally {
@@ -1127,6 +1387,18 @@ export function pendingSendCount() {
   return pendingSends.size;
 }
 
+const ACCOUNT_CHANGED = "The signed-in Teams account changed since this was confirmed; nothing was sent.";
+const CHAT_CREATED_ACCOUNT_CHANGED =
+  "The chat was created, but no message was sent: the signed-in Teams account changed while it was being sent. Check with list_chats (as the account that confirmed it) before trying again.";
+
+/**
+ * The signed-in user's object id (one tenant's), or null before Teams has shown it. A send
+ * window remembers it: a click after a switch to another account posts nothing.
+ */
+async function signedInAccount() {
+  return (await chrome.storage.session.get("oid")).oid ?? null;
+}
+
 const WITHDRAWN = {
   sent: false,
   reason: "The request was withdrawn (cancelled, or the server stopped waiting), so the confirmation window was closed; nothing was sent.",
@@ -1139,7 +1411,7 @@ const WITHDRAWN = {
  * the AI was told the send failed. Once the user clicked Send, the post runs to the end
  * and its outcome is the answer.
  */
-async function askUserToConfirm(request, ctx) {
+async function askUserToConfirm(request, ctx, account = null) {
   if (ctx?.cancelled) return WITHDRAWN;
   const id = crypto.randomUUID();
   const win = await chrome.windows.create({
@@ -1162,7 +1434,7 @@ async function askUserToConfirm(request, ctx) {
       resolve(result);
     };
     const timer = setTimeout(() => finish({ sent: false, reason: "No decision within 5 minutes; nothing was sent." }), CONFIRM_TIMEOUT_MS);
-    pendingSends.set(id, { request, windowId: win.id, timer, finish, sending: false });
+    pendingSends.set(id, { request, account, windowId: win.id, timer, finish, sending: false });
     // Withdrawn while the window was opening, or later.
     if (ctx?.cancelled) finish(WITHDRAWN);
     else if (ctx) stopWatching = ctx.onCancel(() => finish(WITHDRAWN));
@@ -1173,7 +1445,11 @@ async function askUserToConfirm(request, ctx) {
 function sendFailure(err) {
   // Without an answer the post may have gone through: saying it failed would invite a second one.
   const cause = /[.!?]$/.test(err.message) ? err.message : `${err.message}.`;
-  return err.chatMayExist
+  return err.accountChanged
+    ? err.chatCreated
+      ? CHAT_CREATED_ACCOUNT_CHANGED
+      : ACCOUNT_CHANGED
+    : err.chatMayExist
     ? `Creating the chat did not finish: ${cause} The chat may have been created, without the message: check with list_chats before trying again.`
     : err.outcomeUnknown
       ? `Sending did not finish: ${cause} The message may have been posted: check with read_messages before sending again.`
@@ -1202,8 +1478,13 @@ function onConfirmMessage(msg, sender, sendResponse) {
       }
       // From here on the post runs to the end: a withdrawal no longer closes the window.
       p.sending = true;
+      // Confirmed as one account, clicked after Teams switched to another: its session would post it.
+      if (p.account && (await signedInAccount()) !== p.account) {
+        p.finish({ sent: false, reason: ACCOUNT_CHANGED }, true);
+        return sendResponse({ ok: false, error: ACCOUNT_CHANGED });
+      }
       try {
-        p.finish(await sendMessage(p.request), true);
+        p.finish(await sendMessage(p.request, p.account), true);
         sendResponse({ ok: true });
       } catch (err) {
         p.finish({ sent: false, reason: sendFailure(err) }, true);
