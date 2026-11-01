@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -153,6 +153,20 @@ describe.skipIf(process.platform === "win32")("version.yml Bump version, then Co
     expect(git(origin, "rev-parse", "v0.2.18")).toBe(originMain());
     expect(JSON.parse(git(origin, "show", "main:package.json")).version).toBe("0.2.18");
     expect(git(origin, "rev-parse", "v0.2.17")).toBe(stray);
+  });
+});
+
+describe("gitEnv test helper", { timeout: TIMEOUT_MS }, () => {
+  // Git on Windows can't open os.devNull (\\.\nul) as a config file and every command dies, so it must be a real file.
+  it("points git's user config at a real, empty file", () => {
+    const config = gitEnv().GIT_CONFIG_GLOBAL as string;
+    expect(statSync(config).isFile()).toBe(true);
+    expect(statSync(config).size).toBe(0);
+  });
+
+  it("keeps user and system config out", () => {
+    expect(gitEnv().GIT_CONFIG_NOSYSTEM).toBe("1");
+    expect(git(root, "config", "--global", "--list")).toBe("");
   });
 });
 
