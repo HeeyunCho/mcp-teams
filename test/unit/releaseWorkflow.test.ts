@@ -41,29 +41,34 @@ let origin: string;
 /** The commit on origin's main that every clone starts from. */
 let seed: string;
 
+/** A new folder under the temporary root with the bump script and the version files at 0.2.16, not in any repository. */
+function project(name: string) {
+  const dir = join(root, name);
+  mkdirSync(join(dir, "scripts"), { recursive: true });
+  copyFileSync("scripts/bump-version.mjs", join(dir, "scripts", "bump-version.mjs"));
+  for (const [file, sample] of Object.entries(VERSION_SAMPLES)) {
+    mkdirSync(dirname(join(dir, file)), { recursive: true });
+    writeFileSync(join(dir, file), sample("0.2.16"));
+  }
+  return dir;
+}
+
 beforeEach(() => {
   root = mkdtempSync(join(tmpdir(), "mcp-teams-release-"));
   origin = join(root, "origin.git");
   mkdirSync(origin);
   git(origin, "init", "-q", "--bare", "-b", "main");
 
-  const first = join(root, "first");
-  mkdirSync(first);
+  const first = project("first");
   git(first, "init", "-q", "-b", "main");
-  mkdirSync(join(first, "scripts"));
-  copyFileSync("scripts/bump-version.mjs", join(first, "scripts", "bump-version.mjs"));
-  for (const [file, sample] of Object.entries(VERSION_SAMPLES)) {
-    mkdirSync(dirname(join(first, file)), { recursive: true });
-    writeFileSync(join(first, file), sample("0.2.16"));
-  }
   git(first, "add", ".");
   git(first, "commit", "-q", "-m", "chore: first");
   git(first, "push", "-q", origin, "main");
   seed = git(first, "rev-parse", "HEAD");
-});
+}, TIMEOUT_MS);
 
 afterEach(() => {
-  rmSync(root, { recursive: true, force: true });
+  rmSync(root, { recursive: true, force: true, maxRetries: 5 });
 });
 
 function clone(name: string) {
@@ -122,5 +127,48 @@ describe.skipIf(process.platform === "win32")("version.yml Commit and tag", { ti
 
     expect(originMain()).toBe(seed);
     expect(git(origin, "rev-parse", "v0.2.17")).toBe(seed);
+  });
+});
+
+describe.skipIf(process.platform === "win32")("version.yml Bump version, then Commit and tag", { timeout: TIMEOUT_MS }, () => {
+  // The state 2026-10-31 left: a tag for the next version on a commit that isn't on main. The clone sees it as
+  // the workflow's checkout does (fetch-depth: 0 fetches every tag, on main or not).
+  it("releases the next free version past a stray tag and leaves that tag where it is", () => {
+    const other = clone("other");
+    git(other, "commit", "-q", "--allow-empty", "-m", "chore(release): v0.2.17");
+    git(other, "tag", "v0.2.17");
+    git(other, "push", "-q", "origin", "v0.2.17");
+    const stray = git(other, "rev-parse", "v0.2.17");
+    git(other, "reset", "-q", "--hard", seed);
+    merge(other, "fix: y");
+
+    const work = clone("work");
+    const output = join(root, "github-output");
+    writeFileSync(output, "");
+    runStep("Bump version", work, { BEFORE: seed, GITHUB_OUTPUT: output });
+    expect(readFileSync(output, "utf8")).toBe("version=0.2.18\n");
+
+    runStep("Commit and tag", work, { VERSION: "0.2.18" });
+    expect(git(origin, "log", "-1", "--format=%s", "main")).toBe("chore(release): v0.2.18");
+    expect(git(origin, "rev-parse", "v0.2.18")).toBe(originMain());
+    expect(JSON.parse(git(origin, "show", "main:package.json")).version).toBe("0.2.18");
+    expect(git(origin, "rev-parse", "v0.2.17")).toBe(stray);
+  });
+});
+
+describe("bump-version CLI and git tags", { timeout: TIMEOUT_MS }, () => {
+  const runCli = (dir: string) =>
+    execFileSync(process.execPath, [join(dir, "scripts", "bump-version.mjs"), "patch"], { env: gitEnv(), encoding: "utf8", stdio: "pipe" }).trim();
+
+  it("moves past a tag in the repository it is in", () => {
+    const work = clone("work");
+    git(work, "tag", "v0.2.17");
+    expect(runCli(work)).toBe("0.2.18");
+  });
+
+  it("fails without writing anything when it can't read the tags", () => {
+    const plain = project("plain");
+    expect(() => runCli(plain)).toThrow(/git tags/);
+    expect(JSON.parse(readFileSync(join(plain, "package.json"), "utf8")).version).toBe("0.2.16");
   });
 });

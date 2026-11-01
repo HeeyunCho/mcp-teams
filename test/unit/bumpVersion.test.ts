@@ -19,8 +19,9 @@ import { dirname, join } from "node:path";
 import { afterAll, afterEach, beforeEach, describe, expect, it } from "vitest";
 // @ts-expect-error plain JS script without types
 import * as bump from "../../scripts/bump-version.mjs";
+import { git, gitEnv } from "../helpers/gitRepo.js";
 
-const { bumpFiles, increment, levelFor, nextVersion, writeAll } = bump;
+const { bumpFiles, increment, levelFor, nextFreeVersion, nextVersion, writeAll } = bump;
 const VERSION_FILE_NAMES: readonly string[] = bump.VERSION_FILE_NAMES;
 const VERSION_SAMPLES: Readonly<Record<string, (version: string) => string>> = bump.VERSION_SAMPLES;
 
@@ -117,7 +118,9 @@ afterAll(() => {
 const runScript = (root: string, args: string[], stdin = "") => {
   spawns++;
   totalSpawns++;
-  return execFileSync(process.execPath, [join(root, "scripts", "bump-version.mjs"), ...args], { input: stdin, encoding: "utf8", stdio: "pipe" }).trim();
+  // The CLI reads the tags of the repository it is in, so give the temporary root its own (empty) one.
+  git(root, "init", "-q");
+  return execFileSync(process.execPath, [join(root, "scripts", "bump-version.mjs"), ...args], { input: stdin, env: gitEnv(), encoding: "utf8", stdio: "pipe" }).trim();
 };
 
 /** How a test runs a bump on a root: in-process through bumpFiles, as the CLI does, or as the CLI itself (a new process). */
@@ -130,16 +133,18 @@ type RunBumpOptions = {
   files?: FileOverrides;
   /** In-process (the default) or as a new process. */
   via?: Via;
+  /** The git tags an in-process bump sees. */
+  tags?: string[];
 };
 
 /**
  * Runs a bump with the CLI's arguments on a copy of the repository's version files in a temporary folder;
  * `out` is what the CLI prints (the new version).
  */
-async function runBump(version: string, args: string[], { stdin = "", files = {}, via = "bumpFiles" }: RunBumpOptions = {}) {
+async function runBump(version: string, args: string[], { stdin = "", files = {}, via = "bumpFiles", tags = [] }: RunBumpOptions = {}) {
   const root = makeRoot(version, files);
   try {
-    const out: string = via === "process" ? runScript(root, args, stdin) : await bumpFiles(root, args[0], async () => stdin);
+    const out: string = via === "process" ? runScript(root, args, stdin) : await bumpFiles(root, args[0], async () => stdin, async () => tags);
     const read = (f: string) => JSON.parse(readFileSync(join(root, f), "utf8"));
     const texts: Record<string, string> = Object.fromEntries(
       VERSION_FILE_NAMES.map((f) => [f, readFileSync(join(root, f), "utf8")]),
@@ -154,7 +159,7 @@ async function runBump(version: string, args: string[], { stdin = "", files = {}
  * Runs `patch` with one version file left out (`null`), replaced, or made a directory (`"<dir>"`), from `version`;
  * returns the error (its message is what the CLI prints) and every file's bytes before and after.
  */
-async function runBumpBroken(file: string, content: string | null, version = "0.2.16") {
+async function runBumpBroken(file: string, content: string | null, version = "0.2.16", tags: string[] = []) {
   const root = makeRoot(version, { [file]: content === "<dir>" ? null : content });
   if (content === "<dir>") mkdirSync(join(root, file));
   const bytes = (f: string) => {
@@ -167,7 +172,7 @@ async function runBumpBroken(file: string, content: string | null, version = "0.
     const before = snapshot();
     let error: Error | undefined;
     try {
-      await bumpFiles(root, "patch", async () => "");
+      await bumpFiles(root, "patch", async () => "", async () => tags);
     } catch (e) {
       error = e as Error;
     }
@@ -204,9 +209,50 @@ describe("bump-version bumpFiles with a missing or broken version file", () => {
     expect(r.error?.message).toMatch(message);
     expect(r.after).toEqual(r.before);
   });
+
+  it("leaves every file untouched when moving past a taken tag goes over Chrome's limit", async () => {
+    const version = "0.0.65534";
+    const r = await runBumpBroken("package.json", JSON.stringify({ name: "x", version }, null, 2), version, ["v0.0.65535"]);
+    expect(r.error?.message).toMatch(/65535/);
+    expect(r.after).toEqual(r.before);
+  });
 });
 
-type FsOp = "writeFileSync" | "renameSync" | "rmSync" | "chmodSync";
+// 2026-10-31: v0.3.21 was left on origin, off main, by a refused push. Every later run computed 0.3.21 again and
+// died on `git tag`, so nothing could be released until the bump moved past it.
+describe("bump-version with the new version's tag already taken", () => {
+  it("nextFreeVersion moves past a taken tag to the next patch", () => {
+    expect(nextFreeVersion("0.3.21", ["v0.3.20", "v0.3.21"])).toBe("0.3.22");
+  });
+
+  it("nextFreeVersion moves past several taken tags in a row", () => {
+    expect(nextFreeVersion("0.3.21", ["v0.3.23", "v0.3.21", "v0.3.22"])).toBe("0.3.24");
+  });
+
+  it("nextFreeVersion keeps a version whose tag is free", () => {
+    expect(nextFreeVersion("0.3.21", [])).toBe("0.3.21");
+    expect(nextFreeVersion("0.3.21", ["v0.3.20", "v0.3.22"])).toBe("0.3.21");
+  });
+
+  it("nextFreeVersion counts only the exact v-prefixed tag as taken", () => {
+    expect(nextFreeVersion("0.3.21", ["0.3.21", "v0.3.21-rc.1", "v0.3.210", "release-v0.3.21"])).toBe("0.3.21");
+  });
+
+  it("a bump from commit messages writes the free version to every file (0.3.20 to 0.3.22 past v0.3.21)", async () => {
+    const r = await runBump("0.3.20", [], { stdin: "fix: y\n\n\0", tags: ["v0.3.20", "v0.3.21"] });
+    expect(r.out).toBe("0.3.22");
+    expect(r.pkg.version).toBe("0.3.22");
+    expect(r.lock.version).toBe("0.3.22");
+    expect(r.lock.packages[""].version).toBe("0.3.22");
+    expect(r.manifest.version).toBe("0.3.22");
+  });
+
+  it("an explicit level moves past a taken tag by patches too", async () => {
+    expect((await runBump("0.2.16", ["minor"], { tags: ["v0.3.0"] })).out).toBe("0.3.1");
+  });
+});
+
+type FsOp ="writeFileSync" | "renameSync" | "rmSync" | "chmodSync";
 
 /** One call to fail; only a writeFileSync can fail `partial`ly. */
 type FsFailure = { op: "writeFileSync"; nth: number; partial?: true } | { op: Exclude<FsOp, "writeFileSync">; nth: number };
