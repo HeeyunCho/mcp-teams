@@ -71,7 +71,9 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git commit -am "chore(release): v$VERSION"
           git tag "v$VERSION"
-          git push origin HEAD:main "v$VERSION"
+          # Atomic: if main has moved on, the tag must not land without it. A refused push fails
+          # this run, so nothing is published; the next push's run releases these commits too.
+          git push --atomic origin HEAD:main "v$VERSION"
 
       # Trusted publishing needs npm 11.5.1 or later.
       - run: npm install -g npm@11
