@@ -1,5 +1,8 @@
 import { execFileSync } from "node:child_process";
-import { devNull } from "node:os";
+import { fileURLToPath } from "node:url";
+
+/** Stands in for the user's git config. A real file, because git on Windows can't open os.devNull (\\.\nul) as one. */
+const EMPTY_CONFIG = fileURLToPath(new URL("./empty.gitconfig", import.meta.url));
 
 /**
  * An environment for git in a temporary repository: no GIT_* variable can point it at the real repository
@@ -9,7 +12,7 @@ export function gitEnv(): NodeJS.ProcessEnv {
   const inherited = Object.entries(process.env).filter(([name]) => !name.startsWith("GIT_"));
   return {
     ...Object.fromEntries(inherited),
-    GIT_CONFIG_GLOBAL: devNull,
+    GIT_CONFIG_GLOBAL: EMPTY_CONFIG,
     GIT_CONFIG_NOSYSTEM: "1",
     GIT_AUTHOR_NAME: "Alex Doe",
     GIT_AUTHOR_EMAIL: "alex@contoso.example",
