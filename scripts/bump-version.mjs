@@ -17,6 +17,10 @@
 //
 // An explicit level is applied as given (`major` on 0.x makes 1.0.0). Prints the new version.
 //
+// A version whose "vX.Y.Z" tag already exists in the repository moves on by patches to the first
+// free one, so a tag left by a failed release can't block the next. If the tags can't be read, it
+// throws and writes nothing.
+//
 // Versions follow semver 2.0.0: MAJOR.MINOR.PATCH[-prerelease][+build], numeric parts without
 // leading zeros. Anything else throws, so the workflow fails instead of committing a broken version.
 // Build metadata is dropped. A bump from a prerelease releases it, as `npm version` / semver.inc do:
@@ -28,6 +32,7 @@
 //
 // "Before 1.0.0" means below 1.0.0 in semver order, so every 0.x prerelease and 1.0.0-rc.1 count
 // (feat: on 1.0.0-rc.1 is a patch bump and releases 1.0.0).
+import { execFileSync } from "node:child_process";
 import { chmodSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -84,6 +89,23 @@ export function levelFor(version, level) {
 }
 
 export const nextVersion = (version, messages) => increment(version, levelFor(version, bumpLevel(messages)));
+
+/** `version`, or the first patch after it whose "v" tag isn't in `tags`. */
+export function nextFreeVersion(version, tags) {
+  const taken = new Set(tags);
+  let free = version;
+  while (taken.has(`v${free}`)) free = increment(free, "patch");
+  return free;
+}
+
+/** The tags of the git repository at `root`. Throws if git can't list them. */
+function gitTags(root) {
+  try {
+    return execFileSync("git", ["-C", root, "tag", "--list"], { encoding: "utf8", stdio: "pipe" }).split(/\r?\n/).filter(Boolean);
+  } catch (e) {
+    throw new Error(`Cannot list the git tags in ${root}: ${e.message}`);
+  }
+}
 
 /**
  * Replaces the first `count` `field` fields in a file's text, keeping its formatting. The value
@@ -186,10 +208,11 @@ export const VERSION_SAMPLES = Object.fromEntries(VERSION_FILES.map((f) => [f.fi
 
 /**
  * Bumps the version files under `root` and returns the new version: by `level` if it is patch, minor or major,
- * else from the commit messages in the string `readInput()` resolves to, NUL-separated (called only then). What
- * the CLI runs, with the repository root and stdin; tests call it on a temporary root, in-process.
+ * else from the commit messages in the string `readInput()` resolves to, NUL-separated (called only then), moved
+ * past any tag in the list `readTags()` resolves to. What the CLI runs, with the repository root, stdin and its git
+ * tags; tests call it on a temporary root, in-process.
  */
-export async function bumpFiles(root, level, readInput) {
+export async function bumpFiles(root, level, readInput, readTags) {
   const files = VERSION_FILES.map((f) => ({ ...f, ...readJson(root, f.file) }));
   const current = files[0].json.version; // package.json, the first entry, holds the current version
   let next;
@@ -199,6 +222,7 @@ export async function bumpFiles(root, level, readInput) {
     const input = await readInput();
     next = nextVersion(current, input.split("\0").filter((m) => m.trim()));
   }
+  next = nextFreeVersion(next, await readTags());
   writeAll(root, files.map(({ file, text, update }) => ({ file, text: update(file, text, next), original: text })));
   return next;
 }
@@ -211,7 +235,7 @@ async function readStdin() {
 }
 
 async function main() {
-  console.log(await bumpFiles(ROOT, process.argv[2], readStdin));
+  console.log(await bumpFiles(ROOT, process.argv[2], readStdin, () => gitTags(ROOT)));
 }
 
 // Compares real paths: argv[1] keeps any symlink in the path the script was started by, import.meta.url doesn't.
