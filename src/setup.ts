@@ -21,7 +21,18 @@ const TEAMS_WAIT_MS = 120_000;
 const ok = (text: string) => console.log(`✓ ${text}`);
 const todo = (text: string) => console.log(`→ ${text}`);
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
-const quote = (s: string) => (/\s/.test(s) ? `"${s}"` : s);
+
+/**
+ * One argument of a command printed for the user to paste into their shell. To run a
+ * command through cmd.exe, see cmdQuote. No double-quoted form is safe in both cmd and
+ * PowerShell: inside the quotes, %VAR% still expands in cmd and $x in PowerShell.
+ */
+export function quote(arg: string, platform: NodeJS.Platform = process.platform): string {
+  if (platform === "win32") return /[\s&%$`]/.test(arg) ? `"${arg}"` : arg;
+  return /[^A-Za-z0-9_@%+=:,./-]/.test(arg) ? `'${arg.replace(/'/g, "'\\''")}'` : arg;
+}
+
+const commandLine = (parts: string[], platform: NodeJS.Platform) => parts.map((part) => quote(part, platform)).join(" ");
 
 /** The package from npm, always the latest release (npx keeps it cached). */
 export const NPX_COMMAND: ServerCommand = { command: "npx", args: ["-y", "mcp-teams@latest"] };
@@ -88,7 +99,7 @@ export function commandInvocation(
  * ("not-registered"), or a CLI that could not be started at all ("broken").
  */
 export function claudeLookupFailure(err: unknown): "missing" | "not-registered" | "broken" {
-  const e = err as NodeJS.ErrnoException & { status?: number | null };
+  const e = err as NodeJS.ErrnoException;
   // Windows: a missing claude is caught earlier, by windowsHas.
   if (e.code === "ENOENT") return "missing";
   // A code is set only when the process could not be started (EINVAL, EACCES, …).
@@ -115,8 +126,12 @@ function claude(args: string[], options: ExecFileSyncOptions): string {
 }
 
 /** The command that registers this server with Claude Code, to run by hand. */
-export const claudeAddCommand = (cmd: ServerCommand) =>
-  ["claude", "mcp", "add", "--scope", "user", "teams", "--", cmd.command, ...cmd.args].map(quote).join(" ");
+export const claudeAddCommand = (cmd: ServerCommand, platform: NodeJS.Platform = process.platform) =>
+  commandLine(["claude", "mcp", "add", "--scope", "user", "teams", "--", cmd.command, ...cmd.args], platform);
+
+/** What to do when no AI app was found: register the server by hand. */
+export const noAppHint = (cmd: ServerCommand, platform: NodeJS.Platform = process.platform) =>
+  `No AI app found. Register this stdio server with yours: ${commandLine([cmd.command, ...cmd.args], platform)}`;
 
 /** Claude Code is configured through its CLI: null if it isn't installed, "broken" if its CLI won't start. */
 function planClaudeCode(cmd: ServerCommand): ClaudeCode | "broken" | null {
@@ -177,15 +192,16 @@ export function registerNext(claudeCode: ClaudeCode | "broken" | null, plans: Pi
 }
 
 /** Shows what registering would change in each AI app, asks once, then does it. */
-async function registerApps(yes: boolean) {
+export async function registerApps(yes: boolean) {
   const cmd = serverCommand();
   const claudeCode = planClaudeCode(cmd);
   const plans: Plan[] = planClients(cmd);
-  console.log("AI apps on this computer:");
-  if (claudeCode && claudeCode !== "broken") console.log(`  ${"Claude Code".padEnd(15)} ${STATUS_TEXT[claudeCode.status]}`);
-  for (const p of plans) console.log(`  ${p.client.name.padEnd(15)} ${STATUS_TEXT[p.status]}`);
+  const rows = plans.map((p) => `  ${p.client.name.padEnd(15)} ${STATUS_TEXT[p.status]}`);
+  if (claudeCode && claudeCode !== "broken") rows.unshift(`  ${"Claude Code".padEnd(15)} ${STATUS_TEXT[claudeCode.status]}`);
+  if (rows.length) console.log("AI apps on this computer:");
+  for (const row of rows) console.log(row);
   const next = registerNext(claudeCode, plans);
-  if (next === "none-found") todo(`No AI app found. Register this stdio server with yours: ${[cmd.command, ...cmd.args].map(quote).join(" ")}`);
+  if (next === "none-found") todo(noAppHint(cmd));
   if (next === "up-to-date") ok("Registered with every AI app found");
   if (next !== "ask") return;
   if (!(await confirm("Add mcp-teams to these apps?", yes))) return;

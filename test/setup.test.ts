@@ -3,7 +3,7 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { claudeAddCommand, claudeLookupFailure, cmdQuote, commandInvocation, openCommand, registerNext, windowsHas } from "../src/setup.js";
+import { claudeAddCommand, claudeLookupFailure, cmdQuote, commandInvocation, noAppHint, openCommand, quote, registerNext, windowsHas } from "../src/setup.js";
 
 // Paths cmd.exe would otherwise split (&), expand (%...%) or treat specially (^ ( ) !).
 const tricky = [
@@ -87,10 +87,81 @@ describe("claudeAddCommand", () => {
     expect(claudeAddCommand({ command: "/usr/local/bin/node", args: ["/Users/alex/mcp-teams/dist/index.js"] })).toBe(
       "claude mcp add --scope user teams -- /usr/local/bin/node /Users/alex/mcp-teams/dist/index.js",
     );
-    expect(claudeAddCommand({ command: "C:\\Program Files\\nodejs\\node.exe", args: ["C:\\Users\\Alex Doe\\index.js"] })).toBe(
+    expect(claudeAddCommand({ command: "C:\\Program Files\\nodejs\\node.exe", args: ["C:\\Users\\Alex Doe\\index.js"] }, "win32")).toBe(
       'claude mcp add --scope user teams -- "C:\\Program Files\\nodejs\\node.exe" "C:\\Users\\Alex Doe\\index.js"',
     );
     expect(claudeAddCommand({ command: "npx", args: ["-y", "mcp-teams@latest"] })).toBe("claude mcp add --scope user teams -- npx -y mcp-teams@latest");
+  });
+});
+
+describe("#24: quote", () => {
+  describe.each(["darwin", "linux"] as const)("on %s", (platform) => {
+    it("#24: wraps a space, $, a backtick and & in single quotes", () => {
+      expect(quote("/Users/Alex Doe/index.js", platform)).toBe("'/Users/Alex Doe/index.js'");
+      expect(quote("/Users/$alex/index.js", platform)).toBe("'/Users/$alex/index.js'");
+      expect(quote("/Users/al`ex/index.js", platform)).toBe("'/Users/al`ex/index.js'");
+      expect(quote("/Users/Alex&Sam/index.js", platform)).toBe("'/Users/Alex&Sam/index.js'");
+    });
+
+    it("#24: writes an embedded single quote as '\\''", () => {
+      expect(quote("/Users/Alex's/index.js", platform)).toBe("'/Users/Alex'\\''s/index.js'");
+    });
+
+    it("#24: quotes any other character outside the safe set", () => {
+      for (const arg of ['a"b', "a\\b", "a(b)", "a;b", "a*b", "a~b", "a\tb", "Zoë"]) expect(quote(arg, platform)).toBe(`'${arg}'`);
+    });
+
+    it("#24: leaves the safe set unquoted, % included", () => {
+      expect(quote("Az09_@%+=:,./-", platform)).toBe("Az09_@%+=:,./-");
+      expect(quote("mcp-teams@latest", platform)).toBe("mcp-teams@latest");
+    });
+  });
+
+  describe("on Windows", () => {
+    it("#24: wraps whitespace, &, %, $ and a backtick in double quotes", () => {
+      expect(quote("C:\\Users\\Alex Doe\\index.js", "win32")).toBe('"C:\\Users\\Alex Doe\\index.js"');
+      expect(quote("C:\\Users\\Alex\tDoe\\index.js", "win32")).toBe('"C:\\Users\\Alex\tDoe\\index.js"');
+      expect(quote("C:\\Users\\Alex&Sam\\index.js", "win32")).toBe('"C:\\Users\\Alex&Sam\\index.js"');
+      expect(quote("C:\\Users\\Alex%20Doe\\index.js", "win32")).toBe('"C:\\Users\\Alex%20Doe\\index.js"');
+      expect(quote("C:\\Users\\$alex\\index.js", "win32")).toBe('"C:\\Users\\$alex\\index.js"');
+      expect(quote("C:\\Users\\al`ex\\index.js", "win32")).toBe('"C:\\Users\\al`ex\\index.js"');
+    });
+
+    it("#24: leaves everything else unquoted, a backslash and a single quote included", () => {
+      for (const arg of ["C:\\nodejs\\node.exe", "C:\\Users\\Alex's\\index.js", "-y", "mcp-teams@latest"]) expect(quote(arg, "win32")).toBe(arg);
+    });
+  });
+
+  // A real shell reads back what was printed, so the expected text above isn't the only check.
+  it.runIf(process.platform !== "win32")("#24: a POSIX shell reads a quoted argument back byte for byte", () => {
+    for (const arg of ["/Users/Alex Doe/x", "$HOME", "`id`", "a&b", "Alex's", "it''s", "a\\b", 'a"b', "a;b", "*", "~", "50%"]) {
+      expect(execFileSync("/bin/sh", ["-c", `printf %s ${quote(arg, "linux")}`], { encoding: "utf8" })).toBe(arg);
+    }
+  });
+});
+
+describe("#24: printed commands quote for the platform", () => {
+  const spaced = { command: "/Users/Alex Doe/$bin/node", args: ["/Users/Alex's/index.js"] };
+  const windows = { command: "C:\\Program Files\\nodejs\\node.exe", args: ["C:\\Users\\Alex&Sam\\index.js", "C:\\Users\\Alex%20Doe\\x", "-y"] };
+
+  it("#24: claudeAddCommand", () => {
+    expect(claudeAddCommand(spaced, "linux")).toBe("claude mcp add --scope user teams -- '/Users/Alex Doe/$bin/node' '/Users/Alex'\\''s/index.js'");
+    expect(claudeAddCommand(windows, "win32")).toBe(
+      'claude mcp add --scope user teams -- "C:\\Program Files\\nodejs\\node.exe" "C:\\Users\\Alex&Sam\\index.js" "C:\\Users\\Alex%20Doe\\x" -y',
+    );
+  });
+
+  it('#24: the "No AI app found" hint', () => {
+    expect(noAppHint(spaced, "darwin")).toBe("No AI app found. Register this stdio server with yours: '/Users/Alex Doe/$bin/node' '/Users/Alex'\\''s/index.js'");
+    expect(noAppHint(windows, "win32")).toBe(
+      'No AI app found. Register this stdio server with yours: "C:\\Program Files\\nodejs\\node.exe" "C:\\Users\\Alex&Sam\\index.js" "C:\\Users\\Alex%20Doe\\x" -y',
+    );
+  });
+
+  it.each(["darwin", "linux", "win32"] as const)("#24: npx -y mcp-teams@latest prints unchanged on %s", (platform) => {
+    const npx = { command: "npx", args: ["-y", "mcp-teams@latest"] };
+    expect(claudeAddCommand(npx, platform)).toBe("claude mcp add --scope user teams -- npx -y mcp-teams@latest");
+    expect(noAppHint(npx, platform)).toBe("No AI app found. Register this stdio server with yours: npx -y mcp-teams@latest");
   });
 });
 
