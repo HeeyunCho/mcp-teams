@@ -32,6 +32,7 @@ jobs:
       # main only takes pull requests (repository ruleset "Protect main"). The release
       # commit and tag are pushed with a deploy key, the ruleset's only bypass: a personal
       # repository's ruleset can't exempt GitHub Actions itself.
+      # fetch-depth: 0 also fetches every tag, which the bump needs to move past a taken version.
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
@@ -71,7 +72,9 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git commit -am "chore(release): v$VERSION"
           git tag "v$VERSION"
-          git push origin HEAD:main "v$VERSION"
+          # Atomic: if main has moved on, the tag must not land without it. A refused push fails
+          # this run, so nothing is published; the next push's run releases these commits too.
+          git push --atomic origin HEAD:main "v$VERSION"
 
       # Trusted publishing needs npm 11.5.1 or later.
       - run: npm install -g npm@11
