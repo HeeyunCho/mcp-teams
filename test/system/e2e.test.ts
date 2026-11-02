@@ -13,12 +13,16 @@ const home = mkdtempSync(join(tmpdir(), "mcp-teams-"));
 const calls: { method: string; params: any }[] = [];
 let client: Client;
 let ext: WebSocket;
+// Whether the fake extension's account is in no teams (its list_teams then has a note).
+let inNoTeams = false;
+const NO_TEAMS_NOTE = "Teams is signed in as Alex Doe (alex@contoso.example) and this account is in no teams.";
 
 const fakeExtension: Record<string, (p: any) => unknown> = {
   status: () => ({ extensionVersion: VERSION, teamsTabs: 1, services: { chatsvc: "2026-10-10T08:00:00Z" } }),
-  listTeams: () => ({
-    teams: [{ id: "T1", name: "Engineering", channels: [{ id: "19:g@thread.tacv2", name: "General", general: true }] }],
-  }),
+  listTeams: () =>
+    inNoTeams
+      ? { teams: [], note: NO_TEAMS_NOTE }
+      : { teams: [{ id: "T1", name: "Engineering", channels: [{ id: "19:g@thread.tacv2", name: "General", general: true }] }] },
   listChats: (p) => ({ total: 1, chats: [{ id: "19:a@unq.gbl.spaces", title: "Bo Kim", kind: "oneOnOne", query: p.query ?? null }] }),
   readMessages: (p) => {
     if (p.conversation === "nobody") throw new Error('No chat or channel matches "nobody".');
@@ -114,6 +118,16 @@ describe("MCP server end to end", () => {
   it("lists teams without ids unless asked", async () => {
     expect((await call("list_teams")).data).toEqual({ teams: [{ name: "Engineering", channels: [{ name: "General", general: true }] }] });
     expect((await call("list_teams", { include_ids: true })).data.teams[0].channels[0].id).toBe("19:g@thread.tacv2");
+  });
+
+  it("passes the extension's note for an account in no teams through, with and without ids", async () => {
+    inNoTeams = true;
+    try {
+      expect((await call("list_teams")).data).toEqual({ teams: [], note: NO_TEAMS_NOTE });
+      expect((await call("list_teams", { include_ids: true })).data).toEqual({ teams: [], note: NO_TEAMS_NOTE });
+    } finally {
+      inNoTeams = false;
+    }
   });
 
   it("passes chat filters through", async () => {

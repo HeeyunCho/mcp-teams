@@ -153,11 +153,12 @@ export function registerTools(server: McpServer, bridge: ExtensionBridge, config
     },
     safe(async ({ include_ids, refresh }, extra) => {
       type Team = { id: string; name: string; channels: { id: string; name: string }[] };
-      const r = await bridge.call<{ teams: Team[] }>("listTeams", refreshParam(refresh), READ_TIMEOUT_MS, extra.signal);
+      // `note`: an empty list says whose it is (the signed-in account and tenant).
+      const r = await bridge.call<{ teams: Team[]; note?: string }>("listTeams", refreshParam(refresh), READ_TIMEOUT_MS, extra.signal);
       return text(
         include_ids
           ? r
-          : { teams: r.teams.map(({ id, channels, ...t }) => ({ ...t, channels: channels.map(({ id: _, ...c }) => c) })) },
+          : { ...r, teams: r.teams.map(({ id, channels, ...t }) => ({ ...t, channels: channels.map(({ id: _, ...c }) => c) })) },
       );
     }),
   );

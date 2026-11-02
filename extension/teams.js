@@ -64,17 +64,38 @@ const GUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
  * verifying; nothing else of the token is kept.
  */
 export function tokenOid(headers) {
+  for (const claims of tokenClaims(headers)) {
+    const oid = String(claims?.oid ?? /^orgid:(.+)$/i.exec(String(claims?.skypeid ?? ""))?.[1] ?? "").toLowerCase();
+    if (GUID.test(oid)) return oid;
+  }
+  return null;
+}
+
+/** The decoded payloads of a request's JWTs (unverified, nothing else of them kept). */
+function* tokenClaims(headers) {
   for (const value of [headers?.authorization, headers?.authentication, headers?.["x-skypetoken"]]) {
     const jwt = /([A-Za-z0-9_-]+)\.([A-Za-z0-9_-]+)\.[A-Za-z0-9_-]*$/.exec(String(value ?? ""));
     if (!jwt) continue;
-    let claims;
     try {
-      claims = JSON.parse(atob(jwt[2].replace(/-/g, "+").replace(/_/g, "/")));
+      // atob gives one character per byte; the payload is UTF-8 (names may not be ASCII).
+      const bytes = Uint8Array.from(atob(jwt[2].replace(/-/g, "+").replace(/_/g, "/")), (c) => c.charCodeAt(0));
+      yield JSON.parse(new TextDecoder().decode(bytes));
     } catch {
-      continue;
+      // not a JWT
     }
-    const oid = String(claims?.oid ?? /^orgid:(.+)$/i.exec(String(claims?.skypeid ?? ""))?.[1] ?? "").toLowerCase();
-    if (GUID.test(oid)) return oid;
+  }
+}
+
+/**
+ * Who a request's token was issued to, as its AAD bearer token says: `name` (display name),
+ * `address` (sign-in name, e.g. alex@contoso.example) and `tenantId`, each null when missing.
+ * A token names the tenant only by id. Only these claims are read; nothing of the token is kept.
+ */
+export function tokenAccount(headers) {
+  const text = (v) => (typeof v === "string" && v.trim() ? v.trim() : null);
+  for (const c of tokenClaims(headers)) {
+    const account = { name: text(c?.name), address: text(c?.upn) ?? text(c?.preferred_username) ?? text(c?.unique_name), tenantId: GUID.test(String(c?.tid ?? "").toLowerCase()) ? String(c.tid).toLowerCase() : null };
+    if (account.name || account.address || account.tenantId) return account;
   }
   return null;
 }
