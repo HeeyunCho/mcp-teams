@@ -619,6 +619,16 @@ async function teamsAndChats(fresh = false, ctx = null) {
   return data;
 }
 
+/**
+ * list_teams' note for an empty list: the signed-in account (from its token: name, sign-in
+ * address, tenant id; a token has no tenant name) is in no teams. Never the token itself.
+ */
+function noTeamsNote(account, mri) {
+  const who = [account?.name, account?.address && (account.name ? `(${account.address})` : account.address)].filter(Boolean).join(" ") || mri || "the signed-in account";
+  const tenant = account?.tenantId ? `, in tenant ${account.tenantId},` : "";
+  return `Teams is signed in as ${who}${tenant} and this account is in no teams. If you expected teams, they may be under another account or tenant: switch accounts or organizations in the Teams tab, then list again with refresh.`;
+}
+
 /** A result's note when names are missing (`missing`, see lookupNames): throttled, or why. */
 function namesNote(what, missing) {
   if (!missing.throttled) return `${what} missing: some people couldn't be looked up, so they are shown without their names. Try again. The lookup failed with: ${missing.error}`;
@@ -944,7 +954,10 @@ export const handlers = {
   // `openTab`: setup, which opens Teams for a new user and waits for the sign-in.
   async listTeams({ refresh = false, openTab = false } = {}, ctx) {
     if (!openTab) await requireTeamsTab(ctx);
-    return { teams: (await teamsAndChats(refresh === true, ctx)).teams };
+    const list = (await teamsAndChats(refresh === true, ctx)).teams;
+    // An empty list is easily taken for a failure: say whose it is (the list is the csa session's account's).
+    if (list.length) return { teams: list };
+    return { teams: list, note: noTeamsNote(teams.tokenAccount((await getCapture("csa"))?.headers), await myMri()) };
   },
 
   async listChats({ query, limit = 30, unreadOnly = false, refresh = false }, ctx) {

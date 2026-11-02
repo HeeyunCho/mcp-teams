@@ -46,4 +46,15 @@ describe("setup with no Teams tab open", () => {
     expect(await setup(bridge, "0.0.0", { yes: true })).toBe(true);
     expect(call).toHaveBeenCalledWith("listTeams", { refresh: true, openTab: true }, expect.any(Number));
   });
+
+  it("shows whose Teams it reached when that account is in no teams", async () => {
+    const note = "Teams is signed in as Alex Doe (alex@contoso.example) and this account is in no teams.";
+    const lines: string[] = [];
+    vi.mocked(console.log).mockImplementation((line: string) => void lines.push(line));
+    const call = vi.fn(async () => ({ teams: [], note }));
+    const bridge = { extensions: [{ origin: EXTENSION_ORIGIN, browser: "Chrome" }], connected: true, call } as unknown as ExtensionBridge;
+    expect(await setup(bridge, "0.0.0", { yes: true })).toBe(true);
+    expect(lines.join("\n")).toContain("Teams reachable (0 teams)");
+    expect(lines.join("\n")).toContain(note);
+  });
 });
