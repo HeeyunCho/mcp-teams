@@ -86,7 +86,8 @@ export function registerTools(server: McpServer, bridge: ExtensionBridge, config
         server: SERVER_VERSION,
         extension: bridge.extension?.version ?? null,
         browser: bridge.extension?.browser ?? null,
-        // With several browsers connected, calls go to the one shown above.
+        // With several browsers connected, calls go to the one shown above (list_teams and
+        // list_chats: to one with a Teams tab open, if that one has none).
         ...(bridge.extensions.length > 1
           ? { browsers: bridge.extensions.map((e) => ({ browser: e.browser ?? null, version: e.version })) }
           : {}),
