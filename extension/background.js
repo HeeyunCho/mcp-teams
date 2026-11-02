@@ -729,11 +729,14 @@ async function myMri() {
  */
 const accountKey = (cap) => (cap ? `${cap.base}\n${cap.oid ?? ""}` : null);
 
+let accountSwitches = 0; // bumped by forgetAccount: a send sees that a switch landed while it looked things up
+
 /**
  * The user switched Teams to another account or tenant: forget what the previous one saw.
  * (Throttle gates stay: they are Teams' limits per service and base, not anyone's data.)
  */
 function forgetAccount() {
+  accountSwitches++;
   dropList();
   names.clear();
   transcripts.clear();
@@ -1360,6 +1363,7 @@ export const handlers = {
   async requestSend({ conversation, to, title, text, threadId, subject, autoSendTo }, ctx) {
     if (!String(text ?? "").trim()) throw new Error("The message is empty.");
     // Who the window (or an auto-send) is for: taken before anything is looked up for it.
+    const switches = accountSwitches;
     const account = await signedInAccount();
     // The server's allowlist (config autoSendTo) only permits; whether this send goes without the
     // window is decided below from the target as resolved here (see sendsToMeAlone, isMeAlone).
@@ -1367,8 +1371,8 @@ export const handlers = {
     if (to?.length) {
       if (conversation) throw new Error("Give either a conversation or people (to), not both.");
       if (threadId || subject) throw new Error("reply_to and subject are for channels; a new chat takes people and an optional title.");
-      const me = await myMri();
-      if (!me) throw new Error("Teams hasn't shown who is signed in yet. Reload the Teams tab and try again.");
+      if (!account) throw new Error(NOT_SHOWN);
+      const me = `8:orgid:${account}`;
       if (allow.length && !title && (await sendsToMeAlone(to, me, allow, ctx))) {
         return sendWithoutConfirming({ conversation: NOTES_TO_SELF, text: String(text) }, ctx, account);
       }
@@ -1389,8 +1393,15 @@ export const handlers = {
       replyingTo = root ? teams.parseMessage(root) : { id: threadId };
     }
     const request = { conversation: conv, text: String(text), threadId: threadId ?? null, subject: subject ?? null, replyingTo };
-    if (allow.length && !threadId && !subject && (await isMeAlone(conv, allow, ctx))) return sendWithoutConfirming(request, ctx, account);
-    return askUserToConfirm(request, ctx, account);
+    // Without an account known from the start, the decision to send goes to the user (the window).
+    if (account && allow.length && !threadId && !subject && (await isMeAlone(conv, allow, ctx))) return sendWithoutConfirming(request, ctx, account);
+    if (account) return askUserToConfirm(request, ctx, account);
+    // A cold start: the lookups may have shown who is signed in. The window rests on that account,
+    // unless a switch landed since the send began, when they may have been another account's.
+    const shown = await signedInAccount();
+    if (switches !== accountSwitches) return { sent: false, reason: ACCOUNT_CHANGED_BEFORE };
+    if (!shown) throw new Error(NOT_SHOWN);
+    return askUserToConfirm(request, ctx, shown);
   },
 };
 
@@ -1398,7 +1409,7 @@ export const handlers = {
  * Creates a chat with these members and me (called only after the user clicked Send).
  * A 1:1 chat that already exists on Teams' side comes back as that chat.
  */
-async function createChat({ members, title }, account = null) {
+async function createChat({ members, title }, account) {
   const me = await myMri();
   const oneOnOne = members.length === 1;
   const body = {
@@ -1425,16 +1436,16 @@ async function createChat({ members, title }, account = null) {
 }
 
 /**
- * An onCapture check for a post confirmed as `account` (an oid, or null when Teams hadn't shown
- * who was signed in): fails before anything is sent when the session it would go out with is
+ * An onCapture check for a post confirmed as `account` (an oid; requestSend goes no further
+ * without one): fails before anything is sent when the session it would go out with is
  * another account's (Teams switched since the click).
  */
 const asConfirmed = (account) => async (cap) => {
-  if (account && (cap.oid ?? (await signedInAccount())) !== account) throw Object.assign(new Error(ACCOUNT_CHANGED), { accountChanged: true });
+  if ((cap.oid ?? (await signedInAccount())) !== account) throw Object.assign(new Error(ACCOUNT_CHANGED), { accountChanged: true });
 };
 
 /** Posts a confirmed message; `account`: who confirmed it (see asConfirmed). */
-async function sendMessage({ conversation, newChat, people, text, threadId, subject }, account = null) {
+async function sendMessage({ conversation, newChat, people, text, threadId, subject }, account) {
   if (newChat) {
     let id;
     try {
@@ -1548,11 +1559,11 @@ async function isMeAlone(conv, allow, ctx) {
  * Posts without the window (see above). Once started, the post runs to the end, as after a click.
  * `account`: who it was judged to reach alone; as after a click, it isn't posted as another (3.3).
  */
-async function sendWithoutConfirming(request, ctx, account = null) {
+async function sendWithoutConfirming(request, ctx, account) {
   if (ctx?.cancelled) return WITHDRAWN;
   autoSending++;
   try {
-    if (account && (await signedInAccount()) !== account) return { sent: false, autoSent: true, reason: ACCOUNT_CHANGED };
+    if ((await signedInAccount()) !== account) return { sent: false, autoSent: true, reason: ACCOUNT_CHANGED };
     return { ...(await sendMessage(request, account)), autoSent: true, note: AUTO_SENT_NOTE };
   } catch (err) {
     return { sent: false, autoSent: true, reason: sendFailure(err) };
@@ -1575,6 +1586,8 @@ export function pendingSendCount() {
 }
 
 const ACCOUNT_CHANGED = "The signed-in Teams account changed since this was confirmed; nothing was sent.";
+const ACCOUNT_CHANGED_BEFORE = "The signed-in Teams account changed while this send was being prepared; nothing was sent. Check who is signed in, then try again.";
+const NOT_SHOWN = "Teams hasn't shown who is signed in yet. Reload the Teams tab and try again.";
 const CHAT_CREATED_ACCOUNT_CHANGED =
   "The chat was created, but no message was sent: the signed-in Teams account changed while it was being sent. Check with list_chats (as the account that confirmed it) before trying again.";
 
@@ -1598,7 +1611,7 @@ const WITHDRAWN = {
  * the AI was told the send failed. Once the user clicked Send, the post runs to the end
  * and its outcome is the answer.
  */
-async function askUserToConfirm(request, ctx, account = null) {
+async function askUserToConfirm(request, ctx, account) {
   if (ctx?.cancelled) return WITHDRAWN;
   const id = crypto.randomUUID();
   const win = await chrome.windows.create({
@@ -1666,7 +1679,7 @@ function onConfirmMessage(msg, sender, sendResponse) {
       // From here on the post runs to the end: a withdrawal no longer closes the window.
       p.sending = true;
       // Confirmed as one account, clicked after Teams switched to another: its session would post it.
-      if (p.account && (await signedInAccount()) !== p.account) {
+      if ((await signedInAccount()) !== p.account) {
         p.finish({ sent: false, reason: ACCOUNT_CHANGED }, true);
         return sendResponse({ ok: false, error: ACCOUNT_CHANGED });
       }

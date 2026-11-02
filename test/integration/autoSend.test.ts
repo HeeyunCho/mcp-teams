@@ -8,7 +8,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { registerTools } from "../../src/tools.js";
 import { TOKEN } from "../helpers/bridgeHarness.js";
-import { createFakeChrome, loadWorker, ME_OID, openedSockets, reply, type FakeChrome, type SentRequest } from "../helpers/fakeChrome.js";
+import { createFakeChrome, loadWorker, ME_OID, never, openedSockets, reply, TEAMS_ORIGIN, type FakeChrome, type SentRequest } from "../helpers/fakeChrome.js";
 
 const ME = `8:orgid:${ME_OID}`;
 const MY_EMAIL = "pat.lee@contoso.example";
@@ -129,6 +129,65 @@ describe("autoSendTo in the extension", () => {
     await expect(worker.handlers.requestSend({ to: [MY_EMAIL], text: "Note" })).rejects.toThrow(/Nobody found/);
     expect(fake.spies.windowsCreate).not.toHaveBeenCalled();
     expect(posts(fake)).toEqual([]);
+  });
+});
+
+describe("autoSendTo when a tab fails", () => {
+  const SECOND_TAB = { id: 2, url: `${TEAMS_ORIGIN}/v2/?second`, status: "complete" as const };
+  const isMyProfile = (r: SentRequest) => r.service === "mt" && JSON.stringify(r.body) === JSON.stringify([ME]);
+  const profileLookups = (fake: FakeChrome) => fake.sent.filter(isMyProfile);
+
+  it("the tab closes during my address lookup: it goes once more in another tab, and the note posts without a window", async () => {
+    let held = false;
+    const { fake, worker } = await setup({
+      csa,
+      chatsvc,
+      mt: (req: SentRequest) => {
+        if (held || !isMyProfile(req)) return mt(req);
+        held = true;
+        return never();
+      },
+    });
+    fake.tabs.push({ ...SECOND_TAB });
+    const result = worker.handlers.requestSend({ conversation: "48:notes", text: "Note", autoSendTo: [MY_EMAIL] });
+    await vi.waitFor(() => expect(profileLookups(fake)).toHaveLength(1));
+
+    fake.closeTab(1);
+    await vi.waitFor(() => expect(posts(fake).length + fake.spies.windowsCreate.mock.calls.length).toBeGreaterThan(0));
+
+    expect(fake.spies.windowsCreate).not.toHaveBeenCalled();
+    await expect(result).resolves.toMatchObject({ sent: true, autoSent: true });
+    expect(profileLookups(fake).slice(0, 2).map((r) => r.tabId)).toEqual([1, 2]);
+    expect(posts(fake)).toEqual(["/v1/users/ME/conversations/48:notes/messages"]);
+  });
+
+  it("the tab closes during the fresh chat list of a chat with only me: it goes once more in another tab, and the note posts", async () => {
+    // The second read is the fresh one: the first found the chat.
+    let reads = 0;
+    const { fake, worker } = await setup({ mt, chatsvc, csa: () => (++reads === 2 ? never() : csa()) });
+    fake.tabs.push({ ...SECOND_TAB });
+    const result = worker.handlers.requestSend({ conversation: ONLY_ME, text: "Note", autoSendTo: [MY_EMAIL] });
+    await vi.waitFor(() => expect(reads).toBe(2));
+
+    fake.closeTab(1);
+    await vi.waitFor(() => expect(posts(fake).length + fake.spies.windowsCreate.mock.calls.length).toBeGreaterThan(0));
+
+    expect(fake.spies.windowsCreate).not.toHaveBeenCalled();
+    await expect(result).resolves.toMatchObject({ sent: true, autoSent: true });
+  });
+
+  it("the tab closes under the post itself: it is never sent again, and the answer says it may have been posted", async () => {
+    const hanging = { csa, mt, chatsvc: (req: SentRequest) => (req.method === "POST" ? never() : undefined) };
+    const { fake, worker } = await setup(hanging);
+    fake.tabs.push({ ...SECOND_TAB });
+    const result = worker.handlers.requestSend({ conversation: "48:notes", text: "Note", autoSendTo: [MY_EMAIL] });
+    await vi.waitFor(() => expect(posts(fake)).toHaveLength(1));
+
+    fake.closeTab(1);
+
+    await expect(result).resolves.toEqual({ sent: false, autoSent: true, reason: expect.stringMatching(/may have been posted.*read_messages/) });
+    expect(posts(fake)).toHaveLength(1);
+    expect(fake.spies.windowsCreate).not.toHaveBeenCalled();
   });
 });
 
