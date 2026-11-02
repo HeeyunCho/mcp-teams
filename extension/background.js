@@ -159,10 +159,11 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
  * Waits until Teams sends the service a session after `since` (a new one, or the stored one
  * again); null on timeout. Listens for the capture instead of asking for it. `rejected`: the
  * headers Teams refused (401); that session sent again (by Teams, or replayed by another call)
- * doesn't count, only one with other credentials.
+ * doesn't count, only one with other credentials. `signal`: aborting it ends the wait (null).
  */
-function waitForCapture(service, since, timeoutMs, rejected = null) {
+function waitForCapture(service, since, timeoutMs, rejected = null, signal = null) {
   const key = `capture:${service}`;
+  if (signal?.aborted) return Promise.resolve(null);
   return new Promise((resolve) => {
     let done = false;
     const finish = (cap) => {
@@ -171,8 +172,11 @@ function waitForCapture(service, since, timeoutMs, rejected = null) {
       clearTimeout(timer);
       chrome.storage.onChanged.removeListener(onChanged);
       captureSeen.delete(onSeen);
+      signal?.removeEventListener("abort", onAbort);
       resolve(cap);
     };
+    const onAbort = () => finish(null);
+    signal?.addEventListener("abort", onAbort);
     const check = async () => {
       const cap = await getCapture(service);
       if (cap && cap.at > since && !(rejected && sameHeaders(cap.headers, rejected))) finish(cap);
@@ -301,7 +305,8 @@ async function waitForTabLoaded(tabId, timeoutMs = 30_000) {
   if (await waitForTab(tabId, (t) => t.status === "complete", timeoutMs)) await sleep(SETTLE_MS);
 }
 
-const refreshing = new Map(); // service -> Promise<capture|null>, so parallel calls for a service wait once
+// service -> { promise (capture|null), waiting (calls), kept, stop }, so parallel calls for a service wait once
+const refreshing = new Map();
 
 /**
  * A captured token is lost when the extension reloads and expires after about an hour.
@@ -313,21 +318,43 @@ const refreshing = new Map(); // service -> Promise<capture|null>, so parallel c
  * used, so a tab that just loaded wouldn't bring it. Nor does a user's tab that is still loading:
  * it calls its services by itself, so the call waits for that (at most LOADING_TAB_WAIT_MS).
  * `rejected`: the headers of a session Teams refused (401), which doesn't count as a fresh one.
+ * A call (`ctx`) that is withdrawn stops waiting at once (its reason); once every call waiting
+ * for the service was withdrawn, the wait itself is dropped, so the background tab doesn't stay
+ * open for nobody (a call without a ctx never withdraws).
  */
-function refreshSession(service, tab, { quickWaitMs = 4_000, rejected = null } = {}) {
-  if (!refreshing.has(service)) {
+function refreshSession(service, tab, { quickWaitMs = 4_000, rejected = null } = {}, ctx = null) {
+  if (ctx?.cancelled) return Promise.reject(ctx.reason);
+  let entry = refreshing.get(service);
+  if (!entry) {
     const since = Date.now();
-    const p = (async () => {
+    const stop = new AbortController();
+    const { signal } = stop;
+    entry = { waiting: 0, kept: false, stop };
+    const self = entry;
+    entry.promise = (async () => {
       const current = await chrome.tabs.get(tab.id).catch(() => null);
-      if (current?.status === "loading") return waitForCapture(service, since, LOADING_TAB_WAIT_MS, rejected);
-      const quick = quickWaitMs ? await waitForCapture(service, since, quickWaitMs, rejected) : null;
+      if (current?.status === "loading") return waitForCapture(service, since, LOADING_TAB_WAIT_MS, rejected, signal);
+      const quick = quickWaitMs ? await waitForCapture(service, since, quickWaitMs, rejected, signal) : null;
       if (quick) return quick;
-      if (service === "substrate") return null;
-      return recaptureInHelperTab(service, teamsOrigin(tab), since, rejected);
-    })().finally(() => refreshing.delete(service));
-    refreshing.set(service, p);
+      if (service === "substrate" || signal.aborted) return null;
+      return recaptureInHelperTab(service, teamsOrigin(tab), since, rejected, signal);
+    })().finally(() => refreshing.get(service) === self && refreshing.delete(service));
+    refreshing.set(service, entry);
   }
-  return refreshing.get(service);
+  if (!ctx) {
+    entry.kept = true;
+    return entry.promise;
+  }
+  const self = entry;
+  self.waiting++;
+  const stopWatching = ctx.onCancel(() => {
+    if (--self.waiting > 0 || self.kept) return;
+    // Nobody waits for it anymore: a later call starts afresh.
+    if (refreshing.get(service) === self) refreshing.delete(service);
+    self.stop.abort();
+  });
+  self.promise.then(stopWatching, stopWatching);
+  return guarded(self.promise, ctx);
 }
 
 const teamsOrigin = (tab) => {
@@ -356,8 +383,10 @@ let helperRun = null;
  * late: the capture, or null. One tab at a time: a call for another service while it is open
  * waits on the same tab, which closes once every wait asked of it ended (unless the user switched
  * to it), or as soon as the user closes it. It never reloads or scripts the user's own Teams tab.
+ * `signal`: aborting it ends this wait (null) when nobody waits for it anymore, so the tab closes
+ * once no other wait is left.
  */
-function recaptureInHelperTab(service, origin, since = Date.now(), rejected = null) {
+function recaptureInHelperTab(service, origin, since = Date.now(), rejected = null, signal = null) {
   if (!helperRun || helperRun.closing) {
     const run = { since: Date.now(), waits: [], closing: false };
     let tabClosed;
@@ -394,7 +423,7 @@ function recaptureInHelperTab(service, origin, since = Date.now(), rejected = nu
   }
   const run = helperRun;
   const left = Math.max(run.since + RECAPTURE_WAIT_MS - Date.now(), RECAPTURE_JOIN_MIN_MS);
-  const wait = Promise.race([waitForCapture(service, since, left, rejected), run.tabGone.then(() => null)]);
+  const wait = Promise.race([waitForCapture(service, since, left, rejected, signal), run.tabGone.then(() => null)]);
   run.waits.push(wait);
   return wait;
 }
@@ -642,7 +671,7 @@ async function api(service, path, { method = "GET", body, raw = false, withLocat
   // Opening a tab or waiting for a session can take a minute; a withdrawn request stops waiting.
   let tab = await guarded(findTeamsTab(cap ? new URL(cap.base).origin : null, ctx), ctx);
   if (!cap) {
-    cap = await guarded(refreshSession(service, tab, { quickWaitMs: service === "substrate" ? 2_000 : 4_000 }), ctx);
+    cap = await refreshSession(service, tab, { quickWaitMs: service === "substrate" ? 2_000 : 4_000 }, ctx);
     if (!cap) throw new Error(SERVICE_HELP[service]);
   }
   const urlFor = (c) => teams.serviceUrl(path, c.base);
@@ -655,7 +684,7 @@ async function api(service, path, { method = "GET", body, raw = false, withLocat
     // The session (maybe the account) is changing: lists read with it are read again.
     dropList();
     meetingSessionsCache.clear();
-    cap = await guarded(refreshSession(service, tab, { quickWaitMs: 0, rejected: cap.headers }), ctx);
+    cap = await refreshSession(service, tab, { quickWaitMs: 0, rejected: cap.headers }, ctx);
     if (!cap) throw new Error(SERVICE_HELP[service]);
     // The tab may have been closed meanwhile: look the tabs up again.
     if (ctx) ctx.tabs = null;
