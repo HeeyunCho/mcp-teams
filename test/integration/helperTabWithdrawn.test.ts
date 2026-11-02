@@ -1,4 +1,4 @@
-﻿// A missing or rejected session is recaptured in a background Teams tab (the helper), which stays
+// A missing or rejected session is recaptured in a background Teams tab (the helper), which stays
 // open up to a minute while tool calls wait on it. A call that is withdrawn meanwhile (the server
 // cancels it, its time limit passes, its connection closes) no longer waits: once no call waits
 // for the helper anymore, it is closed at once rather than left open for nobody. A call that still
@@ -165,4 +165,3 @@ describe("after the extension reloads, its recovery's background tab", () => {
     expect(fake.spies.tabsCreate).toHaveBeenCalledTimes(1);
   });
 });
-
