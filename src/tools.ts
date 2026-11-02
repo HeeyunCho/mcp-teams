@@ -146,7 +146,7 @@ export function registerTools(server: McpServer, bridge: ExtensionBridge, config
     {
       title: "List teams and channels",
       description:
-        "Lists the teams you are a member of, each with its channels. Use 'Team/Channel' or a channel id as the conversation for read_messages and send_message. The list may be up to a minute old (see refresh). Needs a Teams tab open in the browser: without one it fails at once.",
+        "Lists the teams you are a member of, each with its channels. Group chats and meeting chats are not teams, even when they are named like one: list_chats lists those. Use 'Team/Channel' or a channel id as the conversation for read_messages and send_message. The list may be up to a minute old (see refresh). Needs a Teams tab open in the browser: without one it fails at once.",
       inputSchema: {
         include_ids: z.boolean().default(false).describe("Also return team and channel ids (long; 'Team/Channel' names are enough to address channels)"),
         refresh,
