@@ -92,7 +92,7 @@ const windowOpened = (fake: FakeChrome) => vi.waitFor(() => expect(windows(fake)
 /** Until the send answered or opened a window (a window keeps it waiting for a decision). */
 const answerOrWindow = (fake: FakeChrome, result: Promise<unknown>) =>
   Promise.race([result.catch(() => {}), vi.waitFor(() => expect(windows(fake)).toBeGreaterThan(0), { timeout: 4_000 })]);
-const posts = (fake: FakeChrome) =>fake.sent.filter((r) => r.service === "chatsvc" && r.method === "POST");
+const posts = (fake: FakeChrome) => fake.sent.filter((r) => r.service === "chatsvc" && r.method === "POST");
 const clickSend = (fake: FakeChrome) => {
   const id = /id=([^&]+)/.exec(fake.spies.windowsCreate.mock.calls[0][0]!.url!)![1];
   return fake.pageMessage(`confirm.html?id=${id}`, { type: "confirm:decide", id, approve: true });
@@ -106,10 +106,13 @@ describe("cold start: the confirmation window", () => {
     await windowOpened(fake);
 
     await teamsShows(fake, "b");
+    const before = fake.sent.length;
     await clickSend(fake);
 
     await expect(result).resolves.toEqual({ sent: false, reason: CHANGED });
     expect(posts(fake)).toEqual([]);
+    // The click itself refuses: not even a read goes out as Sam before the post would be refused.
+    expect(fake.sent.slice(before)).toEqual([]);
   });
 
   it("warm control: the same switch and click, with Alex known before the send: nothing is posted", async () => {
@@ -118,10 +121,13 @@ describe("cold start: the confirmation window", () => {
     await windowOpened(fake);
 
     await teamsShows(fake, "b");
+    const before = fake.sent.length;
     await clickSend(fake);
 
     await expect(result).resolves.toEqual({ sent: false, reason: CHANGED });
     expect(posts(fake)).toEqual([]);
+    // The click itself refuses: not even a read goes out as Sam before the post would be refused.
+    expect(fake.sent.slice(before)).toEqual([]);
   });
 
   it("cold start: with no switch, the click posts once, as Alex", async () => {
