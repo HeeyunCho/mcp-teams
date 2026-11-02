@@ -245,7 +245,7 @@ describe("after a reload, the extension never reloads the user's Teams tab for a
     await done;
     expect(replies[0]).toMatchObject({ ok: false });
     await pass(180_000); // Teams never signs in in the background tab
-    expect(fake.spies.tabsRemove).toHaveBeenCalledTimes(1);
+    expect(fake.tabs.map((t) => t.id)).toEqual([1]); // every background tab was closed
     expect(fake.spies.tabsReload).not.toHaveBeenCalled();
   });
 
