@@ -6,7 +6,7 @@
 // once Teams' requests there brought the session back. The real worker (extension/background.js)
 // runs under a fake chrome; the reload is Chrome's onInstalled event for the new worker.
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { BASES, createFakeChrome, loadWorker, openedSockets, TEAMS_ORIGIN, type FakeChrome, type Worker } from "../helpers/fakeChrome.js";
+import { BASES, createFakeChrome, loadWorker, openedSockets, reply, TEAMS_ORIGIN, type FakeChrome, type Worker } from "../helpers/fakeChrome.js";
 
 afterEach(() => {
   vi.useRealTimers();
@@ -249,14 +249,241 @@ describe("after a reload, the extension never reloads the user's Teams tab for a
     expect(fake.spies.tabsReload).not.toHaveBeenCalled();
   });
 
-  it("without a reload or update, a missing session still reloads the Teams tab as before", async () => {
-    const { fake, worker } = await reloadedWorker({ services: { csa: () => ({ teams: [], chats: [] }) } });
-    const { done } = request(worker, "listChats");
-    await pass(10_000);
-    expect(fake.spies.tabsReload).toHaveBeenCalledWith(1);
+});
+
+describe("outside a reload or update, a missing or rejected session is recaptured in a background tab, never by reloading the user's Teams tab", () => {
+  /** A worker that runs as usual (no reload reported), with `captured` sessions held. */
+  async function runningWorker(options: Parameters<typeof createFakeChrome>[0] = {}) {
+    const fake = createFakeChrome(options);
+    const worker = await loadWorker(fake);
+    worker.registerListeners();
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+    return { fake, worker };
+  }
+  const helperTabs = (fake: FakeChrome) => fake.tabs.filter((t) => t.id !== 1);
+
+  it("a missing session: Teams' own tab gets a moment, then Teams opens in a background tab; the call succeeds once its session is captured there, and the tab closes", async () => {
+    const { fake, worker } = await runningWorker({ captured: ["chatsvc", "mt", "substrate"], services: { csa: () => ({ teams: [], chats: [] }) } });
+    const { replies, done } = request(worker, "listChats");
+    await pass(3_000);
+    expect(fake.spies.tabsCreate).not.toHaveBeenCalled(); // the 4 s grace for Teams' own tab
+    await pass(2_000);
+    expect(fake.spies.tabsCreate).toHaveBeenCalledTimes(1);
+    expect(fake.spies.tabsCreate.mock.calls[0][0]).toMatchObject({ url: `${TEAMS_ORIGIN}/`, active: false });
+    const helperId = (await fake.spies.tabsCreate.mock.results[0].value).id;
+    expect(fake.session.get(HELPER_KEY)).toBe(helperId);
+
     await teamsListRequest(fake);
+    await pass(2_000);
+    await done;
+    expect(replies[0]).toMatchObject({ ok: true });
+    expect(fake.spies.tabsRemove).toHaveBeenCalledWith(helperId);
+    expect(helperTabs(fake)).toEqual([]);
+    expect(fake.session.has(HELPER_KEY)).toBe(false);
+    expect(fake.spies.tabsReload).not.toHaveBeenCalled();
+    // The requests ran in the user's tab, not in the background one.
+    expect(fake.sent.filter((r) => r.service === "csa").every((r) => r.tabId === 1)).toBe(true);
+  });
+
+  it("a rejected session (401): Teams opens in a background tab at once, and the call is retried with the session captured there", async () => {
+    const tokens: string[] = [];
+    const { fake, worker } = await runningWorker({
+      services: {
+        csa: (req) => {
+          tokens.push(req.headers.authorization);
+          return req.headers.authorization === "Bearer fake" ? reply(401) : { teams: [], chats: [] };
+        },
+      },
+    });
+    const { replies, done } = request(worker, "listChats");
+    await pass(100);
+    expect(fake.spies.tabsCreate).toHaveBeenCalledTimes(1);
+    expect(fake.spies.tabsCreate.mock.calls[0][0]).toMatchObject({ url: `${TEAMS_ORIGIN}/`, active: false });
+    await teamsListRequest(fake);
+    await pass(2_000);
+    await done;
+    expect(replies[0]).toMatchObject({ ok: true });
+    expect(tokens).toEqual(["Bearer fake", "Bearer fake-fresh-csa"]);
+    expect(helperTabs(fake)).toEqual([]);
+    expect(fake.spies.tabsReload).not.toHaveBeenCalled();
+  });
+
+  it("calls that need different services at once share one background tab, which closes once both sessions are back", async () => {
+    const { fake, worker } = await runningWorker({ captured: ["mt", "substrate"], services: { csa: () => ({ teams: [], chats: [] }), chatsvc: () => ({ messages: [] }) } });
+    const list = request(worker, "listChats");
+    const read = request(worker, "readMessages", { conversation: "19:contoso-notes@thread.v2", limit: 5 });
+    await pass(6_000);
+    expect(fake.spies.tabsCreate).toHaveBeenCalledTimes(1);
+    await teamsChatRequest(fake);
+    await pass(2_000);
+    expect(fake.spies.tabsRemove).not.toHaveBeenCalled(); // the team list isn't back yet
+    await teamsListRequest(fake);
+    await pass(2_000);
+    await Promise.all([list.done, read.done]);
+    expect(list.replies[0]).toMatchObject({ ok: true });
+    expect(read.replies[0]).toMatchObject({ ok: true });
+    expect(fake.spies.tabsCreate).toHaveBeenCalledTimes(1);
+    expect(fake.spies.tabsRemove).toHaveBeenCalledTimes(1);
+    expect(helperTabs(fake)).toEqual([]);
+    expect(fake.spies.tabsReload).not.toHaveBeenCalled();
+  });
+
+  it("a call during the recovery after a reload uses the recovery's background tab, not a second one", async () => {
+    const { fake, worker } = await reloadedWorker({ services: { csa: () => ({ teams: [], chats: [] }) } });
+    chromeReports(fake, "onInstalled", "update");
+    await pass(20_000); // the recovery's tab is open, waiting for the chat session
+    expect(fake.spies.tabsCreate).toHaveBeenCalledTimes(1);
+    const { replies, done } = request(worker, "listChats");
+    await pass(6_000);
+    await teamsListRequest(fake);
+    await teamsChatRequest(fake);
+    await pass(2_000);
+    await done;
+    expect(replies[0]).toMatchObject({ ok: true });
+    expect(fake.spies.tabsCreate).toHaveBeenCalledTimes(1);
+    expect(helperTabs(fake)).toEqual([]);
+  });
+
+  it("when Teams doesn't bring the session there in time, the call fails with the help message and the background tab closes", async () => {
+    const { fake, worker } = await runningWorker({ captured: ["chatsvc", "mt", "substrate"], services: { csa: () => ({ teams: [], chats: [] }) } });
+    const { replies, done } = request(worker, "listChats", {}, 180_000);
+    await pass(5_000);
+    expect(fake.spies.tabsCreate).toHaveBeenCalledTimes(1);
+    await pass(70_000);
+    await done;
+    expect(replies[0]).toMatchObject({ ok: false, error: expect.stringContaining("team list session is not available") });
+    expect(fake.spies.tabsRemove).toHaveBeenCalledTimes(1);
+    expect(helperTabs(fake)).toEqual([]);
+    expect(fake.session.has(HELPER_KEY)).toBe(false);
+    expect(fake.spies.tabsReload).not.toHaveBeenCalled();
+  });
+
+  it("the user closing the background tab ends the call's wait for it at once", async () => {
+    const { fake, worker } = await runningWorker({ captured: ["chatsvc", "mt", "substrate"], services: { csa: () => ({ teams: [], chats: [] }) } });
+    const { replies, done } = request(worker, "listChats", {}, 180_000);
+    await pass(5_000);
+    const helper = helperTabs(fake)[0];
+    fake.closeTab(helper.id);
+    await pass(100);
+    await done;
+    expect(replies[0]).toMatchObject({ ok: false, error: expect.stringContaining("team list session is not available") });
+    expect(fake.session.has(HELPER_KEY)).toBe(false);
+    expect(fake.spies.tabsReload).not.toHaveBeenCalled();
+  });
+
+  it("after a 401, the rejected token sent again (by Teams or another call) doesn't end the wait: only a different session does", async () => {
+    const tokens: string[] = [];
+    const { fake, worker } = await runningWorker({
+      services: {
+        csa: (req) => {
+          tokens.push(req.headers.authorization);
+          return req.headers.authorization === "Bearer fake" ? reply(401) : { teams: [], chats: [] };
+        },
+      },
+    });
+    const { replies, done } = request(worker, "listChats");
+    await pass(100);
+    expect(fake.spies.tabsCreate).toHaveBeenCalledTimes(1);
+    // The expired token goes out again (Teams' own tab, or another call replaying it).
+    await fake.fire("beforeSendHeaders", { url: `${BASES.csa}/api/v2/teams/users/me?isPrefetch=false`, requestHeaders: [{ name: "Authorization", value: "Bearer fake" }] });
+    await pass(2_000);
+    expect(replies).toEqual([]);
+    expect(helperTabs(fake)).toHaveLength(1);
+    await teamsListRequest(fake);
+    await pass(2_000);
+    await done;
+    expect(replies[0]).toMatchObject({ ok: true });
+    expect(tokens).toEqual(["Bearer fake", "Bearer fake-fresh-csa"]);
+  });
+
+  it("a call that joins the background tab late still gets its own wait, and the tab stays open for it", async () => {
+    let expired = false; // the team list's token expires later, while the tab is open
+    const { fake, worker } = await runningWorker({
+      captured: ["csa", "mt", "substrate"],
+      services: { csa: (req) => (expired && req.headers.authorization === "Bearer fake" ? reply(401) : { teams: [], chats: [] }) },
+    });
+    // The chat session is missing: the tab opens at about 4 s for it, and Teams never brings it.
+    const read = request(worker, "readMessages", { conversation: "19:contoso-notes@thread.v2", limit: 5 }, 300_000);
+    await pass(5_000);
+    expect(fake.spies.tabsCreate).toHaveBeenCalledTimes(1);
+    const helperId = (await fake.spies.tabsCreate.mock.results[0].value).id;
+    await pass(57_000);
+    // At about 62 s, 2 s before the tab's minute ends, the team list's session is rejected: it joins the tab.
+    expired = true;
+    const list = { replies: [] as any[], done: null as unknown as Promise<void> };
+    list.done = worker.dispatch({ type: "request", id: "r2", method: "listChats", params: { refresh: true }, timeoutMs: 300_000 }, (r) => list.replies.push(r));
+    await pass(4_000);
+    await read.done;
+    expect(read.replies[0]).toMatchObject({ ok: false, error: expect.stringContaining("chat session is not available") });
+    await pass(6_000); // about 72 s: past the tab's minute
+    expect(list.replies).toEqual([]);
+    expect(helperTabs(fake).map((t) => t.id)).toEqual([helperId]); // the same tab, kept open for it
+    await teamsListRequest(fake);
+    await pass(2_000);
+    await list.done;
+    expect(list.replies[0]).toMatchObject({ ok: true });
+    expect(fake.spies.tabsCreate).toHaveBeenCalledTimes(1);
+    expect(helperTabs(fake)).toEqual([]);
+  });
+
+  it("the background tab is closed even if recording it fails", async () => {
+    const { fake, worker } = await runningWorker({ captured: ["chatsvc", "mt", "substrate"], services: { csa: () => ({ teams: [], chats: [] }) } });
+    const set = fake.chrome.storage.session.set.getMockImplementation()!;
+    fake.chrome.storage.session.set.mockImplementation(async (items: Record<string, unknown>) => {
+      if (HELPER_KEY in items) throw new Error("storage quota");
+      return set(items);
+    });
+    const { replies, done } = request(worker, "listChats");
     await pass(5_000);
     await done;
+    expect(fake.spies.tabsCreate).toHaveBeenCalledTimes(1);
+    expect(replies[0]).toMatchObject({ ok: false, error: expect.stringContaining("team list session is not available") });
+    expect(helperTabs(fake)).toEqual([]);
+  });
+
+  it("while the user's Teams tab is still loading (it signs in by itself), no background tab is opened: the call waits for that tab", async () => {
+    const { fake, worker } = await runningWorker({ captured: ["chatsvc", "mt", "substrate"], services: { csa: () => ({ teams: [], chats: [] }) } });
+    fake.tabs[0].status = "loading";
+    const { replies, done } = request(worker, "listChats");
+    await pass(10_000);
+    expect(fake.spies.tabsCreate).not.toHaveBeenCalled();
+    await teamsListRequest(fake);
+    await pass(1_000);
+    await done;
+    expect(replies[0]).toMatchObject({ ok: true });
+    expect(fake.spies.tabsCreate).not.toHaveBeenCalled();
+    expect(fake.spies.tabsReload).not.toHaveBeenCalled();
+  });
+
+  it("a Teams tab that keeps loading without bringing the session: the call fails with the help message, still without a background tab", async () => {
+    const { fake, worker } = await runningWorker({ captured: ["chatsvc", "mt", "substrate"], services: { csa: () => ({ teams: [], chats: [] }) } });
+    fake.tabs[0].status = "loading";
+    const { replies, done } = request(worker, "listChats");
+    await pass(40_000);
+    await done;
+    expect(replies[0]).toMatchObject({ ok: false, error: expect.stringContaining("team list session is not available") });
+    expect(fake.spies.tabsCreate).not.toHaveBeenCalled();
+    expect(fake.spies.tabsReload).not.toHaveBeenCalled();
+  });
+
+  it("search (substrate) opens no background tab, since Teams signs in to it only once its search box was used: the call says so after a short wait", async () => {
+    const { fake, worker } = await runningWorker({ captured: ["chatsvc", "csa", "mt"] });
+    const { replies, done } = request(worker, "searchMessages", { query: "contoso" });
+    await pass(2_500);
+    await done;
+    expect(replies[0]).toMatchObject({ ok: false, error: expect.stringContaining("search session is not available") });
+    expect(fake.spies.tabsCreate).not.toHaveBeenCalled();
+    expect(fake.spies.tabsReload).not.toHaveBeenCalled();
+  });
+
+  it("a rejected search session (401) fails with the help message, without a background tab or a reload", async () => {
+    const { fake, worker } = await runningWorker({ services: { substrate: () => reply(401) } });
+    const { replies, done } = request(worker, "searchMessages", { query: "contoso" });
+    await pass(100);
+    await done;
+    expect(replies[0]).toMatchObject({ ok: false, error: expect.stringContaining("search session is not available") });
+    expect(fake.spies.tabsCreate).not.toHaveBeenCalled();
+    expect(fake.spies.tabsReload).not.toHaveBeenCalled();
   });
 });
 

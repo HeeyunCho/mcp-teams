@@ -157,9 +157,11 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 /**
  * Waits until Teams sends the service a session after `since` (a new one, or the stored one
- * again); null on timeout. Listens for the capture instead of asking for it.
+ * again); null on timeout. Listens for the capture instead of asking for it. `rejected`: the
+ * headers Teams refused (401); that session sent again (by Teams, or replayed by another call)
+ * doesn't count, only one with other credentials.
  */
-function waitForCapture(service, since, timeoutMs) {
+function waitForCapture(service, since, timeoutMs, rejected = null) {
   const key = `capture:${service}`;
   return new Promise((resolve) => {
     let done = false;
@@ -173,7 +175,7 @@ function waitForCapture(service, since, timeoutMs) {
     };
     const check = async () => {
       const cap = await getCapture(service);
-      if (cap && cap.at > since) finish(cap);
+      if (cap && cap.at > since && !(rejected && sameHeaders(cap.headers, rejected))) finish(cap);
     };
     const onChanged = (changes, area) => area === "session" && changes[key]?.newValue && check();
     const onSeen = (s) => s === service && check();
@@ -237,7 +239,7 @@ function knownTab(ctx, tab) {
 }
 
 /**
- * The user's Teams tabs among `tabs`: never the background tab recaptureAfterReload opened while
+ * The user's Teams tabs among `tabs`: never the background tab opened to recapture a session while
  * it is recorded (it closes soon, and a request running there would fail with it). Once the user
  * switched to it (it opens inactive, so active means they did), it is kept, so it counts like
  * any other at once, before the worker forgets it.
@@ -299,48 +301,103 @@ async function waitForTabLoaded(tabId, timeoutMs = 30_000) {
   if (await waitForTab(tabId, (t) => t.status === "complete", timeoutMs)) await sleep(SETTLE_MS);
 }
 
-const refreshing = new Map(); // service -> Promise<capture|null>, so parallel calls reload once
+const refreshing = new Map(); // service -> Promise<capture|null>, so parallel calls for a service wait once
 
 /**
  * A captured token is lost when the extension reloads and expires after about an hour.
- * Teams' next own request to the service brings a fresh one; if none comes soon, reload
- * the Teams tab, which makes Teams call its services again. In a worker that started after a
- * reload or update (recoveryRan) it never reloads the tab: null (the caller says what to do).
+ * Teams' next own request to the service brings a fresh one; if none comes within
+ * `quickWaitMs`, Teams is opened in a background tab (recaptureInHelperTab), whose requests
+ * bring the session. The user's own Teams tab is never reloaded (a call or meeting there would
+ * drop): null when the session didn't come back (the caller fails with SERVICE_HELP).
+ * Search (substrate) gets no background tab: Teams signs in to it only once its search box was
+ * used, so a tab that just loaded wouldn't bring it. Nor does a user's tab that is still loading:
+ * it calls its services by itself, so the call waits for that (at most LOADING_TAB_WAIT_MS).
+ * `rejected`: the headers of a session Teams refused (401), which doesn't count as a fresh one.
  */
-function refreshSession(service, tab, { quickWaitMs = 4_000 } = {}) {
+function refreshSession(service, tab, { quickWaitMs = 4_000, rejected = null } = {}) {
   if (!refreshing.has(service)) {
     const since = Date.now();
     const p = (async () => {
-      // Right after a reload the worker is already getting Teams to sign in again without
-      // touching the user's tab (recaptureAfterReload): wait for that rather than reload it.
-      if (recapturing) {
-        await recapturing;
-        const cap = await getCapture(service);
-        if (cap) return cap;
-      }
-      const quick = quickWaitMs ? await waitForCapture(service, since, quickWaitMs) : null;
+      const current = await chrome.tabs.get(tab.id).catch(() => null);
+      if (current?.status === "loading") return waitForCapture(service, since, LOADING_TAB_WAIT_MS, rejected);
+      const quick = quickWaitMs ? await waitForCapture(service, since, quickWaitMs, rejected) : null;
       if (quick) return quick;
-      // After a reload or update the user's tab may be in a call or meeting: never reload it
-      // from here. The call fails with SERVICE_HELP, which asks the user to do it.
-      if (recoveryRan) return null;
-      await chrome.tabs.reload(tab.id);
-      const cap = await waitForCapture(service, since, 45_000);
-      if (cap) await waitForTabLoaded(tab.id);
-      return cap;
+      if (service === "substrate") return null;
+      return recaptureInHelperTab(service, teamsOrigin(tab), since, rejected);
     })().finally(() => refreshing.delete(service));
     refreshing.set(service, p);
   }
   return refreshing.get(service);
 }
 
-// After a reload: how long Teams' own requests get to bring the session back, then how long
-// Teams in the background tab gets to sign in.
+const teamsOrigin = (tab) => {
+  const url = tab?.url || tab?.pendingUrl;
+  return TEAMS_TAB.test(url ?? "") ? new URL(url).origin : new URL(DEFAULT_TEAMS_URL).origin;
+};
+
+// After a reload: how long Teams' own requests get to bring the session back. Then, as after any
+// missing or rejected session, how long Teams in the background tab gets to sign in.
 const RECAPTURE_GRACE_MS = 15_000;
 const RECAPTURE_WAIT_MS = 60_000;
-let recapturing = null; // Promise of the run below while it runs, so a second report of the reload starts none
-let recoveryRan = false; // this worker started after a reload or update: refreshSession never reloads a tab
-// The background tab it opened, kept in chrome.storage.session so a later worker can close it.
+// A call that joins the background tab late still waits at least this long (the tab stays open for it).
+const RECAPTURE_JOIN_MIN_MS = 20_000;
+// How long a call waits for a user's Teams tab that is still loading to bring the session.
+const LOADING_TAB_WAIT_MS = 30_000;
+let recapturing = null; // Promise of recaptureAfterReload while it runs, so a second report of the reload starts none
+// The background tab (one at a time), kept in chrome.storage.session so a later worker can close it.
 const HELPER_TAB_KEY = "recaptureHelperTab";
+// The background tab's run while it is open: { since, waits (Promise<capture|null>[]), tabGone, done, closing }.
+let helperRun = null;
+
+/**
+ * Opens Teams (`origin`) in a background tab, where it signs in and calls its services as on any
+ * load, and waits until `service` is captured there (other credentials than `rejected`), at most
+ * RECAPTURE_WAIT_MS from when the tab was opened, or RECAPTURE_JOIN_MIN_MS for a call that joins
+ * late: the capture, or null. One tab at a time: a call for another service while it is open
+ * waits on the same tab, which closes once every wait asked of it ended (unless the user switched
+ * to it), or as soon as the user closes it. It never reloads or scripts the user's own Teams tab.
+ */
+function recaptureInHelperTab(service, origin, since = Date.now(), rejected = null) {
+  if (!helperRun || helperRun.closing) {
+    const run = { since: Date.now(), waits: [], closing: false };
+    let tabClosed;
+    run.tabGone = new Promise((r) => (tabClosed = r));
+    let tabId = null;
+    let closed = false;
+    const onRemoved = (id) => id === tabId && tabClosed();
+    const previous = helperRun?.done;
+    run.done = (async () => {
+      await previous; // a run still closing its tab finishes first: one background tab at a time
+      chrome.tabs.onRemoved.addListener(onRemoved);
+      const tab = await chrome.tabs.create({ url: `${origin}/`, active: false });
+      tabId = tab.id;
+      await chrome.storage.session.set({ [HELPER_TAB_KEY]: tab.id });
+      // Until every wait settled, including those that joined meanwhile, or the user closed the tab.
+      for (let n = -1; n !== run.waits.length; ) {
+        n = run.waits.length;
+        await Promise.race([Promise.all(run.waits), run.tabGone]);
+      }
+      run.closing = true;
+      closed = true;
+      await closeHelperTab(tab.id);
+    })()
+      .catch(() => {})
+      .finally(async () => {
+        run.closing = true;
+        chrome.tabs.onRemoved.removeListener(onRemoved);
+        tabClosed();
+        // Something failed after the tab was opened (e.g. recording it): it isn't left open.
+        if (tabId !== null && !closed) await closeHelperTab(tabId).catch(() => {});
+        if (helperRun === run) helperRun = null;
+      });
+    helperRun = run;
+  }
+  const run = helperRun;
+  const left = Math.max(run.since + RECAPTURE_WAIT_MS - Date.now(), RECAPTURE_JOIN_MIN_MS);
+  const wait = Promise.race([waitForCapture(service, since, left, rejected), run.tabGone.then(() => null)]);
+  run.waits.push(wait);
+  return wait;
+}
 
 /** The id of that background tab while it is recorded, else null. */
 async function helperTabId() {
@@ -351,46 +408,38 @@ async function helperTabId() {
 /**
  * Chrome clears chrome.storage.session when the extension is reloaded or updated, so the
  * captured sessions are gone; a Teams tab left in the background may not call its services
- * again for a long time. Unless Teams does so within RECAPTURE_GRACE_MS, this opens Teams (the
- * origin of the open tab) in a background tab, where it signs in and calls its services as on
- * any load, and closes that tab once the chat session is captured or after RECAPTURE_WAIT_MS
- * (unless the user switched to it). It never reloads or scripts the user's own Teams tab; a tool
- * call meanwhile waits for it, and from then on refreshSession doesn't reload that tab either
- * (a service still missing fails the call with SERVICE_HELP). Nothing is
- * done without a Teams tab that has loaded and is awake: one still loading calls its services
- * itself, and a discarded or unloaded one isn't woken.
+ * again for a long time. Unless Teams does so within RECAPTURE_GRACE_MS, this gets the chat
+ * session back through the background tab (recaptureInHelperTab). Nothing is done without a
+ * Teams tab that has loaded and is awake: one still loading calls its services itself, and a
+ * discarded or unloaded one isn't woken.
  */
 function recaptureAfterReload() {
-  recoveryRan = true;
   recapturing ??= (async () => {
     const since = Date.now();
     if (await getCapture("chatsvc")) return;
     const awake = (await chrome.tabs.query({ url: TEAMS_URLS })).filter((t) => TEAMS_TAB.test(t.url ?? "") && !t.discarded && t.status === "complete");
     if (!awake.length) return;
     if (await waitForCapture("chatsvc", since, RECAPTURE_GRACE_MS)) return;
-    const tab = await chrome.tabs.create({ url: `${new URL(awake[0].url).origin}/`, active: false });
-    await chrome.storage.session.set({ [HELPER_TAB_KEY]: tab.id });
-    await waitForCapture("chatsvc", since, RECAPTURE_WAIT_MS);
-    await closeHelperTab(tab.id);
+    await recaptureInHelperTab("chatsvc", teamsOrigin(awake[0]), since);
   })()
     .catch(() => {})
     .finally(() => (recapturing = null));
   return recapturing;
 }
 
-/** Closes the background tab recaptureAfterReload opened, unless the user switched to it, and forgets it. */
+/** Closes the background tab, unless the user switched to it, and forgets it. */
 async function closeHelperTab(tabId) {
   const tab = await chrome.tabs.get(tabId).catch(() => null);
   if (tab && !tab.active) await chrome.tabs.remove(tabId).catch(() => {});
-  await chrome.storage.session.remove(HELPER_TAB_KEY);
+  if ((await helperTabId()) === tabId) await chrome.storage.session.remove(HELPER_TAB_KEY);
 }
 
 /**
- * A worker suspended while recaptureAfterReload waited never closed its background tab (Teams
- * there may sit on a sign-in page): the next worker closes it when it wakes.
+ * A worker suspended while its background tab was open never closed it (Teams there may sit on
+ * a sign-in page): the next worker closes it when it wakes.
  */
 async function closeLeftoverHelperTab() {
-  if (recapturing) return; // this worker's own run closes it
+  if (helperRun) return; // this worker's own run closes it
   const tabId = await helperTabId();
   if (tabId != null) await closeHelperTab(tabId);
 }
@@ -606,9 +655,9 @@ async function api(service, path, { method = "GET", body, raw = false, withLocat
     // The session (maybe the account) is changing: lists read with it are read again.
     dropList();
     meetingSessionsCache.clear();
-    cap = await guarded(refreshSession(service, tab, { quickWaitMs: 0 }), ctx);
+    cap = await guarded(refreshSession(service, tab, { quickWaitMs: 0, rejected: cap.headers }), ctx);
     if (!cap) throw new Error(SERVICE_HELP[service]);
-    // The tab reloaded (or was closed meanwhile): look the tabs up again.
+    // The tab may have been closed meanwhile: look the tabs up again.
     if (ctx) ctx.tabs = null;
     tab = await guarded(findTab(), ctx);
     await onCapture?.(cap);
