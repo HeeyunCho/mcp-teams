@@ -236,9 +236,23 @@ function knownTab(ctx, tab) {
   return tab;
 }
 
-/** The Teams tab to run requests in: one on the origin of the service's capture, else any. */
+/**
+ * The user's Teams tabs among `tabs`: never the background tab recaptureAfterReload opened while
+ * it is recorded (it closes soon, and a request running there would fail with it). Once the user
+ * switched to it (it opens inactive, so active means they did), it is kept, so it counts like
+ * any other at once, before the worker forgets it.
+ */
+async function userTeamsTabs(tabs) {
+  const helper = await helperTabId();
+  return tabs.filter((t) => TEAMS_TAB.test(t.url ?? "") && (t.id !== helper || t.active));
+}
+
+/**
+ * The Teams tab to run requests in: one on the origin of the service's capture, else any. With
+ * only the helper open, it opens one as with none (the helper is about to close).
+ */
 async function findTeamsTab(origin, ctx = null) {
-  const tabs = (await openTabs(ctx)).filter((t) => TEAMS_TAB.test(t.url ?? ""));
+  const tabs = await userTeamsTabs(await openTabs(ctx));
   if (!tabs.length) return knownTab(ctx, await openTeamsTab());
   const sameOrigin = tabs.filter((t) => origin && t.url?.startsWith(origin));
   const pool = sameOrigin.length ? sameOrigin : tabs;
@@ -247,7 +261,7 @@ async function findTeamsTab(origin, ctx = null) {
 
 /** For list_teams and list_chats: with no Teams tab open, say so now rather than open one and wait. */
 async function requireTeamsTab(ctx) {
-  const tabs = (await openTabs(ctx)).filter((t) => TEAMS_TAB.test(t.url ?? ""));
+  const tabs = await userTeamsTabs(await openTabs(ctx));
   if (!tabs.length) throw new Error("There is no Teams tab open. Open Teams in your browser, sign in, then try again.");
 }
 
@@ -328,6 +342,12 @@ let recoveryRan = false; // this worker started after a reload or update: refres
 // The background tab it opened, kept in chrome.storage.session so a later worker can close it.
 const HELPER_TAB_KEY = "recaptureHelperTab";
 
+/** The id of that background tab while it is recorded, else null. */
+async function helperTabId() {
+  const { [HELPER_TAB_KEY]: tabId } = await chrome.storage.session.get(HELPER_TAB_KEY);
+  return tabId ?? null;
+}
+
 /**
  * Chrome clears chrome.storage.session when the extension is reloaded or updated, so the
  * captured sessions are gone; a Teams tab left in the background may not call its services
@@ -371,7 +391,7 @@ async function closeHelperTab(tabId) {
  */
 async function closeLeftoverHelperTab() {
   if (recapturing) return; // this worker's own run closes it
-  const { [HELPER_TAB_KEY]: tabId } = await chrome.storage.session.get(HELPER_TAB_KEY);
+  const tabId = await helperTabId();
   if (tabId != null) await closeHelperTab(tabId);
 }
 
@@ -1000,7 +1020,7 @@ async function fetchMessagePages(id, { limit, olderThan, includeSystem, threadId
 
 export const handlers = {
   async status() {
-    const tabs = await chrome.tabs.query({ url: TEAMS_URLS });
+    const tabs = await userTeamsTabs(await chrome.tabs.query({ url: TEAMS_URLS }));
     const sessions = {};
     for (const s of ["chatsvc", "csa", "mt", "substrate"]) {
       const cap = await getCapture(s);
