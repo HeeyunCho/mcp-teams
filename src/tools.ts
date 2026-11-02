@@ -145,7 +145,7 @@ export function registerTools(server: McpServer, bridge: ExtensionBridge, config
     {
       title: "List teams and channels",
       description:
-        "Lists the teams you are a member of, each with its channels. Use 'Team/Channel' or a channel id as the conversation for read_messages and send_message. The list may be up to a minute old (see refresh).",
+        "Lists the teams you are a member of, each with its channels. Use 'Team/Channel' or a channel id as the conversation for read_messages and send_message. The list may be up to a minute old (see refresh). Needs a Teams tab open in the browser: without one it fails at once.",
       inputSchema: {
         include_ids: z.boolean().default(false).describe("Also return team and channel ids (long; 'Team/Channel' names are enough to address channels)"),
         refresh,
@@ -167,7 +167,7 @@ export function registerTools(server: McpServer, bridge: ExtensionBridge, config
     {
       title: "List chats",
       description:
-        "Lists your chats (1:1, group and meeting chats), most recent first, with their title (or the other members' names), the last message and whether it is unread. Returns ids for read_messages and send_message. The list may be up to a minute old, so the last message and unread state can lag; pass refresh: true for the current ones.",
+        "Lists your chats (1:1, group and meeting chats), most recent first, with their title (or the other members' names), the last message and whether it is unread. Returns ids for read_messages and send_message. The list may be up to a minute old, so the last message and unread state can lag; pass refresh: true for the current ones. Needs a Teams tab open in the browser: without one it fails at once.",
       inputSchema: {
         query: z.string().optional().describe("Only chats whose title or a member's name contains these words"),
         unread_only: z.boolean().default(false),
