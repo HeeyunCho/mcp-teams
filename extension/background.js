@@ -290,14 +290,25 @@ const refreshing = new Map(); // service -> Promise<capture|null>, so parallel c
 /**
  * A captured token is lost when the extension reloads and expires after about an hour.
  * Teams' next own request to the service brings a fresh one; if none comes soon, reload
- * the Teams tab, which makes Teams call its services again.
+ * the Teams tab, which makes Teams call its services again. In a worker that started after a
+ * reload or update (recoveryRan) it never reloads the tab: null (the caller says what to do).
  */
 function refreshSession(service, tab, { quickWaitMs = 4_000 } = {}) {
   if (!refreshing.has(service)) {
     const since = Date.now();
     const p = (async () => {
+      // Right after a reload the worker is already getting Teams to sign in again without
+      // touching the user's tab (recaptureAfterReload): wait for that rather than reload it.
+      if (recapturing) {
+        await recapturing;
+        const cap = await getCapture(service);
+        if (cap) return cap;
+      }
       const quick = quickWaitMs ? await waitForCapture(service, since, quickWaitMs) : null;
       if (quick) return quick;
+      // After a reload or update the user's tab may be in a call or meeting: never reload it
+      // from here. The call fails with SERVICE_HELP, which asks the user to do it.
+      if (recoveryRan) return null;
       await chrome.tabs.reload(tab.id);
       const cap = await waitForCapture(service, since, 45_000);
       if (cap) await waitForTabLoaded(tab.id);
@@ -306,6 +317,62 @@ function refreshSession(service, tab, { quickWaitMs = 4_000 } = {}) {
     refreshing.set(service, p);
   }
   return refreshing.get(service);
+}
+
+// After a reload: how long Teams' own requests get to bring the session back, then how long
+// Teams in the background tab gets to sign in.
+const RECAPTURE_GRACE_MS = 15_000;
+const RECAPTURE_WAIT_MS = 60_000;
+let recapturing = null; // Promise of the run below while it runs, so a second report of the reload starts none
+let recoveryRan = false; // this worker started after a reload or update: refreshSession never reloads a tab
+// The background tab it opened, kept in chrome.storage.session so a later worker can close it.
+const HELPER_TAB_KEY = "recaptureHelperTab";
+
+/**
+ * Chrome clears chrome.storage.session when the extension is reloaded or updated, so the
+ * captured sessions are gone; a Teams tab left in the background may not call its services
+ * again for a long time. Unless Teams does so within RECAPTURE_GRACE_MS, this opens Teams (the
+ * origin of the open tab) in a background tab, where it signs in and calls its services as on
+ * any load, and closes that tab once the chat session is captured or after RECAPTURE_WAIT_MS
+ * (unless the user switched to it). It never reloads or scripts the user's own Teams tab; a tool
+ * call meanwhile waits for it, and from then on refreshSession doesn't reload that tab either
+ * (a service still missing fails the call with SERVICE_HELP). Nothing is
+ * done without a Teams tab that has loaded and is awake: one still loading calls its services
+ * itself, and a discarded or unloaded one isn't woken.
+ */
+function recaptureAfterReload() {
+  recoveryRan = true;
+  recapturing ??= (async () => {
+    const since = Date.now();
+    if (await getCapture("chatsvc")) return;
+    const awake = (await chrome.tabs.query({ url: TEAMS_URLS })).filter((t) => TEAMS_TAB.test(t.url ?? "") && !t.discarded && t.status === "complete");
+    if (!awake.length) return;
+    if (await waitForCapture("chatsvc", since, RECAPTURE_GRACE_MS)) return;
+    const tab = await chrome.tabs.create({ url: `${new URL(awake[0].url).origin}/`, active: false });
+    await chrome.storage.session.set({ [HELPER_TAB_KEY]: tab.id });
+    await waitForCapture("chatsvc", since, RECAPTURE_WAIT_MS);
+    await closeHelperTab(tab.id);
+  })()
+    .catch(() => {})
+    .finally(() => (recapturing = null));
+  return recapturing;
+}
+
+/** Closes the background tab recaptureAfterReload opened, unless the user switched to it, and forgets it. */
+async function closeHelperTab(tabId) {
+  const tab = await chrome.tabs.get(tabId).catch(() => null);
+  if (tab && !tab.active) await chrome.tabs.remove(tabId).catch(() => {});
+  await chrome.storage.session.remove(HELPER_TAB_KEY);
+}
+
+/**
+ * A worker suspended while recaptureAfterReload waited never closed its background tab (Teams
+ * there may sit on a sign-in page): the next worker closes it when it wakes.
+ */
+async function closeLeftoverHelperTab() {
+  if (recapturing) return; // this worker's own run closes it
+  const { [HELPER_TAB_KEY]: tabId } = await chrome.storage.session.get(HELPER_TAB_KEY);
+  if (tabId != null) await closeHelperTab(tabId);
 }
 
 const SERVICE_HELP = {
@@ -1849,10 +1916,17 @@ export function registerListeners() {
   chrome.windows.onRemoved.addListener(onWindowRemoved);
   chrome.runtime.onMessage.addListener(onConfirmMessage);
   chrome.runtime.onMessage.addListener(onPopupMessage);
-  chrome.alarms.onAlarm.addListener((a) => a.name === "reconnect" && connect());
+  chrome.alarms.onAlarm.addListener((a) => {
+    if (a.name !== "reconnect") return;
+    connect();
+    closeLeftoverHelperTab().catch(() => {});
+  });
   chrome.storage.onChanged.addListener(onStorageChanged);
   chrome.runtime.onStartup.addListener(connect);
   chrome.runtime.onInstalled.addListener(connect);
+  // The captured sessions were cleared (see recaptureAfterReload); a browser update isn't a
+  // reload, and on a browser start the restored tabs load (or sleep) by themselves.
+  chrome.runtime.onInstalled.addListener((d) => (d?.reason === "install" || d?.reason === "update") && recaptureAfterReload());
 }
 
 // In the browser: listen and connect synchronously on load, as MV3 needs for its listeners
@@ -1862,4 +1936,5 @@ if (IN_EXTENSION) {
   registerListeners();
   chrome.alarms.create("reconnect", { periodInMinutes: 0.5 });
   connect();
+  closeLeftoverHelperTab().catch(() => {});
 }
