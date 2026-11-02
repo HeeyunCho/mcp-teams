@@ -129,6 +129,8 @@ export const DEFAULT_BRIDGE_OPTIONS: Readonly<Required<BridgeOptions>> = Object.
  * send waits for the user's click (up to minutes), so it must not hold a turn others wait for.
  */
 const UNQUEUED = new Set(["status", "reload", "reloadAll", "requestSend"]);
+/** Calls the extension fails without a Teams tab open (requireTeamsTab in extension/background.js). */
+const NEEDS_TEAMS_TAB = new Set(["listTeams", "listChats"]);
 
 /** The oldest extension that closes a send's confirmation window on {type:"cancel"} (1.2). Sends need it. */
 export const MIN_SEND_EXTENSION = "0.2.13";
@@ -479,17 +481,31 @@ export class ExtensionBridge {
   /**
    * The extension a call goes to: the only one, the one that answered last, or else the
    * one whose browser has Teams signed in (then: has a Teams tab, then: newest).
+   *
+   * list_teams and list_chats fail in a browser without a Teams tab, so with several browsers
+   * they go to one with a tab first: the one that answered last if it still has one, else the
+   * best of those that do. The tab count is asked for each such call, never remembered: a tab
+   * closed since the last call counts at once. A browser that doesn't answer counts as none.
+   * Every browser is asked at once, so one that doesn't answer delays the call by one status
+   * wait (pickStatusTimeoutMs) at most.
    */
-  private async pickExtension(): Promise<WebSocket | undefined> {
+  private async pickExtension(method: string): Promise<WebSocket | undefined> {
     const open = [...this.sockets.keys()].filter((s) => s.readyState === WebSocket.OPEN);
     if (open.length <= 1) return open[0];
-    if (this.preferred && open.includes(this.preferred)) return this.preferred;
     type Status = { teamsTabs?: number; sessions?: { sessionCaptured?: boolean }[] };
-    const statuses = await Promise.all(
-      open.map((s) => this.send<Status>(s, "status", {}, this.opts.pickStatusTimeoutMs).catch(() => null)),
-    );
+    const status = (s: WebSocket) => this.send<Status>(s, "status", {}, this.opts.pickStatusTimeoutMs).catch(() => null);
+    const hasTab = (st: Status | null) => (st?.teamsTabs ?? 0) > 0;
+    const needsTab = NEEDS_TEAMS_TAB.has(method);
+    const preferred = this.preferred && open.includes(this.preferred) ? this.preferred : undefined;
+    if (preferred && !needsTab) return preferred;
+    // All at once, so a browser that doesn't answer costs one status wait, not one per browser.
+    const asked = open.map(status);
+    if (preferred && hasTab(await asked[open.indexOf(preferred)])) return preferred;
+    const statuses = await Promise.all(asked);
+    if (needsTab && preferred && !statuses.some(hasTab)) return preferred; // no tab anywhere: as before
     const score = (st: Status | null) =>
-      !st ? -1 : st.sessions?.some((x) => x.sessionCaptured) ? 2 : (st.teamsTabs ?? 0) > 0 ? 1 : 0;
+      (needsTab && hasTab(st) ? 3 : 0) +
+      (!st ? -1 : st.sessions?.some((x) => x.sessionCaptured) ? 2 : (st.teamsTabs ?? 0) > 0 ? 1 : 0);
     let best = open.length - 1; // newest first among equals
     for (let i = open.length - 1; i >= 0; i--) if (score(statuses[i]) > score(statuses[best])) best = i;
     return open[best];
@@ -833,7 +849,7 @@ export class ExtensionBridge {
   /** A call from `session` (null: this server's own, else the peer it came from). */
   private async run<T>(session: WebSocket | null, method: string, params: unknown = {}, timeoutMs = 60_000, signal?: AbortSignal, deadline?: number): Promise<T> {
     if (method === "reloadAll" && this.role === "hub") return this.reloadAll(timeoutMs) as Promise<T>;
-    const target = this.role === "hub" ? await this.pickExtension() : this.role === "peer" ? this.hub : undefined;
+    const target = this.role === "hub" ? await this.pickExtension(method) : this.role === "peer" ? this.hub : undefined;
     if (!this.connected || !target) {
       const reason =
         this.role === "none"
@@ -870,7 +886,9 @@ export class ExtensionBridge {
     } else {
       result = await this.send<T>(target, method, params, timeoutMs, signal, deadline);
     }
-    if (this.role === "hub" && this.preferred !== target && this.sockets.has(target)) {
+    // A list call sent elsewhere for its Teams tab doesn't move the other calls with it.
+    const forTab = NEEDS_TEAMS_TAB.has(method) && this.preferred !== undefined;
+    if (this.role === "hub" && !forTab && this.preferred !== target && this.sockets.has(target)) {
       this.preferred = target;
       this.updateExtensions();
     }

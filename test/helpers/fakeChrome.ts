@@ -97,6 +97,8 @@ interface Tab {
   status: "loading" | "complete";
   discarded?: boolean;
   pinned?: boolean;
+  active?: boolean;
+  audible?: boolean;
 }
 
 type Fn = (...args: any[]) => unknown;
@@ -203,6 +205,16 @@ export function createFakeChrome({ services = {}, captured = [...TEAMS_SERVICES]
     setTimeout(() => tabs.includes(t) && updateTab(t, { status: "complete" }), loadMs);
   };
 
+  /** A tab closes: it is no longer found, a script can't run in it, one running there fails, and tabs.onRemoved reports it, as in Chrome. */
+  function closeTab(tabId: number) {
+    const i = tabs.findIndex((t) => t.id === tabId);
+    if (i >= 0) {
+      tabs.splice(i, 1);
+      void Promise.resolve().then(() => tabRemoved.listeners.forEach((l) => l(tabId, { isWindowClosing: false })));
+    }
+    for (const fail of runningScripts.get(tabId) ?? []) fail(new Error("The tab was closed."));
+  }
+
   const spies = {
     executeScript: vi.fn(async ({ target, func, args }: { target: { tabId: number }; world?: string; func: Function; args: any[] }) => {
       if (func.name !== "pageFetch") throw new Error(`fakeChrome: unexpected tab script ${func.name}`);
@@ -230,8 +242,8 @@ export function createFakeChrome({ services = {}, captured = [...TEAMS_SERVICES]
       if (!t) throw new Error(`No tab with id: ${id}.`);
       return { ...t };
     }),
-    tabsCreate: vi.fn(async ({ url, pinned }: { url: string; active?: boolean; pinned?: boolean }) => {
-      const t: Tab = { id: nextTabId++, url, status: "complete", pinned };
+    tabsCreate: vi.fn(async ({ url, pinned, active = true }: { url: string; active?: boolean; pinned?: boolean }) => {
+      const t: Tab = { id: nextTabId++, url, status: "complete", pinned, active };
       tabs.push(t);
       startLoading(t);
       return { ...t };
@@ -239,6 +251,10 @@ export function createFakeChrome({ services = {}, captured = [...TEAMS_SERVICES]
     tabsReload: vi.fn(async (id: number) => {
       const t = tabs.find((x) => x.id === id);
       if (t) startLoading(t);
+    }),
+    tabsRemove: vi.fn(async (id: number) => {
+      if (!tabs.some((t) => t.id === id)) throw new Error(`No tab with id: ${id}.`);
+      closeTab(id);
     }),
     windowsCreate: vi.fn(async ({ url }: { url?: string; type?: string; focused?: boolean } = {}) => {
       const t: Tab = { id: nextTabId++, url: url ?? "about:blank", status: "complete" };
@@ -265,7 +281,7 @@ export function createFakeChrome({ services = {}, captured = [...TEAMS_SERVICES]
       onCompleted: { addListener: (fn: Fn, filter: { urls: string[] }) => void webRequestCompleted.push({ fn, patterns: filter.urls.map(patternToRegExp) }) },
     },
     storage: { session: storageArea("session", session), local: storageArea("local", local), onChanged: storageChanged },
-    tabs: { query: spies.tabsQuery, get: spies.tabsGet, create: spies.tabsCreate, reload: spies.tabsReload, onUpdated: tabUpdated, onRemoved: tabRemoved },
+    tabs: { query: spies.tabsQuery, get: spies.tabsGet, create: spies.tabsCreate, reload: spies.tabsReload, remove: spies.tabsRemove, onUpdated: tabUpdated, onRemoved: tabRemoved },
     windows: { create: spies.windowsCreate, remove: spies.windowsRemove, onRemoved: windowRemoved },
     scripting: { executeScript: spies.executeScript },
     alarms: { create: vi.fn(), onAlarm: event() },
@@ -282,14 +298,7 @@ export function createFakeChrome({ services = {}, captured = [...TEAMS_SERVICES]
     /** How many requests went to `service` (whose path matches `path`, if given). */
     count: (service: Service, path?: RegExp) => sent.filter((r) => r.service === service && (!path || path.test(r.path))).length,
     /** The user closes a tab: it is no longer found, a script can't run in it, one running there fails, and tabs.onRemoved reports it, as in Chrome. */
-    closeTab(tabId: number) {
-      const i = tabs.findIndex((t) => t.id === tabId);
-      if (i >= 0) {
-        tabs.splice(i, 1);
-        void Promise.resolve().then(() => tabRemoved.listeners.forEach((l) => l(tabId, { isWindowClosing: false })));
-      }
-      for (const fail of runningScripts.get(tabId) ?? []) fail(new Error("The tab was closed."));
-    },
+    closeTab,
     /** The tab stops running scripts (frozen or discarded): executeScript waits until wake(). */
     freezeTab(tabId: number) {
       if (!frozen.has(tabId)) frozen.set(tabId, []);

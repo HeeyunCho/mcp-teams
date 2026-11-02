@@ -148,20 +148,138 @@ describe("several browsers at once", () => {
   let bridge: ExtensionBridge | undefined;
   afterEach(async () => bridge?.close());
 
-  /** A fake extension: answers status with `signedIn`, records the methods it gets. */
-  const browser = (name: string, instance: string, signedIn: boolean) => {
+  /**
+   * A fake extension: answers status with `signedIn` and its Teams tabs (`state.teamsTabs`, which
+   * a test changes to close or open its tab), records the methods it gets.
+   */
+  const browser = (name: string, instance: string, signedIn: boolean, teamsTabs = 1) => {
     const got: string[] = [];
-    const { ws } = extension(EXTENSION_ORIGIN, "secret", {
+    const state = { teamsTabs };
+    const { ws, welcome } = extension(EXTENSION_ORIGIN, "secret", {
       browser: name,
       instance,
       onRequest: (ws, msg) => {
         got.push(msg.method);
-        const result = msg.method === "status" ? { teamsTabs: 1, sessions: [{ sessionCaptured: signedIn }] } : { from: name };
+        const result = msg.method === "status" ? { teamsTabs: state.teamsTabs, sessions: [{ sessionCaptured: signedIn }] } : { from: name };
         ws.send(JSON.stringify({ type: "response", id: msg.id, ok: true, result }));
       },
     });
-    return { ws, got };
+    return { ws, got, state, welcome };
   };
+
+  /** Chrome has Teams signed in but no Teams tab; Edge has a Teams tab but no captured session. */
+  const chromeWithoutTabEdgeWithTab = async () => {
+    bridge = new TestBridge("secret", "0.15.0");
+    await bridge.start();
+    const chrome = browser("Chrome", "chrome-1", true, 0);
+    await chrome.welcome;
+    const edge = browser("Edge", "edge-1", false, 1);
+    await until(() => bridge!.extensions.length === 2, 3_000, "both browsers to connect");
+    return { chrome, edge };
+  };
+
+  it.each(["listTeams", "listChats"])("sends %s to the browser with a Teams tab before one with only a captured session", async (method) => {
+    const { chrome, edge } = await chromeWithoutTabEdgeWithTab();
+    await expect(bridge!.call(method)).resolves.toEqual({ from: "Edge" });
+    expect(chrome.got).not.toContain(method);
+    chrome.ws.close();
+    edge.ws.close();
+  });
+
+  it.each(["listTeams", "listChats"])("moves %s off the browser that answered last once its Teams tab has closed", async (method) => {
+    bridge = new TestBridge("secret", "0.15.0");
+    await bridge.start();
+    const chrome = browser("Chrome", "chrome-1", true, 1);
+    const edge = browser("Edge", "edge-1", false, 1);
+    await until(() => bridge!.extensions.length === 2, 3_000, "both browsers to connect");
+    await expect(bridge.call(method)).resolves.toEqual({ from: "Chrome" });
+    expect(bridge.extension?.browser).toBe("Chrome");
+
+    chrome.state.teamsTabs = 0; // the user closes Teams in Chrome; it stays open in Edge
+    await expect(bridge.call(method)).resolves.toEqual({ from: "Edge" });
+    // And back to Chrome once Edge's tab is gone and Chrome has one again: the count is asked each time.
+    edge.state.teamsTabs = 0;
+    chrome.state.teamsTabs = 1;
+    await expect(bridge.call(method)).resolves.toEqual({ from: "Chrome" });
+    chrome.ws.close();
+    edge.ws.close();
+  });
+
+  it("keeps sending other calls to the signed-in browser and then to the one that answered last, tab or not", async () => {
+    const { chrome, edge } = await chromeWithoutTabEdgeWithTab();
+    await expect(bridge!.call("readMessages")).resolves.toEqual({ from: "Chrome" });
+    await expect(bridge!.call("searchMessages")).resolves.toEqual({ from: "Chrome" });
+    // Only the first call asked for the browsers' status.
+    expect(chrome.got).toEqual(["status", "readMessages", "searchMessages"]);
+    expect(edge.got).toEqual(["status"]);
+    chrome.ws.close();
+    edge.ws.close();
+  });
+
+  it.each(["listTeams", "listChats"])("keeps other calls on the browser that answered last after %s went to another browser for its tab", async (method) => {
+    const { chrome, edge } = await chromeWithoutTabEdgeWithTab();
+    await expect(bridge!.call("readMessages")).resolves.toEqual({ from: "Chrome" });
+    await expect(bridge!.call(method)).resolves.toEqual({ from: "Edge" });
+    await expect(bridge!.call("readMessages")).resolves.toEqual({ from: "Chrome" });
+    expect(bridge!.extension?.browser).toBe("Chrome");
+    chrome.ws.close();
+    edge.ws.close();
+  });
+
+  it("with no Teams tab in any browser, sends list_teams to the browser that answered last", async () => {
+    const { chrome, edge } = await chromeWithoutTabEdgeWithTab();
+    await expect(bridge!.call("readMessages")).resolves.toEqual({ from: "Chrome" });
+    edge.state.teamsTabs = 0;
+    await expect(bridge!.call("listTeams")).resolves.toEqual({ from: "Chrome" });
+    chrome.ws.close();
+    edge.ws.close();
+  });
+
+  it.each(["listTeams", "listChats"])(
+    "asks every browser for its status at once for %s, so a frozen browser that answered last costs one status wait, not two",
+    async (method) => {
+      const pickStatusTimeoutMs = 1_000;
+      bridge = new TestBridge("secret", "0.15.0", { pickStatusTimeoutMs });
+      await bridge.start();
+      /** Answers calls but never its status, like a browser whose service worker is stuck. */
+      const frozen = (name: string, instance: string) => {
+        const { ws, welcome } = extension(EXTENSION_ORIGIN, "secret", {
+          browser: name,
+          instance,
+          onRequest: (ws, msg) => {
+            if (msg.method !== "status") ws.send(JSON.stringify({ type: "response", id: msg.id, ok: true, result: { from: name } }));
+          },
+        });
+        return { ws, welcome };
+      };
+      const chrome = frozen("Chrome", "chrome-1");
+      await until(() => bridge!.extensions.length === 1, 3_000, "Chrome to connect");
+      await expect(bridge.call("readMessages")).resolves.toEqual({ from: "Chrome" }); // Chrome answered last
+      const firefox = frozen("Firefox", "firefox-1");
+      const edge = browser("Edge", "edge-1", false, 1);
+      await until(() => bridge!.extensions.length === 3, 3_000, "all three browsers to connect");
+
+      const started = Date.now();
+      await expect(bridge.call(method)).resolves.toEqual({ from: "Edge" });
+      // Asked one after the other, Chrome's wait and then Firefox's would take 2 s.
+      expect(Date.now() - started).toBeLessThan(pickStatusTimeoutMs * 1.6);
+      expect(bridge.extension?.browser).toBe("Chrome");
+      chrome.ws.close();
+      firefox.ws.close();
+      edge.ws.close();
+    },
+  );
+
+  it("with one browser, sends list_teams and list_chats to it without asking for its status, tab or not", async () => {
+    bridge = new TestBridge("secret", "0.15.0");
+    await bridge.start();
+    const chrome = browser("Chrome", "chrome-1", true, 0);
+    await until(() => bridge!.extensions.length === 1, 3_000, "the browser to connect");
+    await expect(bridge.call("listTeams")).resolves.toEqual({ from: "Chrome" });
+    await expect(bridge.call("listChats")).resolves.toEqual({ from: "Chrome" });
+    expect(chrome.got).toEqual(["listTeams", "listChats"]);
+    chrome.ws.close();
+  });
 
   it("keeps both connected and sends calls to the browser where Teams is signed in", async () => {
     bridge = new TestBridge("secret", "0.15.0");
@@ -171,9 +289,12 @@ describe("several browsers at once", () => {
     await until(() => bridge!.extensions.length === 2, 3_000, "both browsers to connect");
     expect(bridge.extensions.map((e) => e.browser).sort()).toEqual(["Chrome", "Edge"]);
     await expect(bridge.call("listTeams")).resolves.toEqual({ from: "Edge" });
-    // It sticks with the browser that answered, without asking again.
+    // It sticks with the browser that answered. Each list call asks every browser for its
+    // status at once, so Chrome is asked again, but gets no list call.
     await expect(bridge.call("listTeams")).resolves.toEqual({ from: "Edge" });
-    expect(chrome.got).toEqual(["status"]);
+    // Edge's answer can come back before Chrome has read its second status request.
+    await until(() => chrome.got.length >= 2, 3_000, "Chrome's second status request");
+    expect(chrome.got).toEqual(["status", "status"]);
     expect(bridge.extension?.browser).toBe("Edge");
 
     // When that browser goes away, calls go to the other one.

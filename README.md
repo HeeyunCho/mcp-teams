@@ -84,11 +84,15 @@ npx mcp-teams setup
 
 Restart the AI apps it registered (in Claude Code: `/mcp`).
 
-You don't need to keep Teams open. When no Teams tab is open, the extension opens one itself (pinned, in the background) and waits up to a minute for it to sign in.
+You don't need to keep Teams open for most tools. When no Teams tab is open, the extension opens one itself (pinned, in the background) and waits up to a minute for it to sign in. The exceptions are `list_teams` and `list_chats`, which fail at once with an error saying there is no Teams tab open. With several browsers connected, these two go to a browser that has a Teams tab open, if one has.
 
 ## How it reaches Teams
 
 Teams on the web talks to several services, each with its own sign-in token: chats and messages (`chatsvc`), the team and chat list (`csa`), people (`mt`) and search (`substrate.office.com`). The extension notes the tokens Teams sends on its own requests and replays them from inside the Teams tab. They are kept in the browser's session memory and never leave the browser. Teams calls most of these services as soon as it loads. Search may only be signed in once you have used Teams' search box; until then `search_messages` and `find_people` say so.
+
+The extension never reloads your Teams tab, so a call, meeting, draft or screen share there goes on. When a tool needs a session that isn't there, or Teams rejects one (tokens expire after about an hour), Teams' own tab gets a few seconds to send a fresh one; if it doesn't (and at once after a rejection), the extension opens Teams in a background tab, notes the tokens from that tab's requests and closes it again as soon as the sessions the waiting calls need are back, or after at most a minute (it stays open if you switch to it, and closing it ends the wait). There is only ever one such tab: calls that need different services at the same time wait on the same one. No tab is opened while your Teams tab is still loading, since it signs in by itself; the call waits up to 30 s for it instead. If the session still isn't back, the call says so and asks you to reload Teams yourself. Search is the exception: Teams signs in to it only once you have used its search box, so no tab is opened for it, and `search_messages` and `find_people` say so after a short wait.
+
+The browser clears that memory when the extension is reloaded or updated. A Teams tab left in the background may not call its services again for a while, so if it hasn't within 15 s, the extension opens Teams in the same kind of background tab until the chat session is back, or at the latest about 75 s after the reload. A tool call made meanwhile uses that tab too. Nothing is opened after a reload or update when no Teams tab is open, when the Teams tab is still loading (it signs in by itself), or when the browser has put every Teams tab to sleep (discarded).
 
 ## Several sessions at once
 
