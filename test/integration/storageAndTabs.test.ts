@@ -206,7 +206,7 @@ describe("3.1: waits listen for chrome's events instead of polling", () => {
     expect(at - firedAt).toBeLessThan(1_000);
   });
 
-  it("3.1: after a reload the call waits for the tab's load event, not asking for the tab every 250 ms, and retries only once it loaded", async () => {
+  it("3.1: after a 401 the call waits for Teams' new session from the background tab without asking for it every 250 ms, and retries at once when it comes", async () => {
     let expired = true;
     const reads: { at: number; token: string }[] = [];
     const fake = createFakeChrome({
@@ -222,27 +222,31 @@ describe("3.1: waits listen for chrome's events instead of polling", () => {
     });
     const worker = await loadWorker(fake);
     worker.registerListeners();
-    const gets = timed(fake.spies.tabsGet);
-    const reloads: number[] = [];
-    // The reload starts the tab loading; Teams' first request after it brings a fresh token.
-    const reload = fake.spies.tabsReload.getMockImplementation()!;
-    fake.spies.tabsReload.mockImplementation(async (id: number) => {
-      reloads.push(Date.now());
-      await reload(id);
+    const storageReads = timed(fake.chrome.storage.session.get);
+    const opened: number[] = [];
+    let firedAt = 0;
+    // Teams loads in the background tab; its first chat request there brings a fresh token.
+    const create = fake.spies.tabsCreate.getMockImplementation()!;
+    fake.spies.tabsCreate.mockImplementation(async (opts) => {
+      opened.push(Date.now());
+      const tab = await create(opts);
       setTimeout(() => {
         expired = false;
+        firedAt = Date.now();
         void teamsChatRequest(fake, "Bearer fake-fresh");
-      }, 100);
+      }, 1_500);
+      return tab;
     });
 
     const r = await call(worker, "readMessages", { conversation: CHAT, limit: PAGE });
     expect(r).toMatchObject({ ok: true });
-    expect(reloads).toHaveLength(1);
-    const loadedAt = reloads[0] + 1_500;
+    expect(opened).toHaveLength(1);
+    expect(fake.spies.tabsReload).not.toHaveBeenCalled();
     expect(reads.map((x) => x.token)).toEqual(["Bearer fake", "Bearer fake-fresh"]);
-    expect(reads[1].at).toBeGreaterThanOrEqual(loadedAt);
-    // Polling asks for the loading tab every 250 ms: 5 times or more while it loads.
-    expect(gets.filter((g) => g.at > reloads[0] && g.at < loadedAt - 100).length).toBeLessThanOrEqual(1);
+    expect(reads[1].at - firedAt).toBeLessThan(1_000);
+    // Polling reads the capture every 250 ms: 4 times or more while Teams loads there.
+    const asked = (x: { args: unknown[] }) => [x.args[0]].flat().includes("capture:chatsvc");
+    expect(storageReads.filter((x) => asked(x) && x.at > opened[0] + 200 && x.at < firedAt).length).toBe(0);
   });
 
   it("3.1: a Teams tab the worker opens is used once Teams makes its first request there, with the same session as before", async () => {
@@ -257,27 +261,25 @@ describe("3.1: waits listen for chrome's events instead of polling", () => {
     expect(at - firedAt).toBeLessThan(3_000);
   });
 
-  it("3.1: a Teams tab closed while it reloads ends the call's wait for it at once", async () => {
+  it("3.1: the background tab closed while Teams loads there ends the call's wait for it at once", async () => {
     const fake = createFakeChrome({ loadMs: 20_000, services: { ...services, chatsvc: (req) => (/contoso-notes/.test(req.path) ? reply(401) : chatsvc(req)) } });
     const worker = await loadWorker(fake);
     worker.registerListeners();
-    const reload = fake.spies.tabsReload.getMockImplementation()!;
+    const create = fake.spies.tabsCreate.getMockImplementation()!;
     let closedAt = 0;
-    fake.spies.tabsReload.mockImplementation(async (id: number) => {
-      await reload(id);
-      setTimeout(async () => {
-        await teamsChatRequest(fake, "Bearer fake-fresh");
-        await new Promise((r) => setTimeout(r, 300));
+    fake.spies.tabsCreate.mockImplementation(async (opts) => {
+      const tab = await create(opts);
+      setTimeout(() => {
         closedAt = Date.now();
-        fake.closeTab(id);
-      }, 100);
+        fake.closeTab(tab.id);
+      }, 300);
+      return tab;
     });
-    const done = call(worker, "readMessages", { conversation: CHAT, limit: PAGE }, 4_000);
-    // It goes on (opening Teams again) instead of waiting for the closed tab to load.
-    await vi.waitFor(() => expect(fake.spies.tabsCreate).toHaveBeenCalledTimes(1), { timeout: 3_000 });
+    const r = await call(worker, "readMessages", { conversation: CHAT, limit: PAGE }, 30_000);
     expect(closedAt).toBeGreaterThan(0);
     expect(Date.now() - closedAt).toBeLessThan(1_000);
-    expect(await done).toMatchObject({ ok: false, error: expect.stringContaining("time limit") });
+    expect(r).toMatchObject({ ok: false, error: expect.stringContaining("chat session is not available") });
+    expect(fake.spies.tabsReload).not.toHaveBeenCalled();
   });
 
   it("3.1: a call waiting for Teams' session still ends at its time limit", async () => {
