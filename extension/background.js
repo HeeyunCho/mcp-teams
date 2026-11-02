@@ -245,6 +245,12 @@ async function findTeamsTab(origin, ctx = null) {
   return pool.find((t) => !t.discarded && t.status === "complete") ?? pool[0];
 }
 
+/** For list_teams and list_chats: with no Teams tab open, say so now rather than open one and wait. */
+async function requireTeamsTab(ctx) {
+  const tabs = (await openTabs(ctx)).filter((t) => TEAMS_TAB.test(t.url ?? ""));
+  if (!tabs.length) throw new Error("There is no Teams tab open. Open Teams in your browser, sign in, then try again.");
+}
+
 // Teams keeps routing for a moment after the page has loaded.
 const SETTLE_MS = 1_000;
 
@@ -935,11 +941,14 @@ export const handlers = {
   },
 
   // The three lists share teamsAndChats' one-minute cache; `refresh` reads it again first.
-  async listTeams({ refresh = false } = {}, ctx) {
+  // `openTab`: setup, which opens Teams for a new user and waits for the sign-in.
+  async listTeams({ refresh = false, openTab = false } = {}, ctx) {
+    if (!openTab) await requireTeamsTab(ctx);
     return { teams: (await teamsAndChats(refresh === true, ctx)).teams };
   },
 
   async listChats({ query, limit = 30, unreadOnly = false, refresh = false }, ctx) {
+    await requireTeamsTab(ctx);
     const data = await teamsAndChats(refresh === true, ctx);
     let chats = data.chats;
     if (unreadOnly) chats = chats.filter((c) => c.unread);

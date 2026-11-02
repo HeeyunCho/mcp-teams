@@ -84,7 +84,7 @@ npx mcp-teams setup
 
 Restart the AI apps it registered (in Claude Code: `/mcp`).
 
-You don't need to keep Teams open. When no Teams tab is open, the extension opens one itself (pinned, in the background) and waits up to a minute for it to sign in.
+You don't need to keep Teams open for most tools. When no Teams tab is open, the extension opens one itself (pinned, in the background) and waits up to a minute for it to sign in. The exceptions are `list_teams` and `list_chats`, which fail at once with an error saying there is no Teams tab open.
 
 ## How it reaches Teams
 
