@@ -486,6 +486,8 @@ export class ExtensionBridge {
    * they go to one with a tab first: the one that answered last if it still has one, else the
    * best of those that do. The tab count is asked for each such call, never remembered: a tab
    * closed since the last call counts at once. A browser that doesn't answer counts as none.
+   * Every browser is asked at once, so one that doesn't answer delays the call by one status
+   * wait (pickStatusTimeoutMs) at most.
    */
   private async pickExtension(method: string): Promise<WebSocket | undefined> {
     const open = [...this.sockets.keys()].filter((s) => s.readyState === WebSocket.OPEN);
@@ -495,9 +497,11 @@ export class ExtensionBridge {
     const hasTab = (st: Status | null) => (st?.teamsTabs ?? 0) > 0;
     const needsTab = NEEDS_TEAMS_TAB.has(method);
     const preferred = this.preferred && open.includes(this.preferred) ? this.preferred : undefined;
-    const preferredStatus = preferred && needsTab ? await status(preferred) : null;
-    if (preferred && (!needsTab || hasTab(preferredStatus))) return preferred;
-    const statuses = await Promise.all(open.map((s) => (s === preferred ? preferredStatus : status(s))));
+    if (preferred && !needsTab) return preferred;
+    // All at once, so a browser that doesn't answer costs one status wait, not one per browser.
+    const asked = open.map(status);
+    if (preferred && hasTab(await asked[open.indexOf(preferred)])) return preferred;
+    const statuses = await Promise.all(asked);
     if (needsTab && preferred && !statuses.some(hasTab)) return preferred; // no tab anywhere: as before
     const score = (st: Status | null) =>
       (needsTab && hasTab(st) ? 3 : 0) +

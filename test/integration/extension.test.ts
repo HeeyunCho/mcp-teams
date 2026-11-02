@@ -235,6 +235,41 @@ describe("several browsers at once", () => {
     edge.ws.close();
   });
 
+  it.each(["listTeams", "listChats"])(
+    "asks every browser for its status at once for %s, so a frozen browser that answered last costs one status wait, not two",
+    async (method) => {
+      const pickStatusTimeoutMs = 1_000;
+      bridge = new TestBridge("secret", "0.15.0", { pickStatusTimeoutMs });
+      await bridge.start();
+      /** Answers calls but never its status, like a browser whose service worker is stuck. */
+      const frozen = (name: string, instance: string) => {
+        const { ws, welcome } = extension(EXTENSION_ORIGIN, "secret", {
+          browser: name,
+          instance,
+          onRequest: (ws, msg) => {
+            if (msg.method !== "status") ws.send(JSON.stringify({ type: "response", id: msg.id, ok: true, result: { from: name } }));
+          },
+        });
+        return { ws, welcome };
+      };
+      const chrome = frozen("Chrome", "chrome-1");
+      await until(() => bridge!.extensions.length === 1, 3_000, "Chrome to connect");
+      await expect(bridge.call("readMessages")).resolves.toEqual({ from: "Chrome" }); // Chrome answered last
+      const firefox = frozen("Firefox", "firefox-1");
+      const edge = browser("Edge", "edge-1", false, 1);
+      await until(() => bridge!.extensions.length === 3, 3_000, "all three browsers to connect");
+
+      const started = Date.now();
+      await expect(bridge.call(method)).resolves.toEqual({ from: "Edge" });
+      // Asked one after the other, Chrome's wait and then Firefox's would take 2 s.
+      expect(Date.now() - started).toBeLessThan(pickStatusTimeoutMs * 1.6);
+      expect(bridge.extension?.browser).toBe("Chrome");
+      chrome.ws.close();
+      firefox.ws.close();
+      edge.ws.close();
+    },
+  );
+
   it("with one browser, sends list_teams and list_chats to it without asking for its status, tab or not", async () => {
     bridge = new TestBridge("secret", "0.15.0");
     await bridge.start();
@@ -254,9 +289,12 @@ describe("several browsers at once", () => {
     await until(() => bridge!.extensions.length === 2, 3_000, "both browsers to connect");
     expect(bridge.extensions.map((e) => e.browser).sort()).toEqual(["Chrome", "Edge"]);
     await expect(bridge.call("listTeams")).resolves.toEqual({ from: "Edge" });
-    // It sticks with the browser that answered, without asking again.
+    // It sticks with the browser that answered. Each list call asks every browser for its
+    // status at once, so Chrome is asked again, but gets no list call.
     await expect(bridge.call("listTeams")).resolves.toEqual({ from: "Edge" });
-    expect(chrome.got).toEqual(["status"]);
+    // Edge's answer can come back before Chrome has read its second status request.
+    await until(() => chrome.got.length >= 2, 3_000, "Chrome's second status request");
+    expect(chrome.got).toEqual(["status", "status"]);
     expect(bridge.extension?.browser).toBe("Edge");
 
     // When that browser goes away, calls go to the other one.
