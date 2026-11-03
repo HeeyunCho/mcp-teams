@@ -541,9 +541,11 @@ describe("77.3: what a 401 and an account switch make the worker read again", ()
   };
 
   const EVENTS = {
-    "a 401 renewed for the same user": { as: "a", on401: renewedForA },
-    "a 401 whose fresh session is tenant b's": { as: "b", on401: switchedToB },
-    "a switch to tenant b with no 401": { as: "b", on401: null },
+    "a 401 renewed for the same user": { as: "a", on401: renewedForA, switches: [] },
+    "a 401 whose fresh session is tenant b's": { as: "b", on401: switchedToB, switches: [] },
+    "a switch to tenant b with no 401": { as: "b", on401: null, switches: ["b"] },
+    // Back as a, the account the list and the calls were filed under: what a read before the switches is gone too.
+    "a switch to tenant b and back to a, with no 401": { as: "a", on401: null, switches: ["b", "a"] },
   } as const;
 
   /**
@@ -578,9 +580,8 @@ describe("77.3: what a 401 and an account switch make the worker read again", ()
       const read = worker.handlers.readMessages({ conversation: WITH_ALEX });
       if (event.as === "a") await read;
       else await expect(read).rejects.toThrow(/account changed/);
-    } else {
-      for (const s of ["csa", "chatsvc", "mt"] as const) await teamsRequest(fake, s, "b");
     }
+    for (const t of event.switches) for (const s of ["csa", "chatsvc", "mt"] as const) await teamsRequest(fake, s, t);
 
     const at = fake.sent.length;
     await worker.handlers.listChats({});
