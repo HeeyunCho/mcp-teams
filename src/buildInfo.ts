@@ -22,3 +22,22 @@ export function readBuildInfo(dir: string): BuildInfo {
   const pkg = JSON.parse(readFileSync(join(dir, "..", "package.json"), "utf8")) as { version: string };
   return { version: pkg.version, buildId: null };
 }
+
+/** Whether the build on disk differs from the running one, and if so, which it is. */
+export type RestartState = { restartNeeded: false } | { restartNeeded: true; onDisk: BuildInfo };
+
+/**
+ * Compares the running build with the one in `dir` on disk, read again when asked. A restart is needed
+ * when the two build ids differ (not "newer": any other build), never when either has no id.
+ */
+export function restartCheck(running: BuildInfo, dir: string): () => RestartState {
+  return () => {
+    let onDisk: BuildInfo;
+    try {
+      onDisk = readBuildInfo(dir);
+    } catch {
+      return { restartNeeded: false };
+    }
+    return running.buildId && onDisk.buildId && onDisk.buildId !== running.buildId ? { restartNeeded: true, onDisk } : { restartNeeded: false };
+  };
+}

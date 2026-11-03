@@ -2,8 +2,8 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { isLostCall, type ExtensionBridge } from "./bridge.js";
 import type { Config } from "./config.js";
-import { readBuildInfo } from "./buildInfo.js";
-import { RUNNING_BUILD } from "./config.js";
+import { readBuildInfo, restartCheck } from "./buildInfo.js";
+import { BUILD_DIR, RUNNING_BUILD } from "./config.js";
 
 /** Sending waits for the user's click in the confirmation window (5 minutes at most). */
 const SEND_TIMEOUT_MS = 6 * 60_000;
@@ -77,6 +77,8 @@ export function registerTools(server: McpServer, bridge: ExtensionBridge, config
   const running = options.build ? readBuildInfo(options.build.dir) : RUNNING_BUILD;
   // The version of the code that runs (its build.json), not package.json's.
   const serverVersion = running.version;
+  // Read on demand only (get_version, a failed call): no timers, no watchers.
+  const onDisk = restartCheck(running, options.build?.dir ?? BUILD_DIR);
   const autoSendTo = config.autoSendTo ?? [];
   server.registerTool(
     "get_version",
@@ -94,6 +96,7 @@ export function registerTools(server: McpServer, bridge: ExtensionBridge, config
       return text({
         server: serverVersion,
         build: running.buildId,
+        ...onDisk(),
         extension: bridge.extension?.version ?? null,
         browser: bridge.extension?.browser ?? null,
         // With several browsers connected, calls go to the one shown above (list_teams and
