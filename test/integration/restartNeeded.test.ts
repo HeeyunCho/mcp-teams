@@ -122,3 +122,18 @@ describe("restartNeeded", () => {
     expect(await tools.failing()).toEqual({ isError: true, content: [{ type: "text", text: "No Teams tab is open." }] });
   });
 });
+
+describe("reading the build on disk", () => {
+  it("reuses a read for 5 s, so a change within that time shows after it", async () => {
+    writePackage("0.9.1");
+    writeBuild("0.9.1", "0a1b2c3d4e5f");
+    const tools = await start({ now: 1_000 });
+    expect(await tools.version()).toMatchObject({ restartNeeded: false });
+    writeBuild("0.9.2", "f5e4d3c2b1a0");
+    tools.clock.now = 5_999;
+    expect(await tools.version()).toMatchObject({ restartNeeded: false });
+    expect((await tools.failing()).content[0].text).toBe("No Teams tab is open.");
+    tools.clock.now = 6_000;
+    expect(await tools.version()).toMatchObject({ restartNeeded: true, onDisk: { version: "0.9.2", build: "f5e4d3c2b1a0" } });
+  });
+});
