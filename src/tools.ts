@@ -71,7 +71,10 @@ function capText<T extends Message>(messages: T[], maxLength: number): T[] {
 /** What the tools use from the config; autoSendTo may be left out (no auto-send). */
 export type ToolsConfig = Omit<Config, "autoSendTo"> & { autoSendTo?: string[] };
 
-/** For tests: the dist/ folder whose build.json is the running build (read now) and the one on disk, and the clock. */
+/**
+ * For tests. build: a dist/ folder whose build.json is taken as the running build (read now) and as the
+ * one on disk (read again on demand), and the clock for reusing that read. Left out: this code's own dist/.
+ */
 export interface ToolsOptions {
   build?: { dir: string; now?: () => number };
 }
@@ -81,7 +84,7 @@ export function registerTools(server: McpServer, bridge: ExtensionBridge, config
   // The version of the code that runs (its build.json), not package.json's.
   const serverVersion = running.version;
   // Read on demand only (get_version, a failed call): no timers, no watchers.
-  const onDisk = restartCheck(running, options.build?.dir ?? BUILD_DIR);
+  const onDisk = restartCheck(running, options.build?.dir ?? BUILD_DIR, options.build?.now);
   const safe = safeWith(() => restartHint(running, onDisk()));
   const autoSendTo = config.autoSendTo ?? [];
   server.registerTool(

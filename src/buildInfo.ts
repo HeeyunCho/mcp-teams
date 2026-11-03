@@ -32,20 +32,31 @@ export function restartHint(running: BuildInfo, state: RestartState): string | n
   return `mcp-teams was updated on disk (running ${running.version} ${running.buildId}, on disk ${state.onDisk.version} ${state.onDisk.build}): reconnect it with /mcp, then reload the extension.`;
 }
 
+/** How long a read of the build on disk is reused. */
+export const BUILD_CHECK_CACHE_MS = 5_000;
+
 /**
- * Compares the running build with the one in `dir` on disk, read again when asked. A restart is needed
- * when the two build ids differ (not "newer": any other build), never when either has no id.
+ * Compares the running build with the one in `dir` on disk, read again when asked but at most once per
+ * BUILD_CHECK_CACHE_MS (by `now`). A restart is needed when the two build ids differ (not "newer": any
+ * other build), never when either has no id.
  */
-export function restartCheck(running: BuildInfo, dir: string): () => RestartState {
-  return () => {
+export function restartCheck(running: BuildInfo, dir: string, now: () => number = Date.now): () => RestartState {
+  let last: { at: number; state: RestartState } | undefined;
+  const read = (): RestartState => {
+    if (!running.buildId) return { restartNeeded: false };
     let onDisk: BuildInfo;
     try {
       onDisk = readBuildInfo(dir);
     } catch {
       return { restartNeeded: false };
     }
-    return running.buildId && onDisk.buildId && onDisk.buildId !== running.buildId
+    return onDisk.buildId && onDisk.buildId !== running.buildId
       ? { restartNeeded: true, onDisk: { version: onDisk.version, build: onDisk.buildId } }
       : { restartNeeded: false };
+  };
+  return () => {
+    const at = now();
+    if (!last || at - last.at >= BUILD_CHECK_CACHE_MS) last = { at, state: read() };
+    return last.state;
   };
 }
