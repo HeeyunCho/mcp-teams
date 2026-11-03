@@ -223,8 +223,10 @@ describe("openCommand", () => {
 });
 
 // The real thing, on the Windows CI runner: arguments survive cmd.exe and a .cmd shim
-// (like npm's claude.cmd) and a native .exe (node.exe) byte for byte.
-describe.runIf(process.platform === "win32")("commandInvocation on Windows", () => {
+// (like npm's claude.cmd) and a native .exe (node.exe) byte for byte. These start real cmd,
+// node and where.exe processes, which can take seconds each on a loaded machine or runner,
+// so they get more than vitest's default 5 s.
+describe.runIf(process.platform === "win32")("commandInvocation on Windows", { timeout: 20_000 }, () => {
   const dir = mkdtempSync(join(tmpdir(), "Alex & Sam %OS% ("));
   const script = join(dir, "argv.js");
   writeFileSync(script, "process.stdout.write(JSON.stringify(process.argv.slice(2)));");
