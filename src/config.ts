@@ -2,12 +2,19 @@ import { randomBytes } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { createRequire } from "node:module";
+import { fileURLToPath } from "node:url";
+import { readBuildInfo, type BuildInfo } from "./buildInfo.js";
 
-const require = createRequire(import.meta.url);
-const pkg = require("../package.json") as { version: string };
+/** The folder this code was loaded from (dist/), which holds its build.json. */
+export const BUILD_DIR = fileURLToPath(new URL(".", import.meta.url));
 
-export const SERVER_VERSION: string = pkg.version;
+/**
+ * The build this server runs, read once at start from the build.json next to the code, not from
+ * package.json: a `git pull` bumps package.json before `npm run build` changes the code (#96).
+ */
+export const RUNNING_BUILD: BuildInfo = readBuildInfo(BUILD_DIR);
+
+export const SERVER_VERSION: string = RUNNING_BUILD.version;
 
 export interface Config {
   port: number;

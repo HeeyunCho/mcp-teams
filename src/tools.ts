@@ -2,7 +2,8 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { isLostCall, type ExtensionBridge } from "./bridge.js";
 import type { Config } from "./config.js";
-import { SERVER_VERSION } from "./config.js";
+import { readBuildInfo } from "./buildInfo.js";
+import { RUNNING_BUILD } from "./config.js";
 
 /** Sending waits for the user's click in the confirmation window (5 minutes at most). */
 const SEND_TIMEOUT_MS = 6 * 60_000;
@@ -67,7 +68,15 @@ function capText<T extends Message>(messages: T[], maxLength: number): T[] {
 /** What the tools use from the config; autoSendTo may be left out (no auto-send). */
 export type ToolsConfig = Omit<Config, "autoSendTo"> & { autoSendTo?: string[] };
 
-export function registerTools(server: McpServer, bridge: ExtensionBridge, config: ToolsConfig) {
+/** For tests: the dist/ folder whose build.json is the running build (read now) and the one on disk, and the clock. */
+export interface ToolsOptions {
+  build?: { dir: string; now?: () => number };
+}
+
+export function registerTools(server: McpServer, bridge: ExtensionBridge, config: ToolsConfig, options: ToolsOptions = {}) {
+  const running = options.build ? readBuildInfo(options.build.dir) : RUNNING_BUILD;
+  // The version of the code that runs (its build.json), not package.json's.
+  const serverVersion = running.version;
   const autoSendTo = config.autoSendTo ?? [];
   server.registerTool(
     "get_version",
@@ -83,7 +92,8 @@ export function registerTools(server: McpServer, bridge: ExtensionBridge, config
         teams = await bridge.call("status", {}, undefined, extra.signal).catch((e: Error) => ({ error: e.message }));
       }
       return text({
-        server: SERVER_VERSION,
+        server: serverVersion,
+        build: running.buildId,
         extension: bridge.extension?.version ?? null,
         browser: bridge.extension?.browser ?? null,
         // With several browsers connected, calls go to the one shown above (list_teams and
@@ -91,7 +101,7 @@ export function registerTools(server: McpServer, bridge: ExtensionBridge, config
         ...(bridge.extensions.length > 1
           ? { browsers: bridge.extensions.map((e) => ({ browser: e.browser ?? null, version: e.version })) }
           : {}),
-        versionsMatch: bridge.extension ? bridge.extension.version === SERVER_VERSION : null,
+        versionsMatch: bridge.extension ? bridge.extension.version === serverVersion : null,
         bridge: bridge.listenError ?? (bridge.connected ? "connected" : "waiting for extension"),
         // hub: this session owns the port; peer: it forwards through another session's server.
         role: bridge.role,
@@ -113,7 +123,7 @@ export function registerTools(server: McpServer, bridge: ExtensionBridge, config
     },
     safe(async () => {
       const r = await bridge.reloadExtension();
-      return text({ ...r, server: SERVER_VERSION, versionsMatch: r.after === SERVER_VERSION });
+      return text({ ...r, server: serverVersion, versionsMatch: r.after === serverVersion });
     }),
   );
 
