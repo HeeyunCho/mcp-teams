@@ -165,4 +165,27 @@ describe("a post Teams accepts with a time that isn't a date", () => {
       expect(r).not.toHaveProperty("timeNote");
     }
   });
+
+  it("a time sent as a string of digits is read as epoch milliseconds, like a number", async () => {
+    const answer = reply(201, { OriginalArrivalTime: String(Date.parse("2026-10-01T09:00:00Z")) });
+    const fake = createFakeChrome({ services: { csa, mt, chatsvc: chatsvcAnswering(() => answer) } });
+    const worker = await loadWorker(fake);
+    worker.registerListeners();
+    const r = await worker.handlers.requestSend({ conversation: "48:notes", text: "Remember the slides", autoSendTo: [MY_EMAIL] });
+    expect(r).toMatchObject({ sent: true, autoSent: true, time: "2026-10-01T09:00:00.000Z" });
+    expect(r).not.toHaveProperty("timeNote");
+    expect(messagePosts(fake)).toEqual(["/v1/users/ME/conversations/48:notes/messages"]);
+  });
+
+  it("a time that is an object, even one that can't be turned into a string, is reported as sent once, with the time unconfirmed", async () => {
+    for (const time of [{}, { toString: 1 }]) {
+      const fake = createFakeChrome({ services: { csa, mt, chatsvc: chatsvcAnswering(() => reply(201, { OriginalArrivalTime: time })) } });
+      const worker = await loadWorker(fake);
+      worker.registerListeners();
+      const r = await worker.handlers.requestSend({ conversation: "48:notes", text: "Remember the slides", autoSendTo: [MY_EMAIL] });
+      expectSentUnconfirmed(r);
+      expect(r).toMatchObject({ autoSent: true });
+      expect(messagePosts(fake)).toEqual(["/v1/users/ME/conversations/48:notes/messages"]);
+    }
+  });
 });

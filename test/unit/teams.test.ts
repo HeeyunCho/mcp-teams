@@ -569,3 +569,16 @@ describe("Retry-After", () => {
     expect(teams.retryAfterMs("600", now)).toBe(60_000);
   });
 });
+
+describe("isoTime", () => {
+  const ms = Date.parse("2026-10-01T09:00:00Z");
+  it("reads numbers, all-digit strings (as epoch ms) and date strings as an ISO time", () => {
+    expect(teams.isoTime(ms)).toBe("2026-10-01T09:00:00.000Z");
+    expect(teams.isoTime(String(ms))).toBe("2026-10-01T09:00:00.000Z");
+    expect(teams.isoTime("2026-10-01T09:00:00Z")).toBe("2026-10-01T09:00:00.000Z");
+  });
+
+  it("gives null for no time, a time that isn't a date, and an object that can't be converted, without throwing", () => {
+    for (const v of [null, undefined, "", 0, "soon", {}, { toString: 1 }, Object.create(null)]) expect(teams.isoTime(v)).toBeNull();
+  });
+});
