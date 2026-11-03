@@ -300,3 +300,127 @@ describe("3.3: a send confirmed as one account is never posted as another", () =
     expect(posts(fake, switchedAt)).toEqual([]);
   });
 });
+
+describe("77.1: read_messages never returns pages read as two accounts", () => {
+  // Alpha launch holds 30 notes (1 = oldest), which chatsvc returns newest first, 10 per page.
+  const CHAT = "19:alpha@thread.v2";
+  const NOTES = 30;
+  const PAGE = 10;
+  const START = Date.parse("2026-10-01T09:00:00.000Z");
+  const ALEX = "8:orgid:00000000-0000-4000-8000-0000000000a2";
+  const note = (n: number) => ({
+    id: String(START + n * 60_000),
+    messagetype: "RichText/Html",
+    content: `<p>Note ${n} from Alex</p>`,
+    imdisplayname: "Alex Doe",
+    from: `${BASES.chatsvc}/v1/users/ME/contacts/${ALEX}`,
+    originalarrivaltime: new Date(START + n * 60_000).toISOString(),
+  });
+  /** Tenant a's chat session after its token was renewed: the same user, another token. */
+  const FRESH_A = `skypetoken=${fakeJwt({ skypeid: `orgid:${TENANT.a.oid}`, rgn: "emea", renewed: true })}`;
+  const accountOf = (req: SentRequest) => tenantOf(req) ?? (req.headers.authentication === FRESH_A ? "a" : undefined);
+  const offsetOf = (req: SentRequest) => Number(new URLSearchParams(req.path.split("?")[1] ?? "").get("syncState") ?? 0);
+  const pageRequests = (fake: ReturnType<typeof createFakeChrome>) => fake.sent.filter((r) => messagesOf(r) === encodeURIComponent(CHAT));
+  const CHANGED = /account changed while messages were read/;
+
+  /**
+   * Tenant services where Alpha launch pages as above for whichever account asks. `hook` runs
+   * first for each page asked for (`offset`: how many notes newer pages hold); what it returns,
+   * if anything, is the answer instead.
+   */
+  const pagedServices = (hook?: (req: SentRequest, offset: number) => unknown) => ({
+    ...tenantServices,
+    chatsvc: async (req: SentRequest) => {
+      if (!accountOf(req)) return reply(401);
+      if (messagesOf(req) !== encodeURIComponent(CHAT)) return undefined;
+      const offset = offsetOf(req);
+      const early = await hook?.(req, offset);
+      if (early !== undefined) return early;
+      const next = offset + PAGE;
+      return {
+        messages: Array.from({ length: Math.min(PAGE, NOTES - offset) }, (_, i) => note(NOTES - offset - i)),
+        _metadata: next < NOTES ? { backwardLink: `${BASES.chatsvc}/v1/users/ME/conversations/${encodeURIComponent(CHAT)}/messages?startTime=1&syncState=${next}&view=msnp24Equivalent` } : {},
+      };
+    },
+  });
+
+  /** A worker signed in as tenant a, over pagedServices(hook). */
+  async function signedInAsA(hook?: (req: SentRequest, offset: number) => unknown) {
+    const fake = createFakeChrome({ captured: [], services: pagedServices(hook) });
+    const worker = await loadWorker(fake);
+    worker.registerListeners();
+    for (const s of ["csa", "chatsvc", "mt"] as const) await teamsRequest(fake, s, "a");
+    return { fake, worker };
+  }
+  const switchTo = async (fake: ReturnType<typeof createFakeChrome>, t: Tenant) => {
+    for (const s of ["csa", "chatsvc", "mt"] as const) await teamsRequest(fake, s, t);
+  };
+  const noteNumbers = (r: { messages: { text: string }[] }) => r.messages.map((m) => Number(/Note (\d+)/.exec(m.text)?.[1]));
+  /** Notes 6 to 30, oldest first: the newest 25. */
+  const NEWEST_25 = Array.from({ length: 25 }, (_, i) => 6 + i);
+
+  it("77.1: a read of three pages with no switch returns the newest messages from all three, read as tenant a", async () => {
+    const { fake, worker } = await signedInAsA();
+    const r = await worker.handlers.readMessages({ conversation: CHAT, limit: 25 });
+    expect(r.count).toBe(25);
+    expect(noteNumbers(r)).toEqual(NEWEST_25);
+    expect(typeof r.olderCursor).toBe("string");
+    expect(pageRequests(fake).map(offsetOf)).toEqual([0, 10, 20]);
+    expect(pageRequests(fake).map(accountOf)).toEqual(["a", "a", "a"]);
+  });
+
+  it("77.1: Teams switches to tenant b right after answering page 1: the read is refused and no page is asked for as b", async () => {
+    const { fake, worker } = await signedInAsA(async (req, offset) => {
+      if (offset === 0) await switchTo(fake, "b");
+    });
+    await expect(worker.handlers.readMessages({ conversation: CHAT, limit: 25 })).rejects.toThrow(CHANGED);
+    expect(fake.sent.map(tenantOf)).not.toContain("b");
+  });
+
+  it("77.1: a switch that lands while the last page's answer is still on its way: the read is refused", async () => {
+    let release = () => {};
+    const held = new Promise<void>((r) => (release = r));
+    const { fake, worker } = await signedInAsA(async (req, offset) => {
+      if (offset === 20) await held;
+    });
+    const read = worker.handlers.readMessages({ conversation: CHAT, limit: 25 }).catch((err: Error) => err);
+    await vi.waitFor(() => expect(pageRequests(fake).map(offsetOf)).toEqual([0, 10, 20]));
+    await switchTo(fake, "b");
+    release();
+    const r = await read;
+    expect(r).toBeInstanceOf(Error);
+    expect((r as Error).message).toMatch(CHANGED);
+    expect(fake.sent.map(tenantOf)).not.toContain("b");
+  });
+
+  it("77.1: a switch that a 401 on page 2 brings in: the read is refused before page 2 is asked for again as b", async () => {
+    let switched = false;
+    const { fake, worker } = await signedInAsA(async (req, offset) => {
+      if (offset !== 10 || switched) return undefined;
+      switched = true;
+      // Teams switches to b meanwhile, and a's token is refused; the worker's retry would carry b's.
+      await switchTo(fake, "b");
+      fake.session.set("capture:chatsvc", { ...(fake.session.get("capture:chatsvc") as object), at: Date.now() + 60_000 });
+      return reply(401);
+    });
+    await expect(worker.handlers.readMessages({ conversation: CHAT, limit: 25 })).rejects.toThrow(CHANGED);
+    expect(pageRequests(fake).map(accountOf)).toEqual(["a", "a"]);
+    expect(fake.sent.map(tenantOf)).not.toContain("b");
+  });
+
+  it("77.1: a 401 on page 2 renewed with a fresh token for the same user still returns all three pages", async () => {
+    let renewed = false;
+    const { fake, worker } = await signedInAsA((req, offset) => {
+      if (offset !== 10 || renewed) return undefined;
+      renewed = true;
+      // a's token expired; Teams' next request brings a fresh one for the same user.
+      fake.session.set("capture:chatsvc", { ...(fake.session.get("capture:chatsvc") as object), headers: { authentication: FRESH_A }, at: Date.now() + 60_000 });
+      return reply(401);
+    });
+    const r = await worker.handlers.readMessages({ conversation: CHAT, limit: 25 });
+    expect(r.count).toBe(25);
+    expect(noteNumbers(r)).toEqual(NEWEST_25);
+    expect(pageRequests(fake).map(offsetOf)).toEqual([0, 10, 10, 20]);
+    expect(pageRequests(fake).map((q) => q.headers.authentication === FRESH_A)).toEqual([false, false, true, true]);
+  });
+});
