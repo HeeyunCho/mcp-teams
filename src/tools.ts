@@ -2,7 +2,7 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { isLostCall, type ExtensionBridge } from "./bridge.js";
 import type { Config } from "./config.js";
-import { readBuildInfo, restartCheck } from "./buildInfo.js";
+import { readBuildInfo, restartCheck, restartHint } from "./buildInfo.js";
 import { BUILD_DIR, RUNNING_BUILD } from "./config.js";
 
 /** Sending waits for the user's click in the confirmation window (5 minutes at most). */
@@ -14,26 +14,29 @@ const text = (value: unknown) => ({
   content: [{ type: "text" as const, text: typeof value === "string" ? value : JSON.stringify(value, null, 2) }],
 });
 
-const fail = (err: unknown) => ({
-  isError: true,
-  content: [{ type: "text" as const, text: err instanceof Error ? err.message : String(err) }],
-});
+/** A tool error; `hint` (a restart is needed) goes on a line of its own after the message. */
+const fail = (err: unknown, hint: string | null) => {
+  const message = err instanceof Error ? err.message : String(err);
+  return { isError: true, content: [{ type: "text" as const, text: hint ? `${message}\n${hint}` : message }] };
+};
 
 /** What the MCP SDK passes a tool besides its arguments: `signal` aborts when the AI app cancels the call. */
 type Extra = { signal?: AbortSignal };
 
 /**
- * Wraps a handler so thrown errors become MCP tool errors instead of protocol errors.
- * Handlers pass extra.signal to bridge.call, so cancelling a tool withdraws its extension call.
+ * Makes `safe`, which wraps a handler so thrown errors become MCP tool errors instead of protocol errors,
+ * each with `hint()`'s line when it has one. Handlers pass extra.signal to bridge.call, so cancelling a
+ * tool withdraws its extension call.
  */
-function safe<A, E extends Extra = Extra>(fn: (args: A, extra: E) => Promise<ReturnType<typeof text>>) {
-  return async (args: A, extra: E) => {
-    try {
-      return await fn(args, extra);
-    } catch (err) {
-      return fail(err);
-    }
-  };
+function safeWith(hint: () => string | null) {
+  return <A, E extends Extra = Extra>(fn: (args: A, extra: E) => Promise<ReturnType<typeof text>>) =>
+    async (args: A, extra: E) => {
+      try {
+        return await fn(args, extra);
+      } catch (err) {
+        return fail(err, hint());
+      }
+    };
 }
 
 const conversation = z
@@ -79,6 +82,7 @@ export function registerTools(server: McpServer, bridge: ExtensionBridge, config
   const serverVersion = running.version;
   // Read on demand only (get_version, a failed call): no timers, no watchers.
   const onDisk = restartCheck(running, options.build?.dir ?? BUILD_DIR);
+  const safe = safeWith(() => restartHint(running, onDisk()));
   const autoSendTo = config.autoSendTo ?? [];
   server.registerTool(
     "get_version",

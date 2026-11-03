@@ -23,8 +23,14 @@ export function readBuildInfo(dir: string): BuildInfo {
   return { version: pkg.version, buildId: null };
 }
 
-/** Whether the build on disk differs from the running one, and if so, which it is. */
-export type RestartState = { restartNeeded: false } | { restartNeeded: true; onDisk: BuildInfo };
+/** Whether the build on disk differs from the running one, and if so, which it is (as get_version shows it). */
+export type RestartState = { restartNeeded: false } | { restartNeeded: true; onDisk: { version: string; build: string } };
+
+/** The line added to every tool error while a restart is needed; null when none is. */
+export function restartHint(running: BuildInfo, state: RestartState): string | null {
+  if (!state.restartNeeded) return null;
+  return `mcp-teams was updated on disk (running ${running.version} ${running.buildId}, on disk ${state.onDisk.version} ${state.onDisk.build}): reconnect it with /mcp, then reload the extension.`;
+}
 
 /**
  * Compares the running build with the one in `dir` on disk, read again when asked. A restart is needed
@@ -38,6 +44,8 @@ export function restartCheck(running: BuildInfo, dir: string): () => RestartStat
     } catch {
       return { restartNeeded: false };
     }
-    return running.buildId && onDisk.buildId && onDisk.buildId !== running.buildId ? { restartNeeded: true, onDisk } : { restartNeeded: false };
+    return running.buildId && onDisk.buildId && onDisk.buildId !== running.buildId
+      ? { restartNeeded: true, onDisk: { version: onDisk.version, build: onDisk.buildId } }
+      : { restartNeeded: false };
   };
 }
