@@ -313,7 +313,7 @@
     }
   },
   "send_message": {
-    "description": "Asks to post a message in an existing chat or channel (conversation), to reply to a channel post, or to start a chat with people (to): one person for a 1:1 chat, several for a group chat. If a chat with exactly those people already exists, the message goes there. The extension shows a confirmation window with the message, where it goes and who is in a new chat; nothing is posted, and no chat is created, unless the user clicks Send there. Returns whether it was sent. Plain text; line breaks are kept and links become clickable.",
+    "description": "Asks to post a message in an existing chat or channel (conversation), to reply to a channel post, or to start a chat with people (to): one person for a 1:1 chat, several for a group chat. If a chat with exactly those people already exists, the message goes there. The extension shows a confirmation window with the message, where it goes and who is in a new chat; nothing is posted, and no chat is created, unless the user clicks Send there. Returns whether it was sent, and when Teams recorded it (time). A sent result can have time: null with a timeNote when Teams accepted the message but its answer, or the time in it, couldn't be read: it was still posted, so don't send it again. Plain text; line breaks are kept and links become clickable.",
     "inputSchema": {
       "type": "object",
       "properties": {
