@@ -1062,6 +1062,7 @@ async function fetchMessages(id, opts) {
 }
 
 const MAX_PAGES = 20;
+const MESSAGES_ACCOUNT_CHANGED = ACCOUNT_CHANGED_WHILE("messages were read", "reads them as that account");
 
 /** The conversation id chatsvc pages: the conversation, or one channel post's thread. */
 const messagesTarget = (id, threadId) => (threadId ? `${id};messageid=${threadId}` : id);
@@ -1081,9 +1082,18 @@ async function fetchMessagePages(id, { limit, olderThan, includeSystem, threadId
   const linkOf = new Map();
   let counted = 0;
   let pages = 0;
+  // Every page is read as one account: the user of the first page's session (its oid; a 401
+  // can bring the same user a session on another base), with no switch landing meanwhile.
+  const switches = accountSwitches;
+  let readAs; // the oid the pages are read as, from the first session used
+  const sameAccount = (cap) => {
+    if (readAs === undefined) readAs = cap.oid ?? null;
+    if ((cap.oid ?? null) !== readAs) throw new Error(MESSAGES_ACCOUNT_CHANGED);
+  };
   while (path) {
     if (pages === MAX_PAGES) return { raw, linkOf, first, next: path, capped: true, pages };
-    const json = await api("chatsvc", path, { ctx });
+    const json = await api("chatsvc", path, { ctx, onCapture: sameAccount });
+    if (switches !== accountSwitches) throw new Error(MESSAGES_ACCOUNT_CHANGED);
     pages++;
     const msgs = json?.messages ?? [];
     for (const m of msgs) {
