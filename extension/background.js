@@ -683,9 +683,9 @@ async function api(service, path, { method = "GET", body, raw = false, withLocat
   if (res.status === 401) {
     // Rejected before running (expired token), so trying once more is safe. A 403 is a
     // real answer (e.g. no longer a member of that chat).
-    // The session (maybe the account) is changing: lists read with it are read again.
-    dropList();
-    meetingSessionsCache.clear();
+    // The session (maybe the account) is changing: lists read with it are read again. What
+    // only one user may see goes when a capture shows another user (forgetAccount).
+    dropSessionLists();
     cap = await refreshSession(service, tab, { quickWaitMs: 0, rejected: cap.headers }, ctx);
     if (!cap) throw new Error(SERVICE_HELP[service]);
     // The tab may have been closed meanwhile: look the tabs up again.
@@ -740,11 +740,19 @@ let accountSwitches = 0; // bumped by forgetAccount: a send sees that a switch l
  */
 function forgetAccount() {
   accountSwitches++;
-  dropList();
+  dropSessionLists();
   names.clear();
   transcripts.clear();
-  meetingSessionsCache.clear();
   myAddressCache = null;
+}
+
+/**
+ * Empties the lists read with a session (the chat list, the meetings' calls), so they are read
+ * again: after a 401 (the token, maybe the account, is changing) and on a switch (forgetAccount).
+ */
+function dropSessionLists() {
+  dropList();
+  meetingSessionsCache.clear();
 }
 
 /** A read that a switch of the signed-in Teams account overtook: what it read, and what a retry reads. */
