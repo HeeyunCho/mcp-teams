@@ -1491,12 +1491,14 @@ async function sendMessage({ conversation, newChat, people, text, threadId, subj
     crossPostChannels: [],
   };
   // Teams took the message (2xx) even when its answer can't be read: reported as sent, so
-  // nothing invites posting it again, with its time marked as unconfirmed.
+  // nothing invites posting it again, with its time marked as unconfirmed. The same holds when
+  // the answer's time isn't a date.
   const r = await api("chatsvc", `/v1/users/ME/conversations/${encodeURIComponent(target)}/messages`, { method: "POST", body, onCapture: asConfirmed(account), unreadable: UNREADABLE });
   dropList(); // its last message changed: a list_chats right after must not show the old one
   const sent = { sent: true, conversation: conversation.title ?? conversation.id };
-  if (r === UNREADABLE) return { ...sent, time: null, timeNote: TIME_UNCONFIRMED };
-  return { ...sent, time: r?.OriginalArrivalTime ? new Date(r.OriginalArrivalTime).toISOString() : null };
+  const at = r && r !== UNREADABLE && r.OriginalArrivalTime ? new Date(r.OriginalArrivalTime) : null;
+  if (r === UNREADABLE || (at && Number.isNaN(at.getTime()))) return { ...sent, time: null, timeNote: TIME_UNCONFIRMED };
+  return { ...sent, time: at ? at.toISOString() : null };
 }
 
 // ------------------------------------------------------------ auto-send to self (autoSendTo)
