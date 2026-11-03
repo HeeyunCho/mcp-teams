@@ -222,4 +222,12 @@ describe("autoSendTo in send_message", () => {
       expect(r.description).not.toMatch(/autoSendTo/);
     }
   });
+
+  it("the description says a sent result can have time: null with a timeNote, so the AI doesn't send again", async () => {
+    for (const autoSendTo of [undefined, [MY_EMAIL]]) {
+      const r = await sendWith(autoSendTo, { sent: false, reason: "The user declined; nothing was sent." });
+      expect(r.description).toMatch(/time: null with a timeNote/);
+      expect(r.description).toMatch(/don't send it again/);
+    }
+  });
 });
