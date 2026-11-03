@@ -115,6 +115,14 @@ describe("MCP server end to end", () => {
     expect(data).toMatchObject({ server: VERSION, extension: VERSION, versionsMatch: true, role: "hub", teams: { teamsTabs: 1 } });
   });
 
+  // #96: npm run build wrote dist/build.json, and the server reads its build from there.
+  it("reports the build id that npm run build wrote, with no restart needed", async () => {
+    const { data } = await call("get_version");
+    expect(data.build).toMatch(/^[0-9a-f]{12}$/);
+    expect(data.restartNeeded).toBe(false);
+    expect(JSON.parse(readFileSync("dist/build.json", "utf8"))).toEqual({ version: VERSION, buildId: data.build });
+  });
+
   it("lists teams without ids unless asked", async () => {
     expect((await call("list_teams")).data).toEqual({ teams: [{ name: "Engineering", channels: [{ name: "General", general: true }] }] });
     expect((await call("list_teams", { include_ids: true })).data.teams[0].channels[0].id).toBe("19:g@thread.tacv2");
