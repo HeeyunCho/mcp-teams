@@ -92,7 +92,7 @@ export function registerTools(server: McpServer, bridge: ExtensionBridge, config
     {
       title: "Version and connection status",
       description:
-        "Shows the mcp-teams server version, the browser extension version, and whether Teams is reachable (which of its services have a session).",
+        "Shows the mcp-teams server version and build, the browser extension version, and whether Teams is reachable (which of its services have a session). restartNeeded: true means mcp-teams was updated on disk while this server still runs the old code: the user should reconnect it (in Claude Code: /mcp) and reload the extension.",
       inputSchema: {},
     },
     safe(async (_, extra) => {
