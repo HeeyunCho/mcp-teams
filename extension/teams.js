@@ -430,10 +430,15 @@ function jsonProp(v) {
   }
 }
 
-const isoTime = (v) => {
+/** A time as an ISO string: all digits are epoch ms; anything that isn't a date (even one that can't be converted) is null. */
+export const isoTime = (v) => {
   if (!v) return null;
-  const d = new Date(/^\d+$/.test(String(v)) ? Number(v) : v);
-  return Number.isNaN(d.getTime()) ? null : d.toISOString();
+  try {
+    const d = new Date(/^\d+$/.test(String(v)) ? Number(v) : v);
+    return Number.isNaN(d.getTime()) ? null : d.toISOString();
+  } catch {
+    return null;
+  }
 };
 
 /** The root message a channel reply belongs to (from ";messageid=<id>" in its conversation link). */
