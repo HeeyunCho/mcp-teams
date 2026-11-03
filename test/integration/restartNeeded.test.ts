@@ -65,3 +65,15 @@ describe("the running build", () => {
     expect(await tools.version()).toMatchObject({ server: "0.9.1", build: "0a1b2c3d4e5f" });
   });
 });
+
+describe("restartNeeded", () => {
+  it("is false while the build on disk is the running one, and tool errors stay as they were", async () => {
+    writePackage("0.9.1");
+    writeBuild("0.9.1", "0a1b2c3d4e5f");
+    const tools = await start();
+    const v = await tools.version();
+    expect(v).toMatchObject({ server: "0.9.1", build: "0a1b2c3d4e5f", restartNeeded: false });
+    expect(v).not.toHaveProperty("onDisk");
+    expect(await tools.failing()).toEqual({ isError: true, content: [{ type: "text", text: "No Teams tab is open." }] });
+  });
+});
