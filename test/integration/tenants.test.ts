@@ -2,7 +2,7 @@
 // A 401 empties the chat list cache, and after the user switches Teams to another tenant
 // nothing of the first one (its chats, its captured sessions) is used or returned.
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { BASES, createFakeChrome, loadWorker, openedSockets, reply, TEAMS_ORIGIN, type SentRequest } from "../helpers/fakeChrome.js";
+import { BASES, createFakeChrome, loadWorker, openedSockets, reply, SHAREPOINT_ORIGIN, TEAMS_ORIGIN, type SentRequest } from "../helpers/fakeChrome.js";
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -422,5 +422,195 @@ describe("77.1: read_messages never returns pages read as two accounts", () => {
     expect(noteNumbers(r)).toEqual(NEWEST_25);
     expect(pageRequests(fake).map(offsetOf)).toEqual([0, 10, 10, 20]);
     expect(pageRequests(fake).map((q) => q.headers.authentication === FRESH_A)).toEqual([false, false, true, true]);
+  });
+});
+
+describe("77.3: what a 401 and an account switch make the worker read again", () => {
+  // Each tenant sees the same two chats: an untitled one with Alex (named by looking Alex up)
+  // and a meeting chat whose call has a transcript on the organizer's OneDrive.
+  type Fake = ReturnType<typeof createFakeChrome>;
+  type Worker = Awaited<ReturnType<typeof loadWorker>>;
+  const ALEX = "8:orgid:00000000-0000-4000-8000-0000000000c1";
+  const meMri = (t: Tenant) => `8:orgid:${TENANT[t].oid}`;
+  const myEmail = (t: Tenant) => `pat.${t}@contoso.example`;
+  const WITH_ALEX = "19:contoso-with-alex@thread.v2";
+  const MEETING = "19:meeting_contoso-review@thread.v2";
+  const CALL = "00000000-0000-4000-8000-0000000000c2";
+  const DAY = Date.parse("2026-09-30T09:00:00Z");
+  const TRANSCRIPT_URL = `${SHAREPOINT_ORIGIN}/personal/alex_contoso_example/_api/v2.1/drives/d/items/i1/versions/current/media/transcripts/t1/content`;
+  /** Tenant a's chat session after its token was renewed: the same user, another token. */
+  const FRESH_A = `skypetoken=${fakeJwt({ skypeid: `orgid:${TENANT.a.oid}`, rgn: "emea", renewed: true })}`;
+  const accountOf = (req: SentRequest) => tenantOf(req) ?? (req.headers.authentication === FRESH_A ? "a" : undefined);
+
+  const callMessages = [
+    {
+      id: "3",
+      messagetype: "RichText/Media_CallRecording",
+      originalarrivaltime: new Date(DAY + 3_700_000).toISOString(),
+      content: `<URIObject type="Video.2/CallRecording.1"><RecordingStatus status="Success" code="200" /><Title>Contoso review</Title><Identifiers><Id type="callId" value="${CALL}" /></Identifiers><RecordingContent contentTypes="Transcript" timestamp="${new Date(DAY).toISOString()}" duration="1:00:00.00"><item type="onedriveForBusinessTranscript" uri="${TRANSCRIPT_URL}" /></RecordingContent></URIObject>`,
+    },
+    {
+      id: "2",
+      messagetype: "Event/Call",
+      originalarrivaltime: new Date(DAY + 3_600_000).toISOString(),
+      properties: { skypeguid: CALL },
+      content: `<ended/><partlist alt="" count="1"><part identity="${ALEX}"><displayName>Alex Doe</displayName><duration>3600</duration></part></partlist><callEventType>callEnded</callEventType><callId>${CALL}</callId>`,
+    },
+    {
+      id: "1",
+      messagetype: "Event/Call",
+      originalarrivaltime: new Date(DAY).toISOString(),
+      properties: { skypeguid: CALL },
+      content: `<partlist alt=""></partlist><callEventType>callStarted</callEventType><conversationStartTime>09/30/2026 09:00:00</conversationStartTime><callId>${CALL}</callId>`,
+    },
+  ];
+  const transcript = {
+    entries: Array.from({ length: 4 }, (_, i) => ({
+      speakerDisplayName: "Alex Doe",
+      startOffset: `00:00:${String(i * 10).padStart(2, "0")}.0`,
+      endOffset: `00:00:${String(i * 10 + 9).padStart(2, "0")}.0`,
+      text: `The plan for the review, point ${i}.`,
+    })),
+  };
+
+  /** Teams for whichever account asks. `onChatRead` runs first when the chat with Alex is read; what it returns, if anything, is the answer instead. */
+  const services = (onChatRead: () => unknown) => ({
+    csa: (req: SentRequest) => {
+      const t = tenantOf(req);
+      if (!t) return reply(401);
+      return {
+        teams: [],
+        chats: [
+          { id: WITH_ALEX, title: null, chatType: "chat", members: [{ mri: meMri(t) }, { mri: ALEX }] },
+          {
+            id: MEETING,
+            chatType: "meeting",
+            title: "Contoso review",
+            meetingInformation: { subject: "Contoso review", startTime: new Date(DAY).toISOString() },
+            meetingObjectsConfig: { configurations: { transcriptConfig: { hasTranscript: true } } },
+            lastJoinAt: new Date(DAY).toISOString(),
+          },
+        ],
+      };
+    },
+    chatsvc: async (req: SentRequest) => {
+      if (!accountOf(req)) return reply(401);
+      if (req.method === "POST") return { OriginalArrivalTime: Date.parse("2026-10-01T09:00:00Z") };
+      const id = messagesOf(req);
+      if (!id) return undefined;
+      if (decodeURIComponent(id) === MEETING) return { messages: callMessages, _metadata: {} };
+      const early = decodeURIComponent(id) === WITH_ALEX ? await onChatRead() : undefined;
+      return early !== undefined ? early : { messages: [] };
+    },
+    mt: (req: SentRequest) => {
+      if (!tenantOf(req)) return reply(401);
+      if (!/fetchShortProfile/.test(req.path)) return { value: [] };
+      const all = [
+        { mri: meMri("a"), displayName: "Pat A", email: myEmail("a") },
+        { mri: meMri("b"), displayName: "Pat B", email: myEmail("b") },
+        { mri: ALEX, displayName: "Alex Doe", email: "alex.doe@contoso.example" },
+      ];
+      return all.filter((p) => (req.body as string[]).includes(p.mri));
+    },
+    sharepoint: (req: SentRequest) => (req.url.startsWith(TRANSCRIPT_URL) ? transcript : undefined),
+  });
+
+  const since = (fake: Fake, from: number) => fake.sent.slice(from);
+  const profileLookups = (fake: Fake, from: number) => since(fake, from).filter((r) => r.service === "mt" && /fetchShortProfile/.test(r.path));
+  /** Alex's name looked up (to name the untitled chat). */
+  const alexLookups = (fake: Fake, from: number) => profileLookups(fake, from).filter((r) => (r.body as string[]).includes(ALEX));
+  /** My own addresses looked up (for an auto-send to self): a lookup of just me. */
+  const myAddressLookups = (fake: Fake, from: number, t: Tenant) => profileLookups(fake, from).filter((r) => JSON.stringify(r.body) === JSON.stringify([meMri(t)]));
+  const listReads = (fake: Fake, from: number) => since(fake, from).filter((r) => r.service === "csa" && /\/teams\/users\/me\?/.test(r.path));
+  const meetingReads = (fake: Fake, from: number) => since(fake, from).filter((r) => messagesOf(r) === encodeURIComponent(MEETING));
+  const transcriptReads = (fake: Fake, from: number) => since(fake, from).filter((r) => r.service === "sharepoint");
+
+  const autoSendToSelf = (worker: Worker, t: Tenant) =>
+    expect(worker.handlers.requestSend({ conversation: "48:notes", text: "Remember the slides", autoSendTo: [myEmail(t)] })).resolves.toMatchObject({ sent: true, autoSent: true });
+
+  /** A 401 renewed with a fresh token for the same user. */
+  const renewedForA = (fake: Fake) => () => {
+    fake.session.set("capture:chatsvc", { ...(fake.session.get("capture:chatsvc") as object), headers: { authentication: FRESH_A }, at: Date.now() + 60_000 });
+    return reply(401);
+  };
+  /** Teams switches to tenant b meanwhile, and a's token is refused: the worker's retry carries b's. */
+  const switchedToB = (fake: Fake) => async () => {
+    for (const s of ["csa", "chatsvc", "mt"] as const) await teamsRequest(fake, s, "b");
+    fake.session.set("capture:chatsvc", { ...(fake.session.get("capture:chatsvc") as object), at: Date.now() + 60_000 });
+    return reply(401);
+  };
+
+  const EVENTS = {
+    "a 401 renewed for the same user": { as: "a", on401: renewedForA },
+    "a 401 whose fresh session is tenant b's": { as: "b", on401: switchedToB },
+    "a switch to tenant b with no 401": { as: "b", on401: null },
+  } as const;
+
+  /**
+   * Signed in as tenant a with every cache filled (my address, the list and Alex's name, the
+   * meeting's calls and its transcript), then `event`; returns where the requests after it start.
+   * Afterwards: the list, the transcript, and an auto-send to self, in that order.
+   */
+  async function readAgainAfter(name: keyof typeof EVENTS) {
+    const event = EVENTS[name];
+    let onChatRead: () => unknown = () => undefined;
+    const fake = createFakeChrome({ captured: [], services: services(() => onChatRead()) });
+    const worker = await loadWorker(fake);
+    worker.registerListeners();
+    for (const s of ["csa", "chatsvc", "mt"] as const) await teamsRequest(fake, s, "a");
+    await autoSendToSelf(worker, "a");
+    await worker.handlers.listChats({});
+    await worker.handlers.readTranscript({ meeting: MEETING });
+    expect([alexLookups(fake, 0), myAddressLookups(fake, 0, "a"), meetingReads(fake, 0), transcriptReads(fake, 0)].map((x) => x.length)).toEqual([1, 1, 1, 1]);
+    // Cached: read again, they ask Teams nothing.
+    const warm = fake.sent.length;
+    await worker.handlers.listChats({});
+    await worker.handlers.readTranscript({ meeting: MEETING });
+    expect(fake.sent.length).toBe(warm);
+
+    if (event.on401) {
+      let once = event.on401(fake) as () => unknown;
+      onChatRead = () => {
+        const answer = once();
+        once = () => undefined;
+        return answer;
+      };
+      const read = worker.handlers.readMessages({ conversation: WITH_ALEX });
+      if (event.as === "a") await read;
+      else await expect(read).rejects.toThrow(/account changed/);
+    } else {
+      for (const s of ["csa", "chatsvc", "mt"] as const) await teamsRequest(fake, s, "b");
+    }
+
+    const at = fake.sent.length;
+    await worker.handlers.listChats({});
+    await worker.handlers.readTranscript({ meeting: MEETING });
+    await autoSendToSelf(worker, event.as);
+    return { fake, at, as: event.as as Tenant };
+  }
+
+  it("77.3: after a 401 whose fresh session is tenant b's, names, my address, the list, the meeting's calls and its transcript are all read again, as b", async () => {
+    const { fake, at } = await readAgainAfter("a 401 whose fresh session is tenant b's");
+    expect(listReads(fake, at).map(tenantOf)).toEqual(["b"]);
+    expect(alexLookups(fake, at).map(tenantOf)).toEqual(["b"]);
+    expect(meetingReads(fake, at).map(tenantOf)).toEqual(["b"]);
+    expect(transcriptReads(fake, at)).toHaveLength(1);
+    expect(myAddressLookups(fake, at, "b").map(tenantOf)).toEqual(["b"]);
+    expect(since(fake, at).map(tenantOf)).not.toContain("a");
+  });
+
+  it("77.3: after a 401 renewed for the same user, names, my address and a transcript already read aren't looked up again", async () => {
+    const { fake, at } = await readAgainAfter("a 401 renewed for the same user");
+    expect(alexLookups(fake, at)).toEqual([]);
+    expect(transcriptReads(fake, at)).toEqual([]);
+    expect(myAddressLookups(fake, at, "a")).toEqual([]);
+    // The list and the meeting's calls are read again (as the next test checks), with a's fresh token.
+    expect(meetingReads(fake, at).map((r) => r.headers.authentication === FRESH_A)).toEqual([true]);
+  });
+
+  it.each(Object.keys(EVENTS) as (keyof typeof EVENTS)[])("77.3: after %s, the list and the meeting's calls are read again, as whoever is signed in", async (name) => {
+    const { fake, at, as } = await readAgainAfter(name);
+    expect(listReads(fake, at).map(tenantOf)).toEqual([as]);
+    expect(meetingReads(fake, at).map(accountOf)).toEqual([as]);
   });
 });
