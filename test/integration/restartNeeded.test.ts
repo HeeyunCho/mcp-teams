@@ -76,4 +76,37 @@ describe("restartNeeded", () => {
     expect(v).not.toHaveProperty("onDisk");
     expect(await tools.failing()).toEqual({ isError: true, content: [{ type: "text", text: "No Teams tab is open." }] });
   });
+
+  it("is true with the build on disk once it differs, and every tool error ends with the hint", async () => {
+    writePackage("0.9.1");
+    writeBuild("0.9.1", "0a1b2c3d4e5f");
+    const tools = await start();
+    writePackage("0.9.2");
+    writeBuild("0.9.2", "f5e4d3c2b1a0");
+    expect(await tools.version()).toMatchObject({
+      server: "0.9.1",
+      build: "0a1b2c3d4e5f",
+      restartNeeded: true,
+      onDisk: { version: "0.9.2", build: "f5e4d3c2b1a0" },
+    });
+    expect(await tools.failing()).toEqual({
+      isError: true,
+      content: [
+        {
+          type: "text",
+          text:
+            "No Teams tab is open.\n" +
+            "mcp-teams was updated on disk (running 0.9.1 0a1b2c3d4e5f, on disk 0.9.2 f5e4d3c2b1a0): reconnect it with /mcp, then reload the extension.",
+        },
+      ],
+    });
+  });
+
+  it("is true for a rebuild of the same version too", async () => {
+    writePackage("0.9.1");
+    writeBuild("0.9.1", "0a1b2c3d4e5f");
+    const tools = await start();
+    writeBuild("0.9.1", "99aa88bb77cc");
+    expect(await tools.version()).toMatchObject({ restartNeeded: true, onDisk: { version: "0.9.1", build: "99aa88bb77cc" } });
+  });
 });
