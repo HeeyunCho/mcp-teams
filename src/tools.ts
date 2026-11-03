@@ -2,7 +2,8 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { isLostCall, type ExtensionBridge } from "./bridge.js";
 import type { Config } from "./config.js";
-import { SERVER_VERSION } from "./config.js";
+import { readBuildInfo, restartCheck, restartHint } from "./buildInfo.js";
+import { BUILD_DIR, RUNNING_BUILD } from "./config.js";
 
 /** Sending waits for the user's click in the confirmation window (5 minutes at most). */
 const SEND_TIMEOUT_MS = 6 * 60_000;
@@ -13,26 +14,29 @@ const text = (value: unknown) => ({
   content: [{ type: "text" as const, text: typeof value === "string" ? value : JSON.stringify(value, null, 2) }],
 });
 
-const fail = (err: unknown) => ({
-  isError: true,
-  content: [{ type: "text" as const, text: err instanceof Error ? err.message : String(err) }],
-});
+/** A tool error; `hint` (a restart is needed) goes on a line of its own after the message. */
+const fail = (err: unknown, hint: string | null) => {
+  const message = err instanceof Error ? err.message : String(err);
+  return { isError: true, content: [{ type: "text" as const, text: hint ? `${message}\n${hint}` : message }] };
+};
 
 /** What the MCP SDK passes a tool besides its arguments: `signal` aborts when the AI app cancels the call. */
 type Extra = { signal?: AbortSignal };
 
 /**
- * Wraps a handler so thrown errors become MCP tool errors instead of protocol errors.
- * Handlers pass extra.signal to bridge.call, so cancelling a tool withdraws its extension call.
+ * Makes `safe`, which wraps a handler so thrown errors become MCP tool errors instead of protocol errors,
+ * each with `hint()`'s line when it has one. Handlers pass extra.signal to bridge.call, so cancelling a
+ * tool withdraws its extension call.
  */
-function safe<A, E extends Extra = Extra>(fn: (args: A, extra: E) => Promise<ReturnType<typeof text>>) {
-  return async (args: A, extra: E) => {
-    try {
-      return await fn(args, extra);
-    } catch (err) {
-      return fail(err);
-    }
-  };
+function safeWith(hint: () => string | null) {
+  return <A, E extends Extra = Extra>(fn: (args: A, extra: E) => Promise<ReturnType<typeof text>>) =>
+    async (args: A, extra: E) => {
+      try {
+        return await fn(args, extra);
+      } catch (err) {
+        return fail(err, hint());
+      }
+    };
 }
 
 const conversation = z
@@ -67,14 +71,28 @@ function capText<T extends Message>(messages: T[], maxLength: number): T[] {
 /** What the tools use from the config; autoSendTo may be left out (no auto-send). */
 export type ToolsConfig = Omit<Config, "autoSendTo"> & { autoSendTo?: string[] };
 
-export function registerTools(server: McpServer, bridge: ExtensionBridge, config: ToolsConfig) {
+/**
+ * For tests. build: a dist/ folder whose build.json is taken as the running build (read now) and as the
+ * one on disk (read again on demand), and the clock for reusing that read. Left out: this code's own dist/.
+ */
+export interface ToolsOptions {
+  build?: { dir: string; now?: () => number };
+}
+
+export function registerTools(server: McpServer, bridge: ExtensionBridge, config: ToolsConfig, options: ToolsOptions = {}) {
+  const running = options.build ? readBuildInfo(options.build.dir) : RUNNING_BUILD;
+  // The version of the code that runs (its build.json), not package.json's.
+  const serverVersion = running.version;
+  // Read on demand only (get_version, a failed call): no timers, no watchers.
+  const onDisk = restartCheck(running, options.build?.dir ?? BUILD_DIR, options.build?.now);
+  const safe = safeWith(() => restartHint(running, onDisk()));
   const autoSendTo = config.autoSendTo ?? [];
   server.registerTool(
     "get_version",
     {
       title: "Version and connection status",
       description:
-        "Shows the mcp-teams server version, the browser extension version, and whether Teams is reachable (which of its services have a session).",
+        "Shows the mcp-teams server version and build, the browser extension version, and whether Teams is reachable (which of its services have a session). restartNeeded: true means mcp-teams was updated on disk while this server still runs the old code: the user should reconnect it (in Claude Code: /mcp) and reload the extension.",
       inputSchema: {},
     },
     safe(async (_, extra) => {
@@ -83,7 +101,9 @@ export function registerTools(server: McpServer, bridge: ExtensionBridge, config
         teams = await bridge.call("status", {}, undefined, extra.signal).catch((e: Error) => ({ error: e.message }));
       }
       return text({
-        server: SERVER_VERSION,
+        server: serverVersion,
+        build: running.buildId,
+        ...onDisk(),
         extension: bridge.extension?.version ?? null,
         browser: bridge.extension?.browser ?? null,
         // With several browsers connected, calls go to the one shown above (list_teams and
@@ -91,7 +111,7 @@ export function registerTools(server: McpServer, bridge: ExtensionBridge, config
         ...(bridge.extensions.length > 1
           ? { browsers: bridge.extensions.map((e) => ({ browser: e.browser ?? null, version: e.version })) }
           : {}),
-        versionsMatch: bridge.extension ? bridge.extension.version === SERVER_VERSION : null,
+        versionsMatch: bridge.extension ? bridge.extension.version === serverVersion : null,
         bridge: bridge.listenError ?? (bridge.connected ? "connected" : "waiting for extension"),
         // hub: this session owns the port; peer: it forwards through another session's server.
         role: bridge.role,
@@ -113,7 +133,7 @@ export function registerTools(server: McpServer, bridge: ExtensionBridge, config
     },
     safe(async () => {
       const r = await bridge.reloadExtension();
-      return text({ ...r, server: SERVER_VERSION, versionsMatch: r.after === SERVER_VERSION });
+      return text({ ...r, server: serverVersion, versionsMatch: r.after === serverVersion });
     }),
   );
 

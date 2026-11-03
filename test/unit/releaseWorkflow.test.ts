@@ -156,6 +156,38 @@ describe.skipIf(process.platform === "win32")("version.yml Bump version, then Co
   });
 });
 
+describe("version.yml step order", () => {
+  /** Each step of the bump job: its text, from its `- ` line to the next step's. */
+  function steps() {
+    const lines = readFileSync(".github/workflows/version.yml", "utf8").split(/\r?\n/);
+    const first = lines.findIndex((l) => l.trim() === "steps:");
+    const indent = lines.findIndex((l, i) => i > first && l.trim().startsWith("- "));
+    const at = lines[indent].search(/\S/);
+    const out: string[] = [];
+    for (const line of lines.slice(indent)) {
+      if (line.search(/\S/) === at && line.trim().startsWith("- ")) out.push(line);
+      else out[out.length - 1] += `\n${line}`;
+    }
+    return out;
+  }
+  const named = (name: string) => steps().findIndex((s) => s.split("\n")[0].trim() === `- name: ${name}`);
+
+  // #96: npm test builds dist/ before the bump, so without a build after it the published dist/build.json
+  // would name the previous version.
+  it("builds again after the version bump and before publishing", () => {
+    const all = steps();
+    const builds = all.map((s, i) => (/^\s*(- )?run: npm run build\s*$/m.test(s) ? i : -1)).filter((i) => i >= 0);
+    expect(named("Bump version")).toBeGreaterThanOrEqual(0);
+    expect(named("Publish to npm")).toBeGreaterThanOrEqual(0);
+    // The build that npm test makes, before the bump.
+    const test = all.findIndex((s) => /^\s*- run: npm test\s*$/m.test(s));
+    expect(test).toBeGreaterThanOrEqual(0);
+    expect(test).toBeLessThan(named("Bump version"));
+    const between = builds.filter((i) => i > named("Bump version") && i < named("Publish to npm"));
+    expect(between, "a step that runs npm run build between Bump version and Publish to npm").toHaveLength(1);
+  });
+});
+
 describe("gitEnv test helper", { timeout: TIMEOUT_MS }, () => {
   // Git on Windows can't open os.devNull (\\.\nul) as a config file and every command dies, so it must be a real file.
   it("points git's user config at a real, empty file", () => {

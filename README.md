@@ -98,6 +98,8 @@ The browser clears that memory when the extension is reloaded or updated. A Team
 
 Every AI session starts its own mcp-teams server, and they share the one extension connection. The first server owns the bridge port (`role: "hub"` in `get_version`), and later ones forward their calls through it (`role: "peer"`). When the hub's session ends, a peer takes over within a second. A newer server takes over from an older one. Servers of 0.2.0 and older can't do the newer handshake: after updating from them, restart AI sessions that are still open (in Claude Code: `/mcp`).
 
+A server that is already running keeps its code when the copy on disk changes (`git pull` and `npm run build`). It notices: `get_version` then shows `restartNeeded: true` with the build on disk, and every failed tool call ends with a line saying to reconnect it with `/mcp` and reload the extension.
+
 ## Configuration
 
 `~/.mcp-teams/config.json` is created on first run:
