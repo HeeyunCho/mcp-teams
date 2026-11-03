@@ -663,9 +663,11 @@ async function sendTo(key, tab, findTab, url, method, headers, body, ctx, wait, 
  * full URL on it). Returns the parsed JSON (null for an empty answer). While Teams throttles
  * the service, the call waits that out if it fits the deadline; `wait: false` (for lookups
  * that can be done without) fails at once as busy instead. `repeatable`: a POST that only
- * reads (a search, a profile lookup), sent again after a 429 like a GET.
+ * reads (a search, a profile lookup), sent again after a 429 like a GET. `unreadable`: what a
+ * 2xx answer that isn't JSON returns instead of failing; for a post that went through whatever
+ * its answer says (a message), where an error would invite posting it again.
  */
-async function api(service, path, { method = "GET", body, raw = false, withLocation = false, ctx = null, wait = true, repeatable = method === "GET", onCapture } = {}) {
+async function api(service, path, { method = "GET", body, raw = false, withLocation = false, ctx = null, wait = true, repeatable = method === "GET", onCapture, unreadable } = {}) {
   ctx?.check();
   let cap = await getCapture(service);
   // Opening a tab or waiting for a session can take a minute; a withdrawn request stops waiting.
@@ -710,6 +712,7 @@ async function api(service, path, { method = "GET", body, raw = false, withLocat
   try {
     return JSON.parse(res.text);
   } catch {
+    if (unreadable !== undefined) return unreadable;
     throw new Error(`Teams returned something that isn't JSON (${service}, HTTP ${res.status}).`);
   }
 }
@@ -1444,6 +1447,9 @@ const asConfirmed = (account) => async (cap) => {
   if ((cap.oid ?? (await signedInAccount())) !== account) throw Object.assign(new Error(ACCOUNT_CHANGED), { accountChanged: true });
 };
 
+const UNREADABLE = Symbol("unreadable answer");
+const TIME_UNCONFIRMED = "Posted: Teams accepted the message, but its answer couldn't be read, so the time isn't confirmed.";
+
 /** Posts a confirmed message; `account`: who confirmed it (see asConfirmed). */
 async function sendMessage({ conversation, newChat, people, text, threadId, subject }, account) {
   if (newChat) {
@@ -1484,9 +1490,13 @@ async function sendMessage({ conversation, newChat, people, text, threadId, subj
     postType: "Standard",
     crossPostChannels: [],
   };
-  const r = await api("chatsvc", `/v1/users/ME/conversations/${encodeURIComponent(target)}/messages`, { method: "POST", body, onCapture: asConfirmed(account) });
+  // Teams took the message (2xx) even when its answer can't be read: reported as sent, so
+  // nothing invites posting it again, with its time marked as unconfirmed.
+  const r = await api("chatsvc", `/v1/users/ME/conversations/${encodeURIComponent(target)}/messages`, { method: "POST", body, onCapture: asConfirmed(account), unreadable: UNREADABLE });
   dropList(); // its last message changed: a list_chats right after must not show the old one
-  return { sent: true, conversation: conversation.title ?? conversation.id, time: r?.OriginalArrivalTime ? new Date(r.OriginalArrivalTime).toISOString() : null };
+  const sent = { sent: true, conversation: conversation.title ?? conversation.id };
+  if (r === UNREADABLE) return { ...sent, time: null, timeNote: TIME_UNCONFIRMED };
+  return { ...sent, time: r?.OriginalArrivalTime ? new Date(r.OriginalArrivalTime).toISOString() : null };
 }
 
 // ------------------------------------------------------------ auto-send to self (autoSendTo)
