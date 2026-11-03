@@ -76,6 +76,11 @@ jobs:
           # this run, so nothing is published; the next push's run releases these commits too.
           git push --atomic origin HEAD:main "v$VERSION"
 
+      # npm test built dist/ before the bump, so its dist/build.json still names the previous version,
+      # and the publish below skips scripts. Build again so the published build.json names this one (#96).
+      - name: Build the published dist
+        run: npm run build
+
       # Trusted publishing needs npm 11.5.1 or later.
       - run: npm install -g npm@11
 
