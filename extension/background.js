@@ -1878,7 +1878,8 @@ async function connect() {
   } finally {
     starting = false;
   }
-  if (ws) return;
+  // stopReconnecting() may have run while the storage read was waiting.
+  if (ws || !reconnecting) return;
   state = "connecting";
   const socket = new WebSocket(`ws://127.0.0.1:${port || DEFAULT_PORT}`);
   ws = socket;
