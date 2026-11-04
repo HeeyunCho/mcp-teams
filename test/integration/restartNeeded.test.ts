@@ -165,6 +165,7 @@ describe("restartNeeded after a rebuild", () => {
     const { build } = await tools.version();
     writeFileSync(join(root, "extension", "background.js"), "// fabrikam, fixed\n");
     rebuild();
+    tools.clock.now = 10_000; // past the reused read
     const v = await tools.version();
     expect(v).toMatchObject({ server: "0.9.1", build, restartNeeded: true, onDisk: { version: "0.9.1" } });
     expect(v.onDisk.build).not.toBe(build);
@@ -178,7 +179,9 @@ describe("restartNeeded after a rebuild", () => {
     project();
     rebuild();
     const tools = await start();
+    await tools.version();
     rebuild();
+    tools.clock.now = 10_000; // past the reused read
     const v = await tools.version();
     expect(v).toMatchObject({ restartNeeded: false });
     expect(v).not.toHaveProperty("onDisk");
