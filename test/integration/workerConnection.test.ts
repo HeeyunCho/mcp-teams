@@ -10,7 +10,10 @@ const TOKEN = "worker-connection-token";
 let wss: WebSocketServer | undefined;
 let link: { disconnect: () => Promise<void> } | undefined;
 
-afterEach(async () => {
+afterEach(() => teardown());
+
+/** What every test's afterEach does (a test may also call it itself, then afterEach finds nothing left). */
+async function teardown() {
   await link?.disconnect();
   link = undefined;
   // A worker still connected would hold the server's close open.
@@ -20,7 +23,7 @@ afterEach(async () => {
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
   openedSockets.length = 0;
-});
+}
 
 /**
  * A hub that answers hello with a welcome (proving itself like the real one, unless `forged`)
@@ -110,6 +113,54 @@ describe("worker connection", () => {
     await vi.waitFor(async () => expect(await status()).toMatchObject({ state: "connected" }), { timeout: 2_000 });
     await new Promise((r) => setTimeout(r, 700)); // the first connection's check has ended (refused)
     expect(await status()).toMatchObject({ state: "connected" });
+  });
+
+  describe("99: after a test's teardown the worker never connects again (chrome is gone by then)", () => {
+    /** Stands in for chrome after the teardown unstubbed it: records each use; what the worker calls never settles. */
+    function chromeAfterTeardown() {
+      const used: string[] = [];
+      const stub = (path: string): any =>
+        new Proxy(() => new Promise(() => {}), {
+          get: (_target, key) => {
+            used.push(`${path}.${String(key)}`);
+            return stub(`${path}.${String(key)}`);
+          },
+        });
+      return { used, chrome: stub("chrome") };
+    }
+    /** Longer than the worker's first retry (500 ms) after a connection closes. */
+    const PAST_FIRST_RETRY_MS = 1_500;
+
+    it("a worker still connected when the test ends", async () => {
+      const hub = await scriptedHub([]);
+      const fake = createFakeChrome({ local: { token: TOKEN, port: hub.port } });
+      const worker = await loadWorker(fake);
+      worker.registerListeners();
+      // As 2.1c: connected without connectWorker, so no disconnect() at teardown.
+      vi.stubGlobal("WebSocket", NativeWebSocket);
+      for (const l of fake.chrome.runtime.onStartup.listeners) l();
+      await vi.waitFor(async () => expect(await fake.pageMessage("popup.html", { type: "popup:status" })).toMatchObject({ state: "connected" }), { timeout: 3_000 });
+      await teardown();
+      const after = chromeAfterTeardown();
+      vi.stubGlobal("chrome", after.chrome);
+      await new Promise((r) => setTimeout(r, PAST_FIRST_RETRY_MS));
+      expect(after.used).toEqual([]);
+    });
+
+    it("a worker whose connection closed during the test (a retry already waiting)", async () => {
+      const hub = await scriptedHub([], { forged: true });
+      const fake = createFakeChrome({ local: { token: TOKEN, port: hub.port } });
+      const worker = await loadWorker(fake);
+      worker.registerListeners();
+      vi.stubGlobal("WebSocket", NativeWebSocket);
+      for (const l of fake.chrome.runtime.onStartup.listeners) l();
+      await vi.waitFor(async () => expect(await fake.pageMessage("popup.html", { type: "popup:status" })).toMatchObject({ state: "unauthorized" }), { timeout: 3_000 });
+      await teardown();
+      const after = chromeAfterTeardown();
+      vi.stubGlobal("chrome", after.chrome);
+      await new Promise((r) => setTimeout(r, PAST_FIRST_RETRY_MS));
+      expect(after.used).toEqual([]);
+    });
   });
 
   it("2.1b: after a welcome without the right proof, a request that came with it is never run", async () => {
