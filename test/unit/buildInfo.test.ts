@@ -40,7 +40,13 @@ describe("readBuildInfo", () => {
 });
 
 describe("scripts/write-build-info.mjs", () => {
-  /** A temporary project at 0.9.2 with a copy of the script and two built files (and a source map). */
+  /** An icon's first bytes: binary, with a \r\n in it. */
+  const PNG = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+
+  /**
+   * A temporary project at 0.9.2 with a copy of the script, two built files (and a source map) and an
+   * extension of three files, one in a subfolder and one binary.
+   */
   function project() {
     mkdirSync(join(root, "scripts"));
     copyFileSync("scripts/write-build-info.mjs", join(root, "scripts", "write-build-info.mjs"));
@@ -49,6 +55,10 @@ describe("scripts/write-build-info.mjs", () => {
     writeFileSync(join(dist, "index.js"), "console.log('contoso');\n");
     writeFileSync(join(dist, "sub", "tools.js"), "export const x = 1;\n");
     writeFileSync(join(dist, "index.js.map"), "{}");
+    mkdirSync(join(root, "extension", "icons"), { recursive: true });
+    writeFileSync(join(root, "extension", "manifest.json"), '{"version":"0.9.2"}\n');
+    writeFileSync(join(root, "extension", "background.js"), "// fabrikam\n// northwind\n");
+    writeFileSync(join(root, "extension", "icons", "icon-16.png"), PNG);
   }
 
   /** Runs the copied script, as `npm run build` does after tsc, and returns the build.json it wrote. */
@@ -72,5 +82,47 @@ describe("scripts/write-build-info.mjs", () => {
     expect(build().buildId).toBe(first);
     writeFileSync(join(dist, "sub", "tools.js"), "export const x = 2;\n");
     expect(build().buildId).not.toBe(first);
+  });
+
+  // #100: the build id covers the extension the server ships too, so an extension-only release changes it.
+  it("gives a change to the extension alone a new id", () => {
+    project();
+    const first = build().buildId;
+    writeFileSync(join(root, "extension", "background.js"), "// fabrikam\n// adventure works\n");
+    expect(build().buildId).not.toBe(first);
+  });
+
+  it("gives a changed icon, or a new file in the extension, a new id", () => {
+    project();
+    const first = build().buildId;
+    writeFileSync(join(root, "extension", "icons", "icon-16.png"), Buffer.concat([PNG, Buffer.from([0])]));
+    const second = build().buildId;
+    expect(second).not.toBe(first);
+    writeFileSync(join(root, "extension", "icons", "icon-32.png"), PNG);
+    expect(build().buildId).not.toBe(second);
+  });
+
+  it("ignores a pairing.json in the extension folder: only the installed copy has one, different per install", () => {
+    project();
+    const first = build().buildId;
+    writeFileSync(join(root, "extension", "pairing.json"), JSON.stringify({ token: "fictional-token" }));
+    expect(build().buildId).toBe(first);
+  });
+
+  it("gives text files checked out with CRLF line ends (git on Windows) the id of the LF ones", () => {
+    project();
+    const first = build().buildId;
+    writeFileSync(join(root, "extension", "background.js"), "// fabrikam\r\n// northwind\r\n");
+    writeFileSync(join(root, "extension", "manifest.json"), '{"version":"0.9.2"}\r\n');
+    writeFileSync(join(dist, "index.js"), "console.log('contoso');\r\n");
+    expect(build().buildId).toBe(first);
+  });
+
+  // The same id on every platform for the same files, so CI on Linux and Windows and the published
+  // build.json agree with a local build: sha256 over each file, by its path from the repo root with "/" and
+  // in sorted order, of path, NUL, content (text with LF line ends), NUL; its first 12 hex digits.
+  it("is the same id on every platform for the same files", () => {
+    project();
+    expect(build().buildId).toBe("e91132d4e18d");
   });
 });

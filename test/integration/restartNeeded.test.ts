@@ -4,7 +4,8 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { copyFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -110,6 +111,26 @@ describe("restartNeeded", () => {
     expect(await tools.version()).toMatchObject({ restartNeeded: true, onDisk: { version: "0.9.1", build: "99aa88bb77cc" } });
   });
 
+  // #100: every release bumps the version, so a new version on disk needs a restart even when the build id
+  // didn't change (a build id that misses part of what was released).
+  it("is true for a new version on disk with the same build id, and tool errors end with the hint", async () => {
+    writePackage("0.9.1");
+    writeBuild("0.9.1", "0a1b2c3d4e5f");
+    const tools = await start();
+    writePackage("0.9.2");
+    writeBuild("0.9.2", "0a1b2c3d4e5f");
+    expect(await tools.version()).toMatchObject({
+      server: "0.9.1",
+      build: "0a1b2c3d4e5f",
+      restartNeeded: true,
+      onDisk: { version: "0.9.2", build: "0a1b2c3d4e5f" },
+    });
+    expect((await tools.failing()).content[0].text).toBe(
+      "No Teams tab is open.\n" +
+        "mcp-teams was updated on disk (running 0.9.1 0a1b2c3d4e5f, on disk 0.9.2 0a1b2c3d4e5f): reconnect it with /mcp, then reload the extension.",
+    );
+  });
+
   it("is never reported for a build without build.json, even once one appears on disk", async () => {
     writePackage("0.9.1");
     const tools = await start();
@@ -120,6 +141,48 @@ describe("restartNeeded", () => {
     expect(v).toMatchObject({ server: "0.9.1", build: null, restartNeeded: false });
     expect(v).not.toHaveProperty("onDisk");
     expect(await tools.failing()).toEqual({ isError: true, content: [{ type: "text", text: "No Teams tab is open." }] });
+  });
+});
+
+// #100: builds written by scripts/write-build-info.mjs (a copy of it in the temporary project), as
+// `npm run build` writes them after tsc.
+describe("restartNeeded after a rebuild", () => {
+  function project() {
+    mkdirSync(join(root, "scripts"));
+    copyFileSync("scripts/write-build-info.mjs", join(root, "scripts", "write-build-info.mjs"));
+    writePackage("0.9.1");
+    writeFileSync(join(dist, "index.js"), "console.log('contoso');\n");
+    mkdirSync(join(root, "extension"));
+    writeFileSync(join(root, "extension", "manifest.json"), '{"version":"0.9.1"}\n');
+    writeFileSync(join(root, "extension", "background.js"), "// fabrikam\n");
+  }
+  const rebuild = () => execFileSync(process.execPath, [join(root, "scripts", "write-build-info.mjs")], { stdio: "pipe" });
+
+  it("is true once only the extension changed and was rebuilt, and tool errors end with the hint", async () => {
+    project();
+    rebuild();
+    const tools = await start();
+    const { build } = await tools.version();
+    writeFileSync(join(root, "extension", "background.js"), "// fabrikam, fixed\n");
+    rebuild();
+    const v = await tools.version();
+    expect(v).toMatchObject({ server: "0.9.1", build, restartNeeded: true, onDisk: { version: "0.9.1" } });
+    expect(v.onDisk.build).not.toBe(build);
+    expect((await tools.failing()).content[0].text).toBe(
+      "No Teams tab is open.\n" +
+        `mcp-teams was updated on disk (running 0.9.1 ${build}, on disk 0.9.1 ${v.onDisk.build}): reconnect it with /mcp, then reload the extension.`,
+    );
+  });
+
+  it("stays false after a rebuild that changes nothing", async () => {
+    project();
+    rebuild();
+    const tools = await start();
+    rebuild();
+    const v = await tools.version();
+    expect(v).toMatchObject({ restartNeeded: false });
+    expect(v).not.toHaveProperty("onDisk");
+    expect((await tools.failing()).content[0].text).toBe("No Teams tab is open.");
   });
 });
 
