@@ -98,7 +98,7 @@ The browser clears that memory when the extension is reloaded or updated. A Team
 
 Every AI session starts its own mcp-teams server, and they share the one extension connection. The first server owns the bridge port (`role: "hub"` in `get_version`), and later ones forward their calls through it (`role: "peer"`). When the hub's session ends, a peer takes over within a second. A newer server takes over from an older one. Servers of 0.2.0 and older can't do the newer handshake: after updating from them, restart AI sessions that are still open (in Claude Code: `/mcp`).
 
-A server that is already running keeps its code when the copy on disk changes (`git pull` and `npm run build`). It notices: `get_version` then shows `restartNeeded: true` with the build on disk, and every failed tool call ends with a line saying to reconnect it with `/mcp` and reload the extension.
+A server that is already running keeps its code when the copy on disk changes (`git pull` and `npm run build`). It notices: `get_version` then shows `restartNeeded: true` with the build on disk, and every failed tool call ends with a line saying to reconnect it with `/mcp` and reload the extension. It compares its version and build id with those in `dist/build.json` on disk. The build id is a hash of the server code (`dist/**/*.js`) and of the extension it ships (`extension/`, without the `pairing.json` that only the installed copy has). So a release that changes only the extension counts as a new build too, and a rebuild that changes nothing doesn't. The same files give the same build id on Windows and Linux.
 
 ## Configuration
 
