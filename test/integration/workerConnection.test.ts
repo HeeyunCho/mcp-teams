@@ -3,7 +3,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { WebSocketServer, type WebSocket } from "ws";
 import { proof } from "../../src/bridge.js";
-import { connectWorker, createFakeChrome, loadWorker, NativeWebSocket, openedSockets } from "../helpers/fakeChrome.js";
+import { connectWorker, createFakeChrome, loadWorker, NativeWebSocket, openedSockets, stopWorkers } from "../helpers/fakeChrome.js";
 
 const TOKEN = "worker-connection-token";
 
@@ -15,6 +15,8 @@ afterEach(() => teardown());
 /** What every test's afterEach does (a test may also call it itself, then afterEach finds nothing left). */
 async function teardown() {
   await link?.disconnect();
+  // No retry may wait to run after the test, without its fake chrome (#99).
+  stopWorkers();
   link = undefined;
   // A worker still connected would hold the server's close open.
   for (const c of wss?.clients ?? []) c.terminate();

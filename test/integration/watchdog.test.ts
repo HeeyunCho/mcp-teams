@@ -6,7 +6,7 @@ import { WebSocketServer, type WebSocket } from "ws";
 import { proof } from "../../src/bridge.js";
 import { FAST, TOKEN as HUB_TOKEN, bridgeHarness, type BridgeHarness } from "../helpers/bridgeHarness.js";
 import { stall } from "../helpers/timing.js";
-import { connectWorker, createFakeChrome, loadWorker, NativeWebSocket, openedSockets } from "../helpers/fakeChrome.js";
+import { connectWorker, createFakeChrome, loadWorker, NativeWebSocket, openedSockets, stopWorkers } from "../helpers/fakeChrome.js";
 
 const TOKEN = "watchdog-token";
 const PERIOD = 1_000;
@@ -18,6 +18,8 @@ const timers: NodeJS.Timeout[] = [];
 
 afterEach(async () => {
   await link?.disconnect();
+  // No retry may wait to run after the test, without its fake chrome (#99).
+  stopWorkers();
   link = undefined;
   for (const t of timers.splice(0)) clearInterval(t);
   for (const c of wss?.clients ?? []) c.terminate();

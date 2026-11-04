@@ -5,13 +5,15 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { isLostCall, NOT_SENT } from "../../src/bridge.js";
 import { bridgeHarness, FAST, TOKEN, type BridgeHarness, type FakeExtension, type Request } from "../helpers/bridgeHarness.js";
 import { until } from "../helpers/timing.js";
-import { connectWorker, createFakeChrome, loadWorker, openedSockets, reply } from "../helpers/fakeChrome.js";
+import { connectWorker, createFakeChrome, loadWorker, openedSockets, stopWorkers, reply } from "../helpers/fakeChrome.js";
 
 let h: BridgeHarness | undefined;
 let link: { disconnect: () => Promise<void> } | undefined;
 
 afterEach(async () => {
   await link?.disconnect();
+  // No retry may wait to run after the test, without its fake chrome (#99).
+  stopWorkers();
   link = undefined;
   await h?.cleanup();
   h = undefined;
