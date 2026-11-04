@@ -71,9 +71,9 @@ Several AI sessions share one connection to the browser: the first one runs it, 
 
 `get_version` showing `teamsTabs: 1` (or more) but `sessionCaptured: false` means the extension hasn't seen Teams sign in to its chat service. The extension always keeps when the Teams tab last made a call (`lastTeamsCall`) and when it last made a signed-in one (`lastSignedInCall`), only the time and the host, and `get_version` adds a `note` naming the case:
 
-- **Stuck at sign-in**: the tab's calls since the last signed-in one (or all of them) weren't signed in. Open the Teams tab and finish signing in: an account picker, a sign-in page or a prompt may be waiting there.
+- **Stuck at sign-in**: the tab has made no signed-in call at all, or none for more than 5 minutes while it keeps making other calls. Open the Teams tab and finish signing in: an account picker, a sign-in page or a prompt may be waiting there.
 - **Asleep**: the tab has made no calls for more than 5 minutes (or none at all). Click into the Teams tab, or add `teams.cloud.microsoft` to Chrome's *Always keep these sites active* (Settings > Performance) so Chrome doesn't put it to sleep.
-- **Missed by the capture**: the tab made a signed-in call after the last session the extension captured. Refresh the Teams tab or reload the extension; if that doesn't help, it's a bug in mcp-teams: please report it with the output of `api_traffic` (call it with `record: true`, use Teams for a minute, then call it again).
+- **Missed by the capture**: the tab made a signed-in call to a Teams service (chat, teams, people or search) in the last 5 minutes, but no chat session was captured. Refresh the Teams tab or reload the extension; if that doesn't help, it's a bug in mcp-teams: please report it with the output of `api_traffic` (call it with `record: true`, use Teams for a minute, then call it again).
 
 These times live in the browser's session storage like the sessions themselves: a restart of the browser (or a reload of the extension) clears them.
 

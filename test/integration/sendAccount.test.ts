@@ -3,9 +3,10 @@
 // extension reload). The real worker (extension/background.js) under a fake chrome, with the
 // account switching through Teams' own requests.
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { BASES, createFakeChrome, loadWorker, openedSockets, TEAMS_ORIGIN, type FakeChrome, type SentRequest } from "../helpers/fakeChrome.js";
+import { BASES, createFakeChrome, loadWorker, openedSockets, stopWorkers, TEAMS_ORIGIN, type FakeChrome, type SentRequest } from "../helpers/fakeChrome.js";
 
 afterEach(() => {
+  stopWorkers(); // no save of the worker's last calls left waiting without its fake chrome (#103)
   vi.unstubAllGlobals();
   openedSockets.length = 0;
 });

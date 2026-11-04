@@ -140,8 +140,8 @@ function recordRequest(details) {
 }
 
 /**
- * When the Teams tab last made a call, and when it last made a signed-in one (with credentials, as
- * a capture needs), always, whether or not api_traffic records (#103): get_version tells from them
+ * When the Teams tab last made a call, and when it last made a signed-in one (with credentials, to a
+ * service whose session is captured), always, whether or not api_traffic records (#103): get_version tells from them
  * a tab stuck at sign-in or asleep from a call the capture missed. Only the time and the host, never
  * a URL, header value or token. Kept in chrome.storage.session like the captures, so a restart of
  * this worker keeps them and a browser restart clears them; saved at most every half second.
@@ -162,18 +162,24 @@ function teamsCalls() {
 
 function noteCall(details) {
   const call = { at: Date.now(), host: new URL(details.url).host };
-  const signedIn = !!teams.pickHeaders(details.requestHeaders);
+  // Signed in: credentials to a service whose session a capture would store (not e.g. Graph or authsvc).
+  const signedIn = !!teams.serviceOf(details.url) && !!teams.pickHeaders(details.requestHeaders);
   return teamsCalls().then((held) => {
     if (!held) return;
     calls = { lastTeamsCall: call, lastSignedInCall: signedIn ? call : held.lastSignedInCall };
     callsSave ??= setTimeout(() => {
       callsSave = null;
-      // A diagnostic: a failed save (or a test whose fake chrome is gone by now) loses nothing that matters.
-      try {
-        chrome.storage.session.set({ [CALLS_KEY]: calls }).catch(() => {});
-      } catch {}
+      chrome.storage.session.set({ [CALLS_KEY]: calls }).catch(() => {});
     }, 500);
   });
+}
+
+/** Saves the last calls now if a save is pending (tests only: their teardown, before the fake chrome goes). */
+export function savePendingCalls() {
+  if (!callsSave) return;
+  clearTimeout(callsSave);
+  callsSave = null;
+  chrome.storage.session.set({ [CALLS_KEY]: calls }).catch(() => {});
 }
 
 const callAt = (c) => (c ? { at: new Date(c.at).toISOString(), host: c.host } : null);

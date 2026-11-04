@@ -2,9 +2,10 @@
 // A 401 empties the chat list cache, and after the user switches Teams to another tenant
 // nothing of the first one (its chats, its captured sessions) is used or returned.
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { BASES, createFakeChrome, loadWorker, openedSockets, reply, SHAREPOINT_ORIGIN, TEAMS_ORIGIN, type SentRequest } from "../helpers/fakeChrome.js";
+import { BASES, createFakeChrome, loadWorker, openedSockets, reply, SHAREPOINT_ORIGIN, stopWorkers, TEAMS_ORIGIN, type SentRequest } from "../helpers/fakeChrome.js";
 
 afterEach(() => {
+  stopWorkers(); // no save of the worker's last calls left waiting without its fake chrome (#103)
   vi.unstubAllGlobals();
   openedSockets.length = 0;
 });

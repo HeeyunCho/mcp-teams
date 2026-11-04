@@ -34,6 +34,25 @@ describe("#103: the Teams tab's last calls", () => {
       lastTeamsCall: { at: "2026-10-01T10:26:37.000Z", host: "teams.cloud.microsoft" },
       lastSignedInCall: null,
     });
+    await settle(); // the pending save runs while this test's fake chrome is still there
+  });
+
+  // Only a call to a service whose session is captured (chatsvc, csa, mt, substrate) counts as signed in.
+  it("a bearer token to another host (Graph, authsvc) is not a signed-in call", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    const fake = createFakeChrome({ captured: [] });
+    const worker = await loadWorker(fake);
+    worker.registerListeners();
+    const bearer = [{ name: "Authorization", value: "Bearer fictional-token" }];
+    at("2026-10-01T10:00:00Z");
+    await teamsCalls(fake, "https://graph.microsoft.com/v1.0/me/fictional", bearer);
+    at("2026-10-01T10:00:01Z");
+    await teamsCalls(fake, "https://teams.cloud.microsoft/api/authsvc/v1.0/authz", bearer);
+    expect(await worker.handlers.status({})).toMatchObject({
+      lastTeamsCall: { at: "2026-10-01T10:00:01.000Z", host: "teams.cloud.microsoft" },
+      lastSignedInCall: null,
+    });
+    await settle();
   });
 
   it("a call with a bearer token is the last signed-in call, with recording off, and a restart of the worker keeps both", async () => {

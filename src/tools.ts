@@ -76,7 +76,8 @@ export type ToolsConfig = Omit<Config, "autoSendTo"> & { autoSendTo?: string[] }
 
 /**
  * For tests. build: a dist/ folder whose build.json is taken as the running build (read now) and as the
- * one on disk (read again on demand), and the clock for reusing that read. Left out: this code's own dist/.
+ * one on disk (read again on demand), and the clock for reusing that read and for get_version's session
+ * note (#103). Left out: this code's own dist/ and Date.now.
  */
 export interface ToolsOptions {
   build?: { dir: string; now?: () => number };
@@ -123,7 +124,7 @@ export function registerTools(server: McpServer, bridge: ExtensionBridge, config
         port: bridge.port,
         teams,
         // A Teams tab without a session: which case it looks like and what to do (#103).
-        ...noteOf(sessionNote(teams as TeamsStatus | null, Date.now())),
+        ...noteOf(sessionNote(teams as TeamsStatus | null, (options.build?.now ?? Date.now)())),
       });
     }),
   );

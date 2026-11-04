@@ -96,7 +96,7 @@ describe("#103: get_version names why there is no session", () => {
     );
   });
 
-  it("a signed-in call after the last capture looks like a capture problem", async () => {
+  it("a recent signed-in call without a chat session looks like a capture problem", async () => {
     const v = await getVersion(
       uncaptured(
         {
@@ -108,7 +108,7 @@ describe("#103: get_version names why there is no session", () => {
       "2026-10-01T10:00:10Z",
     );
     expect(v.note).toBe(
-      "The Teams tab made a signed-in call at 2026-10-01T10:00:08.000Z (teams.cloud.microsoft), after the last session captured (2026-10-01T09:00:00.000Z), but no chat session was captured. Refresh the Teams tab or reload the extension; if that doesn't help, this looks like a capture problem: please report it with api_traffic output (call it with record: true, use Teams for a minute, then call it again).",
+      "The Teams tab made a signed-in call at 2026-10-01T10:00:08.000Z (teams.cloud.microsoft), but no chat session was captured. Refresh the Teams tab or reload the extension; if that doesn't help, this looks like a capture problem: please report it with api_traffic output (call it with record: true, use Teams for a minute, then call it again).",
     );
   });
 
@@ -116,7 +116,7 @@ describe("#103: get_version names why there is no session", () => {
     const call = { at: "2026-10-01T10:00:08.000Z", host: "teams.cloud.microsoft" };
     const v = await getVersion(uncaptured({ lastTeamsCall: call, lastSignedInCall: call }), "2026-10-01T10:00:10Z");
     expect(v.note).toBe(
-      "The Teams tab made a signed-in call at 2026-10-01T10:00:08.000Z (teams.cloud.microsoft), after the last session captured (none yet), but no chat session was captured. Refresh the Teams tab or reload the extension; if that doesn't help, this looks like a capture problem: please report it with api_traffic output (call it with record: true, use Teams for a minute, then call it again).",
+      "The Teams tab made a signed-in call at 2026-10-01T10:00:08.000Z (teams.cloud.microsoft), but no chat session was captured. Refresh the Teams tab or reload the extension; if that doesn't help, this looks like a capture problem: please report it with api_traffic output (call it with record: true, use Teams for a minute, then call it again).",
     );
   });
 
@@ -136,19 +136,20 @@ describe("#103: get_version names why there is no session", () => {
     );
   });
 
-  // A signed-in Teams page makes unsigned calls (connection checks, config) between its signed-in ones,
-  // and the capture's time and the call's are taken a moment apart.
-  it("no note while Teams is starting: a signed-in call captured a moment ago, then unsigned calls", async () => {
+  // sessionCaptured means chatsvc's session: another service's capture, however recent, doesn't explain its absence.
+  it("csa captured but not chatsvc, and a signed-in call after: a capture problem", async () => {
     const v = await getVersion(
       uncaptured(
         {
           lastTeamsCall: { at: "2026-10-01T10:00:09.000Z", host: "go.trouter.teams.microsoft.com" },
-          lastSignedInCall: { at: "2026-10-01T10:00:08.001Z", host: "teams.cloud.microsoft" },
+          lastSignedInCall: { at: "2026-10-01T10:00:08.500Z", host: "teams.cloud.microsoft" },
         },
         { chatsvc: null, csa: "2026-10-01T10:00:08.000Z", mt: null, substrate: null },
       ),
       "2026-10-01T10:00:10Z",
     );
-    expect(v).not.toHaveProperty("note");
+    expect(v.note).toBe(
+      "The Teams tab made a signed-in call at 2026-10-01T10:00:08.500Z (teams.cloud.microsoft), but no chat session was captured. Refresh the Teams tab or reload the extension; if that doesn't help, this looks like a capture problem: please report it with api_traffic output (call it with record: true, use Teams for a minute, then call it again).",
+    );
   });
 });
