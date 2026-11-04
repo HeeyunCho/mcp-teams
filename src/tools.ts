@@ -4,11 +4,14 @@ import { isLostCall, type ExtensionBridge } from "./bridge.js";
 import type { Config } from "./config.js";
 import { readBuildInfo, restartCheck, restartHint } from "./buildInfo.js";
 import { BUILD_DIR, RUNNING_BUILD } from "./config.js";
+import { sessionNote, type TeamsStatus } from "./sessionNote.js";
 
 /** Sending waits for the user's click in the confirmation window (5 minutes at most). */
 const SEND_TIMEOUT_MS = 6 * 60_000;
 /** Reading follows paging links, and the first call may open a Teams tab. */
 const READ_TIMEOUT_MS = 120_000;
+
+const noteOf = (note: string | null) => (note ? { note } : {});
 
 const text = (value: unknown) => ({
   content: [{ type: "text" as const, text: typeof value === "string" ? value : JSON.stringify(value, null, 2) }],
@@ -119,6 +122,8 @@ export function registerTools(server: McpServer, bridge: ExtensionBridge, config
         // The port the bridge uses (with port 0 configured, the free one it got).
         port: bridge.port,
         teams,
+        // A Teams tab without a session: which case it looks like and what to do (#103).
+        ...noteOf(sessionNote(teams as TeamsStatus | null, Date.now())),
       });
     }),
   );

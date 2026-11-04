@@ -136,7 +136,47 @@ function recordRequest(details) {
   if (!teams.isTeamsOrigin(details.initiator)) return;
   const entry = teams.summarizeRequest(details);
   updateTraffic((list) => teams.recordTraffic(list, entry), { ifRecording: true });
+  return noteCall(details);
 }
+
+/**
+ * When the Teams tab last made a call, and when it last made a signed-in one (with credentials, as
+ * a capture needs), always, whether or not api_traffic records (#103): get_version tells from them
+ * a tab stuck at sign-in or asleep from a call the capture missed. Only the time and the host, never
+ * a URL, header value or token. Kept in chrome.storage.session like the captures, so a restart of
+ * this worker keeps them and a browser restart clears them; saved at most every half second.
+ */
+const CALLS_KEY = "teamsCalls";
+let calls = null; // { lastTeamsCall, lastSignedInCall }: each { at (ms since 1970), host } or null; null until read
+let callsQueue = Promise.resolve();
+let callsSave = null;
+
+function teamsCalls() {
+  callsQueue = callsQueue
+    .then(async () => {
+      calls ??= (await chrome.storage.session.get(CALLS_KEY))[CALLS_KEY] ?? { lastTeamsCall: null, lastSignedInCall: null };
+    })
+    .catch(() => {});
+  return callsQueue.then(() => calls);
+}
+
+function noteCall(details) {
+  const call = { at: Date.now(), host: new URL(details.url).host };
+  const signedIn = !!teams.pickHeaders(details.requestHeaders);
+  return teamsCalls().then((held) => {
+    if (!held) return;
+    calls = { lastTeamsCall: call, lastSignedInCall: signedIn ? call : held.lastSignedInCall };
+    callsSave ??= setTimeout(() => {
+      callsSave = null;
+      // A diagnostic: a failed save (or a test whose fake chrome is gone by now) loses nothing that matters.
+      try {
+        chrome.storage.session.set({ [CALLS_KEY]: calls }).catch(() => {});
+      } catch {}
+    }, 500);
+  });
+}
+
+const callAt = (c) => (c ? { at: new Date(c.at).toISOString(), host: c.host } : null);
 
 function recordCompleted(details) {
   if (!teams.isTeamsOrigin(details.initiator)) return;
@@ -1160,6 +1200,7 @@ export const handlers = {
       services: sessions,
       region: (await getCapture("chatsvc"))?.region ?? null,
       signedInAs: await myMri(),
+      ...(await teamsCalls().then((c) => ({ lastTeamsCall: callAt(c?.lastTeamsCall), lastSignedInCall: callAt(c?.lastSignedInCall) }))),
     };
   },
 
