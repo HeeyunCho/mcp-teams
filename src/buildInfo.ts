@@ -4,7 +4,10 @@ import { join } from "node:path";
 /** Which build of mcp-teams this is: written to dist/build.json by `npm run build` (scripts/write-build-info.mjs). */
 export interface BuildInfo {
   version: string;
-  /** A hash of the built code; null when the build didn't record one (then no restart is ever reported). */
+  /**
+   * A hash of the code this build runs and ships (dist/**\/*.js and extension/); null when the build didn't
+   * record one (then no restart is ever reported).
+   */
   buildId: string | null;
 }
 
@@ -38,7 +41,7 @@ export const BUILD_CHECK_CACHE_MS = 5_000;
 /**
  * Compares the running build with the one in `dir` on disk, read again when asked but at most once per
  * BUILD_CHECK_CACHE_MS (by `now`). A restart is needed when the two build ids differ (not "newer": any
- * other build), never when either has no id.
+ * other build) or their versions do (every release bumps it, #100), never when either has no id.
  */
 export function restartCheck(running: BuildInfo, dir: string, now: () => number = Date.now): () => RestartState {
   let last: { at: number; state: RestartState } | undefined;
@@ -50,7 +53,7 @@ export function restartCheck(running: BuildInfo, dir: string, now: () => number 
     } catch {
       return { restartNeeded: false };
     }
-    return onDisk.buildId && onDisk.buildId !== running.buildId
+    return onDisk.buildId && (onDisk.buildId !== running.buildId || onDisk.version !== running.version)
       ? { restartNeeded: true, onDisk: { version: onDisk.version, build: onDisk.buildId } }
       : { restartNeeded: false };
   };
