@@ -350,27 +350,30 @@ describe("auto-send's account recheck", () => {
 });
 
 describe("warm: a switch during the lookups", () => {
-  /** Holds the send's first chat list read (Alex's), so the switch lands while the send looks things up. */
-  function holdFirstList() {
-    const list = gate();
+  /** Holds the send's first request to the service (Alex's), so the switch lands while the send looks things up. */
+  function holdFirst() {
+    const lookup = gate();
     let reads = 0;
-    return { list, csa: () => (++reads === 1 ? list.opened : undefined) };
+    return { lookup, hold: () => (++reads === 1 ? lookup.opened : undefined) };
   }
 
+  // Which lookup the switch lands during: the chat list (csa), or my addresses (mt).
   const SENDS = [
-    ["an auto-send", { conversation: "48:notes", text: "Note", autoSendTo: [ACCOUNT.a.email, ACCOUNT.b.email] }],
-    ["a window send", { conversation: ALPHA, text: "Hi all" }],
+    ["an auto-send", "csa", { conversation: "48:notes", text: "Note", autoSendTo: [ACCOUNT.a.email, ACCOUNT.b.email] }],
+    ["a window send", "csa", { conversation: ALPHA, text: "Hi all" }],
+    ["an auto-send, to: my own address", "mt", { to: [ACCOUNT.a.email], text: "Note", autoSendTo: [ACCOUNT.a.email, ACCOUNT.b.email] }],
+    ["a window send, to: someone else", "csa", { to: [JAMIE.email], text: "Hi Jamie" }],
   ] as const;
 
-  it.each(SENDS)("Alex known, a switch to Sam and back to Alex during the lookups (%s): refused, no window, nothing posted", async (_, params) => {
-    const { list, csa } = holdFirstList();
-    const { fake, worker } = await warm("a", servicesWith({ csa }));
+  it.each(SENDS)("Alex known, a switch to Sam and back to Alex during the lookups (%s): refused, no window, nothing posted", async (_, service, params) => {
+    const { lookup, hold } = holdFirst();
+    const { fake, worker } = await warm("a", servicesWith({ [service]: hold }));
     const result = worker.handlers.requestSend(params);
-    await vi.waitFor(() => expect(fake.count("csa")).toBe(1));
+    await vi.waitFor(() => expect(fake.count(service)).toBe(1));
 
     await teamsShows(fake, "b");
     await teamsShows(fake, "a");
-    list.open();
+    lookup.open();
 
     await answerOrWindow(fake, result);
     expect(windows(fake)).toBe(0);
@@ -379,13 +382,13 @@ describe("warm: a switch during the lookups", () => {
   });
 
   it("Alex known, a switch to Sam during the lookups, with Sam's address on autoSendTo: judged with Alex's addresses, never Sam's; refused, nothing posted", async () => {
-    const { list, csa } = holdFirstList();
-    const { fake, worker } = await warm("a", servicesWith({ csa }));
+    const { lookup, hold } = holdFirst();
+    const { fake, worker } = await warm("a", servicesWith({ csa: hold }));
     const result = worker.handlers.requestSend({ conversation: "48:notes", text: "Note", autoSendTo: [ACCOUNT.b.email] });
     await vi.waitFor(() => expect(fake.count("csa")).toBe(1));
 
     await teamsShows(fake, "b");
-    list.open();
+    lookup.open();
 
     await answerOrWindow(fake, result);
     expect(windows(fake)).toBe(0);
