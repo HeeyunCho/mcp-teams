@@ -1392,11 +1392,21 @@ export const handlers = {
     if (to?.length) {
       if (conversation) throw new Error("Give either a conversation or people (to), not both.");
       if (threadId || subject) throw new Error("reply_to and subject are for channels; a new chat takes people and an optional title.");
-      if (!account) throw new Error(NOT_SHOWN);
-      const me = `8:orgid:${account}`;
+      // A cold start: the chat list waits for Teams' session (at most as long as any lookup does),
+      // which shows who is signed in. That account, read once, is "me" for the rest, and the send
+      // goes only through the window, unless a switch landed meanwhile.
+      let who = account;
+      if (!who) {
+        await teamsAndChats(false, ctx).catch(() => ctx?.check());
+        who = await signedInAccount();
+        if (switches !== accountSwitches) return { sent: false, reason: ACCOUNT_CHANGED_BEFORE };
+        if (!who) throw new Error(NOT_SHOWN);
+      }
+      const me = `8:orgid:${who}`;
       if (allow.length && !title && (await sendsToMeAlone(to, me, allow, ctx))) {
         if (switches !== accountSwitches) return { sent: false, reason: ACCOUNT_CHANGED_BEFORE };
-        return sendWithoutConfirming({ conversation: NOTES_TO_SELF, text: String(text) }, ctx, account);
+        const note = { conversation: NOTES_TO_SELF, text: String(text) };
+        return account ? sendWithoutConfirming(note, ctx, account) : askUserToConfirm(note, ctx, who);
       }
       const people = await resolvePeople(to, me, ctx);
       if (title && people.length < 2) throw new Error("A title is only for group chats (two or more people besides you).");
@@ -1405,7 +1415,7 @@ export const handlers = {
         ? { conversation: { id: existing.id, kind: existing.kind, title: existing.title }, people, text: String(text), existingChat: true }
         : { conversation: null, newChat: { members: people.map((p) => p.mri), title: title ?? null }, people, text: String(text) };
       if (switches !== accountSwitches) return { sent: false, reason: ACCOUNT_CHANGED_BEFORE };
-      return askUserToConfirm(request, ctx, account);
+      return askUserToConfirm(request, ctx, who);
     }
     const conv = await resolve(conversation, ctx);
     if (threadId && conv.kind !== "channel") throw new Error("reply_to is only for channel posts; in a chat, just send the message.");

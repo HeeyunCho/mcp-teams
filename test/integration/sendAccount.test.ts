@@ -287,6 +287,7 @@ describe("cold start: to:", () => {
     expect(windows(fake)).toBe(0);
     await expect(result).resolves.toEqual({ sent: false, reason: CHANGED_BEFORE });
     expect(posts(fake)).toEqual([]);
+    expect(fake.count("substrate")).toBe(0); // nobody is looked up as Sam for a send that won't go
   });
 
   it("cold start: to:, with no account shown within the wait (tokens that don't say who): refused after looking, nothing posted", async () => {
