@@ -39,7 +39,8 @@ describe("readBuildInfo", () => {
   });
 });
 
-describe("scripts/write-build-info.mjs", () => {
+// Each test starts node two or three times; a busy machine can make that take longer than 5 s.
+describe("scripts/write-build-info.mjs", { timeout: 30_000 }, () => {
   /** An icon's first bytes: binary, with a \r\n in it. */
   const PNG = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
 

@@ -146,7 +146,8 @@ describe("restartNeeded", () => {
 
 // #100: builds written by scripts/write-build-info.mjs (a copy of it in the temporary project), as
 // `npm run build` writes them after tsc.
-describe("restartNeeded after a rebuild", () => {
+// Each test starts node twice; a busy machine can make that take longer than 5 s.
+describe("restartNeeded after a rebuild", { timeout: 30_000 }, () => {
   function project() {
     mkdirSync(join(root, "scripts"));
     copyFileSync("scripts/write-build-info.mjs", join(root, "scripts", "write-build-info.mjs"));
