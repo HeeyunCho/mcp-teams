@@ -8,7 +8,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { registerTools } from "../../src/tools.js";
 import { bridgeHarness, TOKEN, type BridgeHarness } from "../helpers/bridgeHarness.js";
 import { until } from "../helpers/timing.js";
-import { connectWorker, createFakeChrome, loadWorker, ME_OID, networkError, openedSockets, reply, TEAMS_ORIGIN, timedOut, type FakeChrome, type SentRequest, type Worker } from "../helpers/fakeChrome.js";
+import { connectWorker, createFakeChrome, loadWorker, ME_OID, networkError, openedSockets, stopWorkers, reply, TEAMS_ORIGIN, timedOut, type FakeChrome, type SentRequest, type Worker } from "../helpers/fakeChrome.js";
 
 const CHAT = "19:contoso-launch@thread.v2";
 const ALEX = "8:orgid:00000000-0000-4000-8000-00000000000a";
@@ -22,6 +22,8 @@ let link: { disconnect: () => Promise<void> } | undefined;
 
 afterEach(async () => {
   await link?.disconnect();
+  // No retry may wait to run after the test, without its fake chrome (#99).
+  stopWorkers();
   link = undefined;
   await h?.cleanup();
   h = undefined;

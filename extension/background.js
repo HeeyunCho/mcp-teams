@@ -1826,6 +1826,21 @@ function reconnectNow() {
   retryMs = RETRY_MIN_MS;
 }
 
+let reconnecting = true; // false only after stopReconnecting()
+
+/**
+ * For tests only (nothing in the extension calls it): the worker never connects again, and no
+ * retry or watchdog is left waiting. A test's teardown calls it before the hub's connections end
+ * and its fake chrome goes, since a retry would otherwise run connect() without chrome.
+ */
+export function stopReconnecting() {
+  reconnecting = false;
+  clearTimeout(retryTimer);
+  retryTimer = null;
+  clearTimeout(watchdog?.timer);
+  watchdog = null;
+}
+
 /**
  * The pairing token: one saved under Advanced, else the one setup wrote into this
  * folder (pairing.json, only in the installed copy). Null when there is none.
@@ -1847,7 +1862,7 @@ async function pairingToken(saved) {
  * the port gets nothing.
  */
 async function connect() {
-  if (starting || (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING))) return;
+  if (!reconnecting || starting || (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING))) return;
   clearTimeout(retryTimer);
   retryTimer = null;
   starting = true;
@@ -1863,7 +1878,8 @@ async function connect() {
   } finally {
     starting = false;
   }
-  if (ws) return;
+  // stopReconnecting() may have run while the storage read was waiting.
+  if (ws || !reconnecting) return;
   state = "connecting";
   const socket = new WebSocket(`ws://127.0.0.1:${port || DEFAULT_PORT}`);
   ws = socket;
@@ -1932,7 +1948,7 @@ async function connect() {
     // When a server session ends, another one takes over the port within a second:
     // retry soon, backing off to the alarm's pace.
     clearTimeout(retryTimer);
-    retryTimer = setTimeout(connect, retryMs);
+    retryTimer = reconnecting ? setTimeout(connect, retryMs) : null;
     retryMs = Math.min(retryMs * 2, RETRY_MAX_MS);
     if (state === "unauthorized" && !authed && lastError) {
       // refuse() said why.

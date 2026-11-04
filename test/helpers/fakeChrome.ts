@@ -350,6 +350,20 @@ export interface Worker {
   pendingSendCount: () => number;
   /** How long the worker waits for a ping from a hub whose welcome declares no heartbeatMs. */
   HEARTBEAT_TIMEOUT_MS: number;
+  /** The worker never connects again and leaves no retry waiting (tests only; see stopWorkers). */
+  stopReconnecting: () => void;
+}
+
+/** Every worker loadWorker loaded that stopWorkers hasn't stopped yet. */
+const loadedWorkers: Worker[] = [];
+
+/**
+ * Stops every worker loaded since the last call from connecting again: no retry is left waiting
+ * that would run after the test, without its fake chrome. Call it in afterEach after disconnect()
+ * (which needs the worker to reconnect) and before the hub's connections end or globals are unstubbed.
+ */
+export function stopWorkers() {
+  for (const w of loadedWorkers.splice(0)) w.stopReconnecting();
 }
 
 /** WebSockets the worker opened while loaded by loadWorker (none expected outside Chrome). */
@@ -385,7 +399,9 @@ export async function loadWorker(fake: FakeChrome): Promise<Worker> {
   // As in Chrome's service worker; Node 20 (CI) has no navigator, Node 21+ one without brands.
   vi.stubGlobal("navigator", { userAgentData: { brands: [{ brand: "Google Chrome", version: "130" }] } });
   // @ts-expect-error plain JS service worker without types
-  return import("../../extension/background.js");
+  const worker: Worker = await import("../../extension/background.js");
+  loadedWorkers.push(worker);
+  return worker;
 }
 
 /**

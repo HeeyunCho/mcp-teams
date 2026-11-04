@@ -4,7 +4,7 @@
 // still fail. The real worker (extension/background.js) under a fake chrome.
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { bridgeHarness, TOKEN, type BridgeHarness } from "../helpers/bridgeHarness.js";
-import { BASES, connectWorker, createFakeChrome, loadWorker, ME_OID, openedSockets, reply, type FakeChrome, type SentRequest } from "../helpers/fakeChrome.js";
+import { BASES, connectWorker, createFakeChrome, loadWorker, ME_OID, openedSockets, stopWorkers, reply, type FakeChrome, type SentRequest } from "../helpers/fakeChrome.js";
 
 const ME = `8:orgid:${ME_OID}`;
 const MY_EMAIL = "pat.lee@contoso.example";
@@ -54,6 +54,8 @@ let link: { disconnect: () => Promise<void> } | undefined;
 
 afterEach(async () => {
   await link?.disconnect();
+  // No retry may wait to run after the test, without its fake chrome (#99).
+  stopWorkers();
   link = undefined;
   await h?.cleanup();
   h = undefined;
