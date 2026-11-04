@@ -1575,7 +1575,7 @@ async function myAddressesOrNone(me, ctx) {
 
 /**
  * `to` is just me (my MRI, or one of my own addresses), and one of my addresses is allowed.
- * `me`: the MRI of the account the send started with (see isMeAlone).
+ * `me`: the MRI of the account the send rests on, read once by requestSend (see isMeAlone).
  */
 async function sendsToMeAlone(to, me, allow, ctx) {
   if (to.length !== 1) return false;
