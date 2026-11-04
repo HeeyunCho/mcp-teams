@@ -1395,6 +1395,7 @@ export const handlers = {
       if (!account) throw new Error(NOT_SHOWN);
       const me = `8:orgid:${account}`;
       if (allow.length && !title && (await sendsToMeAlone(to, me, allow, ctx))) {
+        if (switches !== accountSwitches) return { sent: false, reason: ACCOUNT_CHANGED_BEFORE };
         return sendWithoutConfirming({ conversation: NOTES_TO_SELF, text: String(text) }, ctx, account);
       }
       const people = await resolvePeople(to, me, ctx);
@@ -1403,6 +1404,7 @@ export const handlers = {
       const request = existing
         ? { conversation: { id: existing.id, kind: existing.kind, title: existing.title }, people, text: String(text), existingChat: true }
         : { conversation: null, newChat: { members: people.map((p) => p.mri), title: title ?? null }, people, text: String(text) };
+      if (switches !== accountSwitches) return { sent: false, reason: ACCOUNT_CHANGED_BEFORE };
       return askUserToConfirm(request, ctx, account);
     }
     const conv = await resolve(conversation, ctx);
@@ -1415,8 +1417,12 @@ export const handlers = {
     }
     const request = { conversation: conv, text: String(text), threadId: threadId ?? null, subject: subject ?? null, replyingTo };
     // Without an account known from the start, the decision to send goes to the user (the window).
-    if (account && allow.length && !threadId && !subject && (await isMeAlone(conv, allow, ctx))) return sendWithoutConfirming(request, ctx, account);
-    if (account) return askUserToConfirm(request, ctx, account);
+    if (account) {
+      const alone = allow.length && !threadId && !subject && (await isMeAlone(conv, `8:orgid:${account}`, allow, ctx));
+      // Lookups that spanned a switch (even one back to this account) may have been another account's.
+      if (switches !== accountSwitches) return { sent: false, reason: ACCOUNT_CHANGED_BEFORE };
+      return alone ? sendWithoutConfirming(request, ctx, account) : askUserToConfirm(request, ctx, account);
+    }
     // A cold start: the lookups may have shown who is signed in. The window rests on that account,
     // unless a switch landed since the send began, when they may have been another account's.
     const shown = await signedInAccount();
@@ -1557,7 +1563,10 @@ async function myAddressesOrNone(me, ctx) {
   });
 }
 
-/** `to` is just me (my MRI, or one of my own addresses), and one of my addresses is allowed. */
+/**
+ * `to` is just me (my MRI, or one of my own addresses), and one of my addresses is allowed.
+ * `me`: the MRI of the account the send started with (see isMeAlone).
+ */
 async function sendsToMeAlone(to, me, allow, ctx) {
   if (to.length !== 1) return false;
   const q = String(to[0]).trim().toLowerCase();
@@ -1568,10 +1577,11 @@ async function sendsToMeAlone(to, me, allow, ctx) {
   return mine.some((a) => allow.includes(a));
 }
 
-/** The resolved conversation reaches me alone, and one of my addresses is allowed. */
-async function isMeAlone(conv, allow, ctx) {
-  const me = await myMri();
-  if (!me) return false;
+/**
+ * The resolved conversation reaches me alone, and one of my addresses is allowed. `me`: the MRI
+ * of the account the send started with, which the judgement is for (never read again here).
+ */
+async function isMeAlone(conv, me, allow, ctx) {
   let alone = conv.id === NOTES_TO_SELF.id;
   if (!alone && conv.kind !== "channel" && conv.kind !== "meeting") {
     // Members from a fresh list: a chat that has anyone else in it is never auto-sent.
