@@ -16,6 +16,8 @@ const ACCOUNT = {
   b: { oid: "00000000-0000-4000-8000-0000000000b1", name: "Sam Roe", email: "sam.roe@fabrikam.example" },
 };
 type Account = keyof typeof ACCOUNT;
+// Someone else to write to: Jamie Poe, found by people search.
+const JAMIE = { mri: "8:orgid:00000000-0000-4000-8000-0000000000c1", name: "Jamie Poe", email: "jamie.poe@contoso.example" };
 const ACCOUNTS = Object.keys(ACCOUNT) as Account[];
 
 const fakeJwt = (claims: object) => `${[{ alg: "none", typ: "JWT" }, claims].map((o) => Buffer.from(JSON.stringify(o)).toString("base64url")).join(".")}.`;
@@ -32,6 +34,14 @@ const chatsOf = (t?: Account) => ({
   ],
 });
 
+/** People search: Jamie, and whichever account searches for its own address. */
+const searchAs = (r: SentRequest) => {
+  const t = accountOf(r);
+  const q = String((r.body as { EntityRequests: { Query: { QueryString: string } }[] }).EntityRequests[0].Query.QueryString).toLowerCase();
+  const people = [JAMIE, ...(t ? [{ mri: `8:orgid:${ACCOUNT[t].oid}`, name: ACCOUNT[t].name, email: ACCOUNT[t].email }] : [])].filter((p) => p.email === q);
+  return { Groups: [{ Suggestions: people.map((p) => ({ EntityType: "People", MRI: p.mri, DisplayName: p.name, EmailAddresses: [p.email] })) }] };
+};
+
 /** Each account's Teams; `holds` answers wait as long as the test wants (the switch lands meanwhile). */
 const servicesWith = (holds: { csa?: (r: SentRequest) => Promise<void> | void; mt?: (r: SentRequest) => Promise<void> | void } = {}) => ({
   csa: async (r: SentRequest) => {
@@ -43,6 +53,7 @@ const servicesWith = (holds: { csa?: (r: SentRequest) => Promise<void> | void; m
     const t = accountOf(r);
     return t ? (r.body as string[]).filter((m) => m === `8:orgid:${ACCOUNT[t].oid}`).map((mri) => ({ mri, displayName: ACCOUNT[t].name, email: ACCOUNT[t].email })) : [];
   },
+  substrate: searchAs,
   // As Teams would for a chat it knows: either account may post, so only the worker can refuse.
   chatsvc: (r: SentRequest) => (r.method === "POST" ? { OriginalArrivalTime: Date.parse("2026-10-18T10:00:00Z") } : { messages: [] }),
 });
@@ -59,6 +70,7 @@ async function teamsShows(fake: FakeChrome, t: Account) {
   await fake.fire("beforeSendHeaders", { url: `${BASES.csa}/api/v1/teams/users/me?isPrefetch=false`, initiator: TEAMS_ORIGIN, requestHeaders: [{ name: "Authorization", value: bearer(t) }] });
   await fake.fire("beforeSendHeaders", { url: `${BASES.chatsvc}/v1/users/ME/conversations?view=x`, initiator: TEAMS_ORIGIN, requestHeaders: [{ name: "Authentication", value: skype(t) }] });
   await fake.fire("beforeSendHeaders", { url: `${BASES.mt}/beta/users/${ACCOUNT[t].oid}/capabilities`, initiator: TEAMS_ORIGIN, requestHeaders: [{ name: "Authorization", value: bearer(t) }] });
+  await fake.fire("beforeSendHeaders", { url: `${BASES.substrate}/search/api/v1/suggestions?scenario=peoplepicker.newChat`, initiator: TEAMS_ORIGIN, requestHeaders: [{ name: "Authorization", value: bearer(t) }] });
 }
 
 /** A worker where Teams hasn't shown anyone yet: no sessions, no account. */
@@ -97,7 +109,10 @@ const clickSend = (fake: FakeChrome) => {
   const id = /id=([^&]+)/.exec(fake.spies.windowsCreate.mock.calls[0][0]!.url!)![1];
   return fake.pageMessage(`confirm.html?id=${id}`, { type: "confirm:decide", id, approve: true });
 };
+/** The message posts (not the creation of a chat). */
+const messagePosts = (fake: FakeChrome) => posts(fake).filter((r) => /\/messages$/.test(r.path));
 const CHANGED = "The signed-in Teams account changed since this was confirmed; nothing was sent.";
+const CHANGED_BEFORE = "The signed-in Teams account changed while this send was being prepared; nothing was sent. Check who is signed in, then try again.";
 
 describe("cold start: the confirmation window", () => {
   it("cold start: the window opened once Teams showed Alex, clicked after the switch to Sam: nothing is posted", async () => {
@@ -205,7 +220,7 @@ describe("cold start: auto-send", () => {
     expect(posts(fake).map(accountOf)).toEqual(["a"]);
   });
 
-  it("cold start: to: my own address, with Alex shown just after the send read who is signed in: no post without a window", async () => {
+  it("cold start: to: my own address, with Alex shown just after the send read who is signed in: the window opens, and nothing is posted until the click", async () => {
     const { fake, worker } = await cold();
     const get = fake.chrome.storage.session.get;
     const read = get.getMockImplementation()!;
@@ -220,8 +235,72 @@ describe("cold start: auto-send", () => {
     await answerOrWindow(fake, result);
 
     expect(posts(fake)).toEqual([]);
+    expect(windows(fake)).toBe(1);
+    await clickSend(fake);
+    const r = await result;
+    expect(r).toMatchObject({ sent: true });
+    expect(r).not.toHaveProperty("autoSent");
+    expect(posts(fake).map((p) => [accountOf(p), decodeURIComponent(p.path)])).toEqual([["a", "/v1/users/ME/conversations/48:notes/messages"]]);
+  });
+});
+
+describe("cold start: to:", () => {
+  it("cold start: to: another person, with Teams showing Alex during the send's wait: the window opens for Alex, and the click posts once as Alex", async () => {
+    const { fake, worker } = await cold();
+    const { result } = await sendAsTeamsWakes(fake, () => worker.handlers.requestSend({ to: [JAMIE.email], text: "Hi Jamie", autoSendTo: [ACCOUNT.a.email] }), "a");
+    await windowOpened(fake);
+    expect(posts(fake)).toEqual([]);
+
+    await clickSend(fake);
+
+    const r = await result;
+    expect(r).toMatchObject({ sent: true, newChat: true });
+    expect(r).not.toHaveProperty("autoSent");
+    expect(messagePosts(fake).map(accountOf)).toEqual(["a"]);
+    expect(posts(fake).map(accountOf)).toEqual(["a", "a"]); // the new chat, then the message
+  });
+
+  it("cold start: to: my own address with autoSendTo, with Teams showing Alex during the send's wait: the window opens, no post until the click", async () => {
+    const { fake, worker } = await cold();
+    const { result } = await sendAsTeamsWakes(fake, () => worker.handlers.requestSend({ to: [ACCOUNT.a.email], text: "Note", autoSendTo: [ACCOUNT.a.email] }), "a");
+    await answerOrWindow(fake, result);
+
+    expect(posts(fake)).toEqual([]);
+    expect(windows(fake)).toBe(1);
+    await clickSend(fake);
+    const r = await result;
+    expect(r).toMatchObject({ sent: true });
+    expect(r).not.toHaveProperty("autoSent");
+    expect(posts(fake).map(accountOf)).toEqual(["a"]);
+  });
+
+  it("cold start: to:, with a switch from Alex to Sam while the send is prepared: no window, nothing posted", async () => {
+    const list = gate();
+    const { fake, worker } = await cold(servicesWith({ csa: (r) => (accountOf(r) === "a" ? list.opened : undefined) }));
+    const { result } = await sendAsTeamsWakes(fake, () => worker.handlers.requestSend({ to: [JAMIE.email], text: "Hi Jamie" }), "a");
+    await vi.waitFor(() => expect(fake.count("csa")).toBe(1));
+
+    await teamsShows(fake, "b");
+    list.open();
+
+    await answerOrWindow(fake, result);
+    expect(windows(fake)).toBe(0);
+    await expect(result).resolves.toEqual({ sent: false, reason: CHANGED_BEFORE });
+    expect(posts(fake)).toEqual([]);
+  });
+
+  it("cold start: to:, with no account shown within the wait (tokens that don't say who): refused after looking, nothing posted", async () => {
+    const fake = createFakeChrome({ services: servicesWith() }); // opaque sessions, for nobody known
+    fake.session.delete("oid");
+    const worker = await loadWorker(fake);
+    worker.registerListeners();
+
+    const result = worker.handlers.requestSend({ to: [JAMIE.email], text: "Hi Jamie" });
+    await answerOrWindow(fake, result);
     expect(windows(fake)).toBe(0);
     await expect(result).rejects.toThrow(/hasn't shown who is signed in/);
+    expect(fake.count("csa")).toBeGreaterThan(0); // the session was waited for and used: it showed nobody
+    expect(posts(fake)).toEqual([]);
   });
 });
 
@@ -239,7 +318,7 @@ describe("auto-send's account recheck", () => {
     expect(windows(fake)).toBe(0);
   });
 
-  it.each(NOTE)("a switch during the address lookup (%s): refused at the recheck, and nothing more goes to Teams", async (_, params) => {
+  it.each(NOTE)("a switch during the address lookup (%s): refused before deciding, and nothing more goes to Teams", async (_, params) => {
     const lookup = gate();
     const { fake, worker } = await warm("a", servicesWith({ mt: () => lookup.opened }));
     const result = worker.handlers.requestSend(params);
@@ -249,7 +328,7 @@ describe("auto-send's account recheck", () => {
     const switchedAt = fake.sent.length;
     lookup.open();
 
-    await expect(result).resolves.toEqual({ sent: false, autoSent: true, reason: CHANGED });
+    await expect(result).resolves.toEqual({ sent: false, reason: CHANGED_BEFORE });
     expect(windows(fake)).toBe(0);
     expect(fake.sent.slice(switchedAt)).toEqual([]); // not even Sam's name, for a post that won't go
   });
@@ -267,5 +346,53 @@ describe("auto-send's account recheck", () => {
     await expect(result).resolves.toEqual({ sent: false, autoSent: true, reason: CHANGED });
     expect(posts(fake)).toEqual([]);
     expect(windows(fake)).toBe(0);
+  });
+});
+
+describe("warm: a switch during the lookups", () => {
+  /** Holds the send's first chat list read (Alex's), so the switch lands while the send looks things up. */
+  function holdFirstList() {
+    const list = gate();
+    let reads = 0;
+    return { list, csa: () => (++reads === 1 ? list.opened : undefined) };
+  }
+
+  const SENDS = [
+    ["an auto-send", { conversation: "48:notes", text: "Note", autoSendTo: [ACCOUNT.a.email, ACCOUNT.b.email] }],
+    ["a window send", { conversation: ALPHA, text: "Hi all" }],
+  ] as const;
+
+  it.each(SENDS)("Alex known, a switch to Sam and back to Alex during the lookups (%s): refused, no window, nothing posted", async (_, params) => {
+    const { list, csa } = holdFirstList();
+    const { fake, worker } = await warm("a", servicesWith({ csa }));
+    const result = worker.handlers.requestSend(params);
+    await vi.waitFor(() => expect(fake.count("csa")).toBe(1));
+
+    await teamsShows(fake, "b");
+    await teamsShows(fake, "a");
+    list.open();
+
+    await answerOrWindow(fake, result);
+    expect(windows(fake)).toBe(0);
+    await expect(result).resolves.toEqual({ sent: false, reason: CHANGED_BEFORE });
+    expect(posts(fake)).toEqual([]);
+  });
+
+  it("Alex known, a switch to Sam during the lookups, with Sam's address on autoSendTo: judged with Alex's addresses, never Sam's; refused, nothing posted", async () => {
+    const { list, csa } = holdFirstList();
+    const { fake, worker } = await warm("a", servicesWith({ csa }));
+    const result = worker.handlers.requestSend({ conversation: "48:notes", text: "Note", autoSendTo: [ACCOUNT.b.email] });
+    await vi.waitFor(() => expect(fake.count("csa")).toBe(1));
+
+    await teamsShows(fake, "b");
+    list.open();
+
+    await answerOrWindow(fake, result);
+    expect(windows(fake)).toBe(0);
+    await expect(result).resolves.toEqual({ sent: false, reason: CHANGED_BEFORE });
+    expect(posts(fake)).toEqual([]);
+    // The "only me" judgement is for Alex, the account the send started with: Sam's profile is never asked for.
+    const asked = fake.sent.filter((r) => r.service === "mt").flatMap((r) => r.body as string[]);
+    expect(asked).not.toContain(`8:orgid:${ACCOUNT.b.oid}`);
   });
 });
