@@ -1,6 +1,6 @@
 # Handoff: mcp-teams after 0.3.48 (2026-11-06)
 
-Repo: `the repo root` (GitHub `HeeyunCho/mcp-teams`). Branch `main`, clean, level with origin at `cbf798c chore(release): v0.3.48`.
+Repo: GitHub `HeeyunCho/mcp-teams`. Branch `main`, clean, level with origin at `cbf798c chore(release): v0.3.48`.
 
 ## Where things stand
 
