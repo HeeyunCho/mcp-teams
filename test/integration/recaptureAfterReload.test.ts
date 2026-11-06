@@ -575,15 +575,44 @@ describe("after a browser start with a Teams tab open and no session", () => {
     expect(fake.tabs.map((t) => t.id)).toEqual([1]);
   });
 
-  it("opens nothing when the session is captured, the Teams tab is asleep, or there is none", async () => {
-    for (const setup of [{ captured: ["chatsvc", "csa", "mt", "substrate"] }, { asleep: true }, { teamsTab: false }] as const) {
-      const { fake } = await reloadedWorker("asleep" in setup ? {} : setup);
-      if ("asleep" in setup) fake.tabs[0].discarded = true;
-      chromeReports(fake, "onStartup");
-      alarm(fake);
-      await pass(120_000);
-      expect(fake.spies.tabsCreate).not.toHaveBeenCalled();
-      vi.useRealTimers();
-    }
+  it.each([
+    ["the session is captured", { captured: ["chatsvc", "csa", "mt", "substrate"] }, false],
+    ["the Teams tab is asleep", {}, true],
+    ["there is no Teams tab", { teamsTab: false }, false],
+  ] as const)("opens nothing when %s", async (_name, options, asleep) => {
+    const { fake } = await reloadedWorker(options as Parameters<typeof createFakeChrome>[0]);
+    if (asleep) fake.tabs[0].discarded = true;
+    chromeReports(fake, "onStartup");
+    alarm(fake);
+    await pass(120_000);
+    expect(fake.spies.tabsCreate).not.toHaveBeenCalled();
+  });
+
+  it("a worker suspended while the background tab was open checks again; one that restarts after the check doesn't open a second tab", async () => {
+    const { fake } = await reloadedWorker();
+    chromeReports(fake, "onStartup");
+    await pass(20_000); // the background tab is open, the run not finished
+    expect(fake.spies.tabsCreate).toHaveBeenCalledTimes(1);
+    expect(fake.session.has("startRecaptureChecked")).toBe(false);
+
+    // Chrome suspends the worker; a new one starts in the same browser session.
+    vi.useRealTimers();
+    const next = await loadWorker(fake);
+    next.registerListeners();
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+    alarm(fake); // closes the leftover tab, then runs the check again
+    await pass(30_000);
+    expect(fake.spies.tabsCreate).toHaveBeenCalledTimes(2);
+    await pass(120_000); // Teams never signs in there: the run finishes and sets the flag
+    expect(fake.session.get("startRecaptureChecked")).toBe(true);
+
+    // Another worker restart in the same browser session: nothing more is opened.
+    vi.useRealTimers();
+    const third = await loadWorker(fake);
+    third.registerListeners();
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+    alarm(fake);
+    await pass(120_000);
+    expect(fake.spies.tabsCreate).toHaveBeenCalledTimes(2);
   });
 });

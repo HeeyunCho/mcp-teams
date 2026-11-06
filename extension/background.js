@@ -451,32 +451,33 @@ async function awakeTeamsTabs() {
 function recaptureAfterReload() {
   recapturing ??= (async () => {
     const since = Date.now();
-    if (await getCapture("chatsvc")) return;
+    if (await getCapture("chatsvc")) return true;
     const awake = await awakeTeamsTabs();
-    if (!awake.length) return;
-    if (await waitForCapture("chatsvc", since, RECAPTURE_GRACE_MS)) return;
+    if (!awake.length) return false; // nothing decided: no Teams tab loaded and awake
+    if (await waitForCapture("chatsvc", since, RECAPTURE_GRACE_MS)) return true;
     await recaptureInHelperTab("chatsvc", teamsOrigin(awake[0]), since);
+    return true;
   })()
-    .catch(() => {})
+    .catch(() => false)
     .finally(() => (recapturing = null));
   return recapturing;
 }
 
 // Set in chrome.storage.session once this browser session's (or extension load's) check for a
-// missing chat session has run, so it runs once: a Teams tab stuck at sign-in gets one
+// missing chat session has finished, so it runs once: a Teams tab stuck at sign-in gets one
 // background tab, not one per alarm.
 const START_CHECK_KEY = "startRecaptureChecked";
 
 /**
  * After a browser start, an extension reload or update, and on each reconnect alarm: once per
- * browser session, recaptureAfterReload. While the Teams tab is still loading, or is asleep,
- * nothing is decided yet: a later alarm checks again.
+ * browser session, recaptureAfterReload (calls while it runs share that run). The flag is set
+ * only once the run has finished and decided something, so a worker suspended mid-run, or a
+ * Teams tab still loading or asleep, leaves it unset: a later alarm checks again.
+ * Use this, not recaptureAfterReload, for any new trigger.
  */
 async function recaptureOnce() {
   if ((await chrome.storage.session.get(START_CHECK_KEY))[START_CHECK_KEY]) return;
-  if (!(await getCapture("chatsvc")) && !(await awakeTeamsTabs()).length) return;
-  await chrome.storage.session.set({ [START_CHECK_KEY]: true });
-  await recaptureAfterReload();
+  if (await recaptureAfterReload()) await chrome.storage.session.set({ [START_CHECK_KEY]: true });
 }
 
 /** Closes the background tab, unless the user switched to it, and forgets it. */
@@ -2126,8 +2127,9 @@ export function registerListeners() {
   chrome.storage.onChanged.addListener(onStorageChanged);
   chrome.runtime.onStartup.addListener(connect);
   chrome.runtime.onInstalled.addListener(connect);
-  // The captured sessions were cleared (see recaptureAfterReload); a browser update isn't a reload.
+  // The captured sessions were cleared (see recaptureAfterReload).
   chrome.runtime.onStartup.addListener(() => recaptureOnce().catch(() => {}));
+  // A browser update (reason "chrome_update") isn't a reload: the sessions are still there.
   chrome.runtime.onInstalled.addListener((d) => (d?.reason === "install" || d?.reason === "update") && recaptureOnce().catch(() => {}));
 }
 
