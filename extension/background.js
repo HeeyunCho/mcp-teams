@@ -370,7 +370,7 @@ const RECAPTURE_WAIT_MS = 60_000;
 const RECAPTURE_JOIN_MIN_MS = 20_000;
 // How long a call waits for a user's Teams tab that is still loading to bring the session.
 const LOADING_TAB_WAIT_MS = 30_000;
-let recapturing = null; // Promise of recaptureAfterReload while it runs, so a second report of the reload starts none
+let recapturing = null; // Promise of recaptureMissingChatSession while it runs, so a second trigger starts none
 // The background tab (one at a time), kept in chrome.storage.session so a later worker can close it.
 const HELPER_TAB_KEY = "recaptureHelperTab";
 // The background tab's run while it is open: { since, waits (Promise<capture|null>[]), tabGone, done, closing }.
@@ -448,7 +448,7 @@ async function awakeTeamsTabs() {
  * (recaptureInHelperTab). Nothing is done without a Teams tab that has loaded and is awake: one
  * still loading calls its services itself, and a discarded or unloaded one isn't woken.
  */
-function recaptureAfterReload() {
+function recaptureMissingChatSession() {
   recapturing ??= (async () => {
     const since = Date.now();
     if (await getCapture("chatsvc")) return true;
@@ -470,14 +470,14 @@ const START_CHECK_KEY = "startRecaptureChecked";
 
 /**
  * After a browser start, an extension reload or update, and on each reconnect alarm: once per
- * browser session, recaptureAfterReload (calls while it runs share that run). The flag is set
- * only once the run has finished and decided something, so a worker suspended mid-run, or a
+ * browser session, recaptureMissingChatSession (calls while it runs share that run). The flag is
+ * set only once the run has finished and decided something, so a worker suspended mid-run, or a
  * Teams tab still loading or asleep, leaves it unset: a later alarm checks again.
- * Use this, not recaptureAfterReload, for any new trigger.
+ * Use this, not recaptureMissingChatSession, for any new trigger.
  */
 async function recaptureOnce() {
   if ((await chrome.storage.session.get(START_CHECK_KEY))[START_CHECK_KEY]) return;
-  if (await recaptureAfterReload()) await chrome.storage.session.set({ [START_CHECK_KEY]: true });
+  if (await recaptureMissingChatSession()) await chrome.storage.session.set({ [START_CHECK_KEY]: true });
 }
 
 /** Closes the background tab, unless the user switched to it, and forgets it. */
@@ -2127,7 +2127,7 @@ export function registerListeners() {
   chrome.storage.onChanged.addListener(onStorageChanged);
   chrome.runtime.onStartup.addListener(connect);
   chrome.runtime.onInstalled.addListener(connect);
-  // The captured sessions were cleared (see recaptureAfterReload).
+  // The captured sessions were cleared (see recaptureMissingChatSession).
   chrome.runtime.onStartup.addListener(() => recaptureOnce().catch(() => {}));
   // A browser update (reason "chrome_update") isn't a reload: the sessions are still there.
   chrome.runtime.onInstalled.addListener((d) => (d?.reason === "install" || d?.reason === "update") && recaptureOnce().catch(() => {}));

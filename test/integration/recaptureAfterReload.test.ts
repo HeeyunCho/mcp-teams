@@ -1,10 +1,11 @@
-// After the extension reloads (an update, reload_extension), Chrome has cleared
-// chrome.storage.session, so the captured Teams sessions are gone. A Teams tab left in
-// the background may make no request of its own for a long time, so status said "session not
-// captured" until someone used Teams. The worker now gets Teams to sign in again without
-// touching the user's tab: it opens Teams in a background tab next to it, and closes that tab
-// once Teams' requests there brought the session back. The real worker (extension/background.js)
-// runs under a fake chrome; the reload is Chrome's onInstalled event for the new worker.
+// recaptureMissingChatSession (via recaptureOnce). After the extension reloads (an update,
+// reload_extension) or the browser starts, Chrome has cleared chrome.storage.session, so the
+// captured Teams sessions are gone. A Teams tab left in the background (or restored at the start)
+// may make no request of its own for a long time, so status said "session not captured" until
+// someone used Teams. The worker now gets Teams to sign in again without touching the user's tab:
+// it opens Teams in a background tab next to it, and closes that tab once Teams' requests there
+// brought the session back. The real worker (extension/background.js) runs under a fake chrome;
+// the reload is Chrome's onInstalled event for the new worker, the browser start its onStartup.
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { BASES, createFakeChrome, loadWorker, openedSockets, reply, TEAMS_ORIGIN, type FakeChrome, type Worker } from "../helpers/fakeChrome.js";
 
@@ -27,6 +28,11 @@ async function reloadedWorker(options: Parameters<typeof createFakeChrome>[0] = 
 function chromeReports(fake: FakeChrome, event: "onInstalled" | "onStartup", reason = "update") {
   for (const l of fake.chrome.runtime[event].listeners) l(event === "onInstalled" ? { reason } : undefined);
 }
+
+/** Chrome's 30 s reconnect alarm wakes the worker. */
+const alarm = (fake: FakeChrome) => {
+  for (const l of fake.chrome.alarms.onAlarm.listeners) l({ name: "reconnect" });
+};
 
 /** Teams makes a chat request with its session: Chrome shows it to the worker. */
 const teamsChatRequest = (fake: FakeChrome) =>
@@ -490,7 +496,7 @@ describe("a background tab left over from a suspended worker", () => {
     fake.session.set(HELPER_KEY, 200);
     const worker = await loadWorker(fake);
     worker.registerListeners();
-    for (const l of fake.chrome.alarms.onAlarm.listeners) l({ name: "reconnect" });
+    alarm(fake);
     return fake;
   }
 
@@ -518,11 +524,6 @@ describe("a background tab left over from a suspended worker", () => {
 // #104: a Teams tab restored at a browser start can load before the worker listens, then make no
 // call to its services while idle, so its session was never captured until someone used Teams.
 describe("after a browser start with a Teams tab open and no session", () => {
-  /** Chrome's 30 s reconnect alarm wakes the worker. */
-  const alarm = (fake: FakeChrome) => {
-    for (const l of fake.chrome.alarms.onAlarm.listeners) l({ name: "reconnect" });
-  };
-
   it("recovers it as after a reload: Teams' own tab gets its moment, then a background tab brings the session and closes", async () => {
     const { fake, worker } = await reloadedWorker();
     chromeReports(fake, "onStartup");
