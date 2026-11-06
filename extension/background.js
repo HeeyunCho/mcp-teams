@@ -102,7 +102,7 @@ const TRAFFIC_KEY = "traffic";
 const TRAFFIC_UNTIL_KEY = "trafficUntil";
 const TRAFFIC_RECORD_MS = 30 * 60_000;
 let traffic = null;
-let trafficSave = null;
+let trafficSave = null; // { timer, store }: the pending save, and the storage it goes to
 let trafficQueue = Promise.resolve();
 let trafficUntil = null; // ms since 1970 when recording ends (0: off); null until read from storage
 
@@ -123,11 +123,23 @@ function updateTraffic(fn, { ifRecording = false } = {}) {
       const next = fn(traffic);
       if (next === traffic) return;
       traffic = next;
-      clearTimeout(trafficSave);
-      trafficSave = setTimeout(() => chrome.storage.session.set({ [TRAFFIC_KEY]: traffic }), 500);
+      clearTimeout(trafficSave?.timer);
+      // The storage is taken now: the save goes where the request was recorded, whatever `chrome` is
+      // by then (in tests, the next test's fake or none).
+      const store = chrome.storage.session;
+      trafficSave = { store, timer: setTimeout(savePendingTraffic, 500) };
     })
     .catch(() => {});
   return trafficQueue;
+}
+
+/** Saves the log now if a save is pending (also for tests, instead of waiting half a second). */
+export function savePendingTraffic() {
+  if (!trafficSave) return;
+  const { store, timer } = trafficSave;
+  clearTimeout(timer);
+  trafficSave = null;
+  store.set({ [TRAFFIC_KEY]: traffic });
 }
 
 const trafficFilter = { urls: teams.TRAFFIC_URLS, types: ["xmlhttprequest", "other", "media"] };

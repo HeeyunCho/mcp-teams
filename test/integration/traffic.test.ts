@@ -27,9 +27,9 @@ describe("3.4: the traffic log records only while api_traffic turned it on", () 
     worker.registerListeners();
     await teamsCalls(fake, "users/ME/fictionalSettings");
     await teamsCalls(fake, "teams/users/ME/fictionalList");
-    await settle();
+    worker.savePendingTraffic(); // a save that would run half a second later, now
     const r = await worker.handlers.apiTraffic({});
-    await settle();
+    worker.savePendingTraffic();
     expect(r).toMatchObject({ recording: false, recorded: 0, requests: [] });
     expect(r.note).toMatch(/record: true/);
     expect(trafficWrites(fake)).toBe(0);
@@ -75,5 +75,19 @@ describe("3.4: the traffic log records only while api_traffic turned it on", () 
     worker.registerListeners();
     await teamsCalls(fake, "users/ME/fictionalSettings");
     expect(await worker.handlers.apiTraffic({})).toMatchObject({ recording: true, recorded: 1 });
+  });
+
+  // The log is saved half a second after a change. The save goes to the browser the request was
+  // recorded in, even once another fake chrome (the next test's) has taken its place, or none is left.
+  it("a pending save of the log goes to the storage of the browser it was recorded in, not to the next one's", async () => {
+    const first = createFakeChrome();
+    const worker = await loadWorker(first);
+    worker.registerListeners();
+    await worker.handlers.apiTraffic({ record: true });
+    await teamsCalls(first, "users/ME/fictionalSettings");
+    const next = createFakeChrome();
+    await loadWorker(next);
+    await vi.waitFor(async () => expect((await first.chrome.storage.session.get("traffic")).traffic).toHaveLength(1));
+    expect(await next.chrome.storage.session.get("traffic")).toEqual({});
   });
 });
