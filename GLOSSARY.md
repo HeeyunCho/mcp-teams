@@ -42,6 +42,14 @@ _Avoid_: wrapper, bootstrapper
 The folder of installed mcp-teams versions side by side, one of which is current.
 _Avoid_: cache, install dir
 
+**Bad version**:
+An installed version the launcher sets aside because it failed to start, or because it was rolled back from.
+_Avoid_: broken version, blacklisted version
+
+**Stale server**:
+A running server whose entry would now start a different version or build than the one it runs.
+_Avoid_: old server, outdated server
+
 **Handover**:
 One hub giving its place to a newer one without failing the calls it has in flight.
 _Avoid_: takeover, failover, step-down
