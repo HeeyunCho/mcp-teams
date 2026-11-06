@@ -67,6 +67,16 @@ When Teams asks to slow down (HTTP 429), mcp-teams sends nothing more to that se
 
 Several AI sessions share one connection to the browser: the first one runs it, the others go through it. They check on each other every 20 s. If the session running it stops responding (its app is suspended or hung), the others' calls fail within about 40 s with "The mcp-teams hub stopped responding; try again in a few seconds", and one of them takes over. A session that stops reading what it is sent is disconnected and reconnects. The extension reconnects by itself when it hasn't heard from the server for 45 s.
 
+### When Teams has no session
+
+`get_version` showing `teamsTabs: 1` (or more) but `sessionCaptured: false` means the extension hasn't seen Teams sign in to its chat service. The extension always keeps when the Teams tab last made a call (`lastTeamsCall`) and when it last made a signed-in one (`lastSignedInCall`), only the time and the host, and `get_version` adds a `note` naming the case:
+
+- **Stuck at sign-in**: the tab has made no signed-in call at all, or none for more than 5 minutes while it keeps making other calls. Within about a minute and a half of a browser start or an extension load, the extension tries to bring the session back by itself; if the note is still there after that, open the Teams tab and finish signing in: an account picker, a sign-in page or a prompt may be waiting there.
+- **Asleep**: the tab has made no calls for more than 5 minutes (or none at all). Click into the Teams tab, or add `teams.cloud.microsoft` to Chrome's *Always keep these sites active* (Settings > Performance) so Chrome doesn't put it to sleep.
+- **Missed by the capture**: the tab made a signed-in call to a Teams service (chat, teams, people or search) in the last 5 minutes, but no chat session was captured. Refresh the Teams tab or reload the extension; if that doesn't help, it's a bug in mcp-teams: please report it with the output of `api_traffic` (call it with `record: true`, use Teams for a minute, then call it again).
+
+These times live in the browser's session storage like the sessions themselves: a restart of the browser (or a reload of the extension) clears them.
+
 ## Setup
 
 You need [Node.js](https://nodejs.org) 20 or later, and Chrome or Edge. Then, in a terminal:
@@ -118,7 +128,7 @@ A server that is already running keeps its code when the copy on disk changes (`
 - The server and the extension prove to each other that they know the pairing token in `~/.mcp-teams/config.json`, without sending it. Setup copies it into the installed extension folder as `pairing.json`; both files can be read only by your user. So a program that takes the port while no AI app runs gets nothing from the extension, and a program posing as the extension gets no calls.
 - Teams' tokens are only ever sent to the service they were captured from.
 - Messages can contain prompt injection. The send-confirmation window is the safeguard, so read it before clicking Send. With `autoSendTo` set, messages to yourself alone skip it (see Configuration).
-- The extension may observe requests to Microsoft hosts (`*.microsoft.com`, `*.office.com`, `*.sharepoint.com` and similar), but it only records requests made by the Teams tab, only names, and only while `api_traffic` recording is on. It runs requests only in Teams tabs, and in SharePoint tabs to read transcripts.
+- The extension may observe requests to Microsoft hosts (`*.microsoft.com`, `*.office.com`, `*.sharepoint.com` and similar), but it only records requests made by the Teams tab, only names, and only while `api_traffic` recording is on. Apart from that it keeps only the time and host of the Teams tab's last call and last signed-in call (see *When Teams has no session*). It runs requests only in Teams tabs, and in SharePoint tabs to read transcripts.
 - If you also give an AI direct control of your browser or desktop, it could click the confirmation button itself. Don't combine the two if you rely on the confirmation step.
 
 ## Limitations

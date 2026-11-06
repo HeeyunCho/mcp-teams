@@ -352,6 +352,11 @@ export interface Worker {
   HEARTBEAT_TIMEOUT_MS: number;
   /** The worker never connects again and leaves no retry waiting (tests only; see stopWorkers). */
   stopReconnecting: () => void;
+  /**
+   * Saves the Teams tab's last calls now if a save is pending (#103), instead of waiting the half
+   * second. Not needed for teardown: a pending save goes to the fake chrome the call was made in.
+   */
+  savePendingCalls: () => void;
 }
 
 /** Every worker loadWorker loaded that stopWorkers hasn't stopped yet. */
