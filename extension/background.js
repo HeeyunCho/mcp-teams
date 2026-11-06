@@ -147,16 +147,19 @@ function recordRequest(details) {
  * this worker keeps them and a browser restart clears them; saved at most every half second.
  */
 const CALLS_KEY = "teamsCalls";
+const NO_CALLS = { lastTeamsCall: null, lastSignedInCall: null };
 let calls = null; // { lastTeamsCall, lastSignedInCall }: each { at (ms since 1970), host } or null; null until read
 let callsQueue = Promise.resolve();
-let callsSave = null;
+let callsSave = null; // { timer, store }: the pending save, and the storage it goes to
 
 function teamsCalls() {
-  callsQueue = callsQueue
-    .then(async () => {
-      calls ??= (await chrome.storage.session.get(CALLS_KEY))[CALLS_KEY] ?? { lastTeamsCall: null, lastSignedInCall: null };
-    })
-    .catch(() => {});
+  callsQueue = callsQueue.then(async () => {
+    try {
+      calls ??= (await chrome.storage.session.get(CALLS_KEY))[CALLS_KEY] ?? NO_CALLS;
+    } catch {
+      calls ??= NO_CALLS; // unreadable: start over rather than lose the calls from now on
+    }
+  });
   return callsQueue.then(() => calls);
 }
 
@@ -165,21 +168,22 @@ function noteCall(details) {
   // Signed in: credentials to a service whose session a capture would store (not e.g. Graph or authsvc).
   const signedIn = !!teams.serviceOf(details.url) && !!teams.pickHeaders(details.requestHeaders);
   return teamsCalls().then((held) => {
-    if (!held) return;
     calls = { lastTeamsCall: call, lastSignedInCall: signedIn ? call : held.lastSignedInCall };
-    callsSave ??= setTimeout(() => {
-      callsSave = null;
-      chrome.storage.session.set({ [CALLS_KEY]: calls }).catch(() => {});
-    }, 500);
+    if (callsSave) return;
+    // The storage is taken now: the save goes where the calls were seen, whatever `chrome` is by then
+    // (in tests, the next test's fake or none).
+    const store = chrome.storage.session;
+    callsSave = { store, timer: setTimeout(savePendingCalls, 500) };
   });
 }
 
-/** Saves the last calls now if a save is pending (tests only: their teardown, before the fake chrome goes). */
+/** Saves the last calls now if a save is pending (also for tests, instead of waiting half a second). */
 export function savePendingCalls() {
   if (!callsSave) return;
-  clearTimeout(callsSave);
+  const { store, timer } = callsSave;
+  clearTimeout(timer);
   callsSave = null;
-  chrome.storage.session.set({ [CALLS_KEY]: calls }).catch(() => {});
+  store.set({ [CALLS_KEY]: calls }).catch(() => {});
 }
 
 const callAt = (c) => (c ? { at: new Date(c.at).toISOString(), host: c.host } : null);

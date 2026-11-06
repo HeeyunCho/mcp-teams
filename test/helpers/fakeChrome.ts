@@ -352,7 +352,10 @@ export interface Worker {
   HEARTBEAT_TIMEOUT_MS: number;
   /** The worker never connects again and leaves no retry waiting (tests only; see stopWorkers). */
   stopReconnecting: () => void;
-  /** Saves the Teams tab's last calls now if a save is pending (#103), so no timer outlives the test. */
+  /**
+   * Saves the Teams tab's last calls now if a save is pending (#103), instead of waiting the half
+   * second. Not needed for teardown: a pending save goes to the fake chrome the call was made in.
+   */
   savePendingCalls: () => void;
 }
 
@@ -361,15 +364,11 @@ const loadedWorkers: Worker[] = [];
 
 /**
  * Stops every worker loaded since the last call from connecting again: no retry is left waiting
- * that would run after the test, without its fake chrome, nor a pending save of the Teams tab's last
- * calls (#103). Call it in afterEach after disconnect() (which needs the worker to reconnect) and
- * before the hub's connections end or globals are unstubbed.
+ * that would run after the test, without its fake chrome. Call it in afterEach after disconnect()
+ * (which needs the worker to reconnect) and before the hub's connections end or globals are unstubbed.
  */
 export function stopWorkers() {
-  for (const w of loadedWorkers.splice(0)) {
-    w.stopReconnecting();
-    w.savePendingCalls();
-  }
+  for (const w of loadedWorkers.splice(0)) w.stopReconnecting();
 }
 
 /** WebSockets the worker opened while loaded by loadWorker (none expected outside Chrome). */
