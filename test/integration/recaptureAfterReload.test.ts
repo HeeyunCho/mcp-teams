@@ -188,13 +188,6 @@ describe("nothing is opened", () => {
     expect(fake.spies.tabsCreate).toHaveBeenCalledTimes(1);
   });
 
-  it("on a browser start (restored tabs load, or are asleep, by themselves)", async () => {
-    const { fake } = await reloadedWorker();
-    chromeReports(fake, "onStartup");
-    await pass(120_000);
-    expect(fake.spies.tabsCreate).not.toHaveBeenCalled();
-  });
-
   it("when the Teams tab is still loading (it will call its services itself)", async () => {
     const { fake } = await reloadedWorker();
     fake.tabs[0].status = "loading";
@@ -519,5 +512,107 @@ describe("a background tab left over from a suspended worker", () => {
     const fake = await startsWith(null);
     await vi.waitFor(() => expect(fake.session.has(HELPER_KEY)).toBe(false));
     expect(fake.spies.tabsRemove).not.toHaveBeenCalled();
+  });
+});
+
+// #104: a Teams tab restored at a browser start can load before the worker listens, then make no
+// call to its services while idle, so its session was never captured until someone used Teams.
+describe("after a browser start with a Teams tab open and no session", () => {
+  /** Chrome's 30 s reconnect alarm wakes the worker. */
+  const alarm = (fake: FakeChrome) => {
+    for (const l of fake.chrome.alarms.onAlarm.listeners) l({ name: "reconnect" });
+  };
+
+  it("recovers it as after a reload: Teams' own tab gets its moment, then a background tab brings the session and closes", async () => {
+    const { fake, worker } = await reloadedWorker();
+    chromeReports(fake, "onStartup");
+    await pass(10_000);
+    expect(fake.spies.tabsCreate).not.toHaveBeenCalled(); // the grace for Teams' own tab
+    await pass(20_000);
+    expect(fake.spies.tabsCreate).toHaveBeenCalledTimes(1);
+    expect(fake.spies.tabsCreate.mock.calls[0][0]).toMatchObject({ url: `${TEAMS_ORIGIN}/`, active: false });
+    const helperId = (await fake.spies.tabsCreate.mock.results[0].value).id;
+    await teamsChatRequest(fake);
+    await pass(2_000);
+    expect(await captured(worker)).toBe(true);
+    expect(fake.spies.tabsRemove).toHaveBeenCalledWith(helperId);
+    expect(fake.spies.tabsReload).not.toHaveBeenCalled();
+    expect(fake.spies.executeScript).not.toHaveBeenCalled();
+  });
+
+  it("a Teams tab still loading at the start: nothing then; once it loaded without bringing the session, the next alarm recovers it", async () => {
+    const { fake } = await reloadedWorker();
+    fake.tabs[0].status = "loading";
+    chromeReports(fake, "onStartup");
+    alarm(fake);
+    await pass(60_000);
+    expect(fake.spies.tabsCreate).not.toHaveBeenCalled();
+    fake.tabs[0].status = "complete";
+    alarm(fake);
+    await pass(30_000);
+    expect(fake.spies.tabsCreate).toHaveBeenCalledTimes(1);
+  });
+
+  it("a Teams tab that brings the session itself in time gets no background tab", async () => {
+    const { fake, worker } = await reloadedWorker();
+    chromeReports(fake, "onStartup");
+    await pass(3_000);
+    await teamsChatRequest(fake);
+    alarm(fake);
+    await pass(60_000);
+    expect(await captured(worker)).toBe(true);
+    expect(fake.spies.tabsCreate).not.toHaveBeenCalled();
+  });
+
+  it("opens one background tab at most per browser session, even when Teams never signs in there (stuck at sign-in)", async () => {
+    const { fake } = await reloadedWorker();
+    chromeReports(fake, "onStartup");
+    for (let i = 0; i < 10; i++) {
+      alarm(fake);
+      await pass(30_000);
+    }
+    expect(fake.spies.tabsCreate).toHaveBeenCalledTimes(1);
+    expect(fake.tabs.map((t) => t.id)).toEqual([1]);
+  });
+
+  it.each([
+    ["the session is captured", { captured: ["chatsvc", "csa", "mt", "substrate"] }, false],
+    ["the Teams tab is asleep", {}, true],
+    ["there is no Teams tab", { teamsTab: false }, false],
+  ] as const)("opens nothing when %s", async (_name, options, asleep) => {
+    const { fake } = await reloadedWorker(options as Parameters<typeof createFakeChrome>[0]);
+    if (asleep) fake.tabs[0].discarded = true;
+    chromeReports(fake, "onStartup");
+    alarm(fake);
+    await pass(120_000);
+    expect(fake.spies.tabsCreate).not.toHaveBeenCalled();
+  });
+
+  it("a worker suspended while the background tab was open checks again; one that restarts after the check doesn't open a second tab", async () => {
+    const { fake } = await reloadedWorker();
+    chromeReports(fake, "onStartup");
+    await pass(20_000); // the background tab is open, the run not finished
+    expect(fake.spies.tabsCreate).toHaveBeenCalledTimes(1);
+    expect(fake.session.has("startRecaptureChecked")).toBe(false);
+
+    // Chrome suspends the worker; a new one starts in the same browser session.
+    vi.useRealTimers();
+    const next = await loadWorker(fake);
+    next.registerListeners();
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+    alarm(fake); // closes the leftover tab, then runs the check again
+    await pass(30_000);
+    expect(fake.spies.tabsCreate).toHaveBeenCalledTimes(2);
+    await pass(120_000); // Teams never signs in there: the run finishes and sets the flag
+    expect(fake.session.get("startRecaptureChecked")).toBe(true);
+
+    // Another worker restart in the same browser session: nothing more is opened.
+    vi.useRealTimers();
+    const third = await loadWorker(fake);
+    third.registerListeners();
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+    alarm(fake);
+    await pass(120_000);
+    expect(fake.spies.tabsCreate).toHaveBeenCalledTimes(2);
   });
 });
