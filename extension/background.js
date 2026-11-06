@@ -139,7 +139,7 @@ export function savePendingTraffic() {
   const { store, timer } = trafficSave;
   clearTimeout(timer);
   trafficSave = null;
-  store.set({ [TRAFFIC_KEY]: traffic });
+  store.set({ [TRAFFIC_KEY]: traffic }).catch(() => {}); // kept in memory: the next change saves again
 }
 
 const trafficFilter = { urls: teams.TRAFFIC_URLS, types: ["xmlhttprequest", "other", "media"] };
