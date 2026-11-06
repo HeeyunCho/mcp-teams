@@ -103,12 +103,27 @@ process.stdin.on("close", shutdown);
 // itself when it connects, see bridge.ts).
 void (async () => {
   if (!extensionUpdated) return;
-  for (const end = Date.now() + 120_000; !bridge.connected && Date.now() < end; ) await new Promise((r) => setTimeout(r, 1_000));
-  if (!bridge.connected) return;
-  try {
-    const { before, after } = await bridge.reloadExtension();
-    console.error(`[mcp-teams ${SERVER_VERSION}] extension updated: ${before ?? "?"} → ${after}`);
-  } catch (err) {
-    console.error(`[mcp-teams] extension update needs a reload in the browser: ${(err as Error).message}`);
+  // #111: right after an update, the hub often changes hands (this newer server makes an older
+  // hub step down), and a reload asked meanwhile fails. Try again until the deadline, rather than
+  // leave the old extension running against the new files.
+  const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+  // At most 3 reloads: an extension loaded from another folder never comes back newer.
+  let lastError = "the extension never connected";
+  for (let tries = 0, end = Date.now() + 180_000; tries < 3 && Date.now() < end; await sleep(5_000)) {
+    if (!bridge.connected) continue;
+    tries++;
+    try {
+      const { before, after } = await bridge.reloadExtension();
+      if (isNewer(SERVER_VERSION, after)) {
+        lastError = `it came back as ${after}`;
+        continue;
+      }
+      console.error(`[mcp-teams ${SERVER_VERSION}] extension updated: ${before ?? "?"} → ${after}`);
+      return;
+    } catch (err) {
+      lastError = (err as Error).message;
+    }
   }
+  // From 0.3.47 on, the extension also reloads itself when its folder holds a newer version.
+  console.error(`[mcp-teams] extension update needs a reload in the browser: ${lastError}`);
 })();

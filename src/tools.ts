@@ -117,6 +117,12 @@ export function registerTools(server: McpServer, bridge: ExtensionBridge, config
           : {}),
         versionsMatch: bridge.extension ? bridge.extension.version === serverVersion : null,
         bridge: bridge.listenError ?? (bridge.connected ? "connected" : "waiting for extension"),
+        // #111: what the user can do; the extension tries to connect every 30 s on its own.
+        ...(bridge.connected || bridge.listenError
+          ? {}
+          : {
+              hint: "No browser extension is connected. Open Chrome or Edge (the extension connects within 30 s). If it stays disconnected, open chrome://extensions, reload mcp-teams and look for errors there; then reload the Teams tab.",
+            }),
         // hub: this session owns the port; peer: it forwards through another session's server.
         role: bridge.role,
         ...(bridge.role === "peer" ? { hubServer: bridge.hubVersion } : {}),
