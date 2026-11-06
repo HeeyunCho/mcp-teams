@@ -61,3 +61,22 @@ export function sessionNote(status: TeamsStatus | null | undefined, now: number)
   }
   return null;
 }
+
+/**
+ * The worker's error for a call that found no chat, team list or people session (SERVICE_HELP in
+ * extension/background.js), up to its generic remedy. Search's (substrate) has a remedy of its own.
+ */
+const MISSING_SESSION = /^(Teams' (?:chat|team list|people) session is not available\.) Reload the Teams tab and try again\.$/;
+
+/** Whether a failed call's error is a missing session that sessionNote may explain. */
+export const isMissingSession = (message: string) => MISSING_SESSION.test(message);
+
+/**
+ * A failed call's error with the generic remedy replaced by sessionNote's, or null to keep the error
+ * as it is (not a missing session, or nothing to explain).
+ */
+export function failedCallNote(message: string, status: TeamsStatus | null | undefined, now: number): string | null {
+  const missing = MISSING_SESSION.exec(message);
+  const note = missing && sessionNote(status, now);
+  return note ? `${missing[1]} ${note}` : null;
+}

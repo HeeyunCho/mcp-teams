@@ -75,6 +75,8 @@ Several AI sessions share one connection to the browser: the first one runs it, 
 - **Asleep**: the tab has made no calls for more than 5 minutes (or none at all). Click into the Teams tab, or add `teams.cloud.microsoft` to Chrome's *Always keep these sites active* (Settings > Performance) so Chrome doesn't put it to sleep.
 - **Missed by the capture**: the tab made a signed-in call to a Teams service (chat, teams, people or search) in the last 5 minutes, but no chat session was captured. Refresh the Teams tab or reload the extension; if that doesn't help, it's a bug in mcp-teams: please report it with the output of `api_traffic` (call it with `record: true`, use Teams for a minute, then call it again).
 
+A tool call that fails because the chat, team list or people session is missing gives the same note in place of "Reload the Teams tab and try again" (e.g. "Teams' chat session is not available. The Teams tab hasn't made a signed-in call since …"). When there is nothing to name (the chat session is there, or the extension is older than 0.3.46), and for search's session, the error stays as it was.
+
 These times live in the browser's session storage like the sessions themselves: a restart of the browser (or a reload of the extension) clears them.
 
 ## Setup
