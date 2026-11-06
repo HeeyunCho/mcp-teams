@@ -434,19 +434,25 @@ async function helperTabId() {
   return tabId ?? null;
 }
 
+/** The Teams tabs that have loaded and are awake (not discarded or unloaded). */
+async function awakeTeamsTabs() {
+  return (await chrome.tabs.query({ url: TEAMS_URLS })).filter((t) => TEAMS_TAB.test(t.url ?? "") && !t.discarded && t.status === "complete");
+}
+
 /**
- * Chrome clears chrome.storage.session when the extension is reloaded or updated, so the
- * captured sessions are gone; a Teams tab left in the background may not call its services
- * again for a long time. Unless Teams does so within RECAPTURE_GRACE_MS, this gets the chat
- * session back through the background tab (recaptureInHelperTab). Nothing is done without a
- * Teams tab that has loaded and is awake: one still loading calls its services itself, and a
- * discarded or unloaded one isn't woken.
+ * Chrome clears chrome.storage.session when the extension is reloaded or updated, and when the
+ * browser restarts, so the captured sessions are gone; a Teams tab left in the background may
+ * not call its services again for a long time (a tab restored at a browser start may even have
+ * made its first calls before this worker listened). Unless Teams does so within
+ * RECAPTURE_GRACE_MS, this gets the chat session back through the background tab
+ * (recaptureInHelperTab). Nothing is done without a Teams tab that has loaded and is awake: one
+ * still loading calls its services itself, and a discarded or unloaded one isn't woken.
  */
 function recaptureAfterReload() {
   recapturing ??= (async () => {
     const since = Date.now();
     if (await getCapture("chatsvc")) return;
-    const awake = (await chrome.tabs.query({ url: TEAMS_URLS })).filter((t) => TEAMS_TAB.test(t.url ?? "") && !t.discarded && t.status === "complete");
+    const awake = await awakeTeamsTabs();
     if (!awake.length) return;
     if (await waitForCapture("chatsvc", since, RECAPTURE_GRACE_MS)) return;
     await recaptureInHelperTab("chatsvc", teamsOrigin(awake[0]), since);
@@ -454,6 +460,23 @@ function recaptureAfterReload() {
     .catch(() => {})
     .finally(() => (recapturing = null));
   return recapturing;
+}
+
+// Set in chrome.storage.session once this browser session's (or extension load's) check for a
+// missing chat session has run, so it runs once: a Teams tab stuck at sign-in gets one
+// background tab, not one per alarm.
+const START_CHECK_KEY = "startRecaptureChecked";
+
+/**
+ * After a browser start, an extension reload or update, and on each reconnect alarm: once per
+ * browser session, recaptureAfterReload. While the Teams tab is still loading, or is asleep,
+ * nothing is decided yet: a later alarm checks again.
+ */
+async function recaptureOnce() {
+  if ((await chrome.storage.session.get(START_CHECK_KEY))[START_CHECK_KEY]) return;
+  if (!(await getCapture("chatsvc")) && !(await awakeTeamsTabs()).length) return;
+  await chrome.storage.session.set({ [START_CHECK_KEY]: true });
+  await recaptureAfterReload();
 }
 
 /** Closes the background tab, unless the user switched to it, and forgets it. */
@@ -2098,13 +2121,14 @@ export function registerListeners() {
     if (a.name !== "reconnect") return;
     connect();
     closeLeftoverHelperTab().catch(() => {});
+    recaptureOnce().catch(() => {});
   });
   chrome.storage.onChanged.addListener(onStorageChanged);
   chrome.runtime.onStartup.addListener(connect);
   chrome.runtime.onInstalled.addListener(connect);
-  // The captured sessions were cleared (see recaptureAfterReload); a browser update isn't a
-  // reload, and on a browser start the restored tabs load (or sleep) by themselves.
-  chrome.runtime.onInstalled.addListener((d) => (d?.reason === "install" || d?.reason === "update") && recaptureAfterReload());
+  // The captured sessions were cleared (see recaptureAfterReload); a browser update isn't a reload.
+  chrome.runtime.onStartup.addListener(() => recaptureOnce().catch(() => {}));
+  chrome.runtime.onInstalled.addListener((d) => (d?.reason === "install" || d?.reason === "update") && recaptureOnce().catch(() => {}));
 }
 
 // In the browser: listen and connect synchronously on load, as MV3 needs for its listeners
