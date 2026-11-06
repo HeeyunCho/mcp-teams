@@ -45,13 +45,21 @@ let captureQueue = Promise.resolve(); // one capture at a time, so a switch is s
  *
  * The same session again (same base, headers and user: every request Teams, or this worker in
  * its tab, makes with it) isn't written: it only marks the stored one as seen now (`seenAt`).
+ *
+ * A request Teams retries with the previous user's old token isn't a switch back (#77): see
+ * isOldToken. Such a capture is dropped (not stored, nothing cleared) and counted.
  */
 async function storeCapture(service, capture) {
   const key = `capture:${service}`;
-  const { [key]: held, oid: was } = await chrome.storage.session.get([key, "oid"]);
+  const { [key]: held, oid: was, [SWITCH_KEY]: lastSwitch, [DROPPED_KEY]: dropped = NO_DROPS } = await chrome.storage.session.get([key, "oid", SWITCH_KEY, DROPPED_KEY]);
   if (sameSession(held, capture) && (!capture.oid || capture.oid === was)) {
     seenAt.set(service, capture.at);
     for (const f of [...captureSeen]) f(service);
+    return;
+  }
+  const iat = teams.tokenIssuedAt(capture.headers);
+  if (capture.oid && was && was !== capture.oid && isOldToken(capture, iat, lastSwitch)) {
+    await chrome.storage.session.set({ [DROPPED_KEY]: { count: dropped.count + 1, lastAt: capture.at } });
     return;
   }
   seenAt.delete(service);
@@ -63,10 +71,34 @@ async function storeCapture(service, capture) {
       const stale = others.filter((k) => held[k] && held[k].oid !== capture.oid);
       if (stale.length) await chrome.storage.session.remove(stale);
       forgetAccount();
+      update[SWITCH_KEY] = { from: was, at: capture.at, iat };
     }
     update.oid = capture.oid;
   }
   await chrome.storage.session.set(update);
+}
+
+/**
+ * The last switch of the signed-in user: { from (the previous user's oid), at (ms since 1970),
+ * iat (of the token that switched, null without one) }. Kept in chrome.storage.session like the
+ * captures, so a restart of this worker keeps it and a browser restart clears it.
+ */
+const SWITCH_KEY = "accountSwitch";
+/** Captures dropped as an old token of the previous user: { count, lastAt (ms since 1970) }, no account data. */
+const DROPPED_KEY = "droppedOldCaptures";
+const NO_DROPS = { count: 0, lastAt: null };
+const OLD_TOKEN_WINDOW_MS = 30_000;
+
+/**
+ * Whether a capture of another user than the signed-in one is the previous user's old token (a
+ * request Teams retries with it) rather than a switch: within 30 s of the switch, for the user it
+ * switched from, issued before the token that switched. A token without a readable `iat` (or a
+ * switch caused by one), a later one, a third user, or one after the 30 s switches as before.
+ */
+function isOldToken(capture, iat, lastSwitch) {
+  if (!lastSwitch || lastSwitch.from !== capture.oid) return false;
+  if (!(capture.at - lastSwitch.at < OLD_TOKEN_WINDOW_MS)) return false;
+  return Number.isFinite(iat) && Number.isFinite(lastSwitch.iat) && iat < lastSwitch.iat;
 }
 
 // service -> when Teams last sent the stored session again (in memory: no storage write for it)
@@ -187,6 +219,12 @@ export function savePendingCalls() {
 }
 
 const callAt = (c) => (c ? { at: new Date(c.at).toISOString(), host: c.host } : null);
+
+/** For status: how many captures were dropped as an old token of the previous user, and when the last one was (#77). */
+async function droppedOldCaptures() {
+  const { count, lastAt } = (await chrome.storage.session.get(DROPPED_KEY))[DROPPED_KEY] ?? NO_DROPS;
+  return { count, lastAt: lastAt == null ? null : new Date(lastAt).toISOString() };
+}
 
 function recordCompleted(details) {
   if (!teams.isTeamsOrigin(details.initiator)) return;
@@ -1211,6 +1249,7 @@ export const handlers = {
       region: (await getCapture("chatsvc"))?.region ?? null,
       signedInAs: await myMri(),
       ...(await teamsCalls().then((c) => ({ lastTeamsCall: callAt(c?.lastTeamsCall), lastSignedInCall: callAt(c?.lastSignedInCall) }))),
+      droppedOldCaptures: await droppedOldCaptures(),
     };
   },
 

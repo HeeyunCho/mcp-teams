@@ -71,6 +71,15 @@ export function tokenOid(headers) {
   return null;
 }
 
+/**
+ * When a request's token was issued (its `iat`, seconds since 1970), or null when it has none or
+ * one that isn't a number. Tells an old token from a fresh one of the same user (#77).
+ */
+export function tokenIssuedAt(headers) {
+  for (const claims of tokenClaims(headers)) if (Number.isFinite(claims?.iat)) return claims.iat;
+  return null;
+}
+
 /** The decoded payloads of a request's JWTs (unverified, nothing else of them kept). */
 function* tokenClaims(headers) {
   for (const value of [headers?.authorization, headers?.authentication, headers?.["x-skypetoken"]]) {

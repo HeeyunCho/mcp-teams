@@ -77,6 +77,10 @@ Several AI sessions share one connection to the browser: the first one runs it, 
 
 These times live in the browser's session storage like the sessions themselves: a restart of the browser (or a reload of the extension) clears them.
 
+### Switching accounts
+
+When Teams switches to another account or tenant, the extension follows Teams' first request as the new account and forgets what the previous one saw. For 30 s after a switch, a request Teams retries with the previous account's older token (issued before the one that switched) doesn't switch back: it is ignored, and `get_version` counts it in `teams.droppedOldCaptures` (`count`, and `lastAt`, the time of the last one; no account data). A real switch back brings a newer token and takes effect at once.
+
 ## Setup
 
 You need [Node.js](https://nodejs.org) 20 or later, and Chrome or Edge. Then, in a terminal:
