@@ -8,6 +8,7 @@ import { registerTools } from "./tools.js";
 import { setup } from "./setup.js";
 import { installedVersion, PACKAGED_EXTENSION_DIR, syncExtension, writePairing } from "./extension.js";
 import { isNewer } from "./bridge.js";
+import { reloadUntilUpdated } from "./extensionUpdate.js";
 
 // A stray error in a socket callback must not end the server (the AI app would show it
 // as "failed"); log it on stderr, which isn't the MCP channel.
@@ -103,27 +104,9 @@ process.stdin.on("close", shutdown);
 // itself when it connects, see bridge.ts).
 void (async () => {
   if (!extensionUpdated) return;
-  // #111: right after an update, the hub often changes hands (this newer server makes an older
-  // hub step down), and a reload asked meanwhile fails. Try again until the deadline, rather than
-  // leave the old extension running against the new files.
-  const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
-  // At most 3 reloads: an extension loaded from another folder never comes back newer.
-  let lastError = "the extension never connected";
-  for (let tries = 0, end = Date.now() + 180_000; tries < 3 && Date.now() < end; await sleep(5_000)) {
-    if (!bridge.connected) continue;
-    tries++;
-    try {
-      const { before, after } = await bridge.reloadExtension();
-      if (isNewer(SERVER_VERSION, after)) {
-        lastError = `it came back as ${after}`;
-        continue;
-      }
-      console.error(`[mcp-teams ${SERVER_VERSION}] extension updated: ${before ?? "?"} → ${after}`);
-      return;
-    } catch (err) {
-      lastError = (err as Error).message;
-    }
-  }
+  // #111: retried while the hub changes hands right after the update (see reloadUntilUpdated).
+  const r = await reloadUntilUpdated(bridge, installedVersion() ?? SERVER_VERSION);
+  if (r.ok) console.error(`[mcp-teams ${SERVER_VERSION}] extension updated: ${r.before ?? "?"} → ${r.after}`);
   // From 0.3.47 on, the extension also reloads itself when its folder holds a newer version.
-  console.error(`[mcp-teams] extension update needs a reload in the browser: ${lastError}`);
+  else console.error(`[mcp-teams] extension update needs a reload in the browser: ${r.error}`);
 })();

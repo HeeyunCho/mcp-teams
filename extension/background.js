@@ -2086,6 +2086,8 @@ export async function reloadIfUpdatedOnDisk(now = Date.now()) {
   const tried = (await chrome.storage.local.get(SELF_UPDATE_KEY))[SELF_UPDATE_KEY];
   if (tried?.version === onDisk && now - tried.at < SELF_UPDATE_RETRY_MS) return false;
   await chrome.storage.local.set({ [SELF_UPDATE_KEY]: { version: onDisk, at: now } });
+  // Again: a request may have come in during the storage calls.
+  if (running.size || pendingSends.size || autoSending) return false;
   chrome.runtime.reload();
   return true;
 }
