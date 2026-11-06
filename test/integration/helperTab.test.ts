@@ -1,7 +1,8 @@
-// After a reload, recaptureAfterReload may open Teams in a background tab of its own (the helper,
-// recorded in chrome.storage.session) and close it once the session is back. A tool request must
-// never run in that tab while it is open: if the user's own Teams tab was still loading, the
-// request went to the helper (loaded) and failed with "The tab was closed." when it closed.
+// After a reload or a browser start, recaptureMissingChatSession may open Teams in a background
+// tab of its own (the helper, recorded in chrome.storage.session) and close it once the session
+// is back. A tool request must never run in that tab while it is open: if the user's own Teams
+// tab was still loading, the request went to the helper (loaded) and failed with "The tab was
+// closed." when it closed.
 // The real worker (extension/background.js) runs under a fake chrome, each request through
 // dispatch, as the bridge sends it.
 import { afterEach, describe, expect, it, vi } from "vitest";

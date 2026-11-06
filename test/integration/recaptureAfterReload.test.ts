@@ -28,6 +28,11 @@ function chromeReports(fake: FakeChrome, event: "onInstalled" | "onStartup", rea
   for (const l of fake.chrome.runtime[event].listeners) l(event === "onInstalled" ? { reason } : undefined);
 }
 
+/** Chrome's 30 s reconnect alarm wakes the worker. */
+const alarm = (fake: FakeChrome) => {
+  for (const l of fake.chrome.alarms.onAlarm.listeners) l({ name: "reconnect" });
+};
+
 /** Teams makes a chat request with its session: Chrome shows it to the worker. */
 const teamsChatRequest = (fake: FakeChrome) =>
   fake.fire("beforeSendHeaders", { url: `${BASES.chatsvc}/v1/users/ME/conversations?view=msnp24Equivalent`, requestHeaders: [{ name: "Authorization", value: "Bearer fake-fresh" }] });
@@ -490,7 +495,7 @@ describe("a background tab left over from a suspended worker", () => {
     fake.session.set(HELPER_KEY, 200);
     const worker = await loadWorker(fake);
     worker.registerListeners();
-    for (const l of fake.chrome.alarms.onAlarm.listeners) l({ name: "reconnect" });
+    alarm(fake);
     return fake;
   }
 
@@ -518,11 +523,6 @@ describe("a background tab left over from a suspended worker", () => {
 // #104: a Teams tab restored at a browser start can load before the worker listens, then make no
 // call to its services while idle, so its session was never captured until someone used Teams.
 describe("after a browser start with a Teams tab open and no session", () => {
-  /** Chrome's 30 s reconnect alarm wakes the worker. */
-  const alarm = (fake: FakeChrome) => {
-    for (const l of fake.chrome.alarms.onAlarm.listeners) l({ name: "reconnect" });
-  };
-
   it("recovers it as after a reload: Teams' own tab gets its moment, then a background tab brings the session and closes", async () => {
     const { fake, worker } = await reloadedWorker();
     chromeReports(fake, "onStartup");
