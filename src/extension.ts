@@ -48,14 +48,17 @@ export const installedVersion = (dir = INSTALLED_EXTENSION_DIR): string | null =
  * removes files the package no longer has. Files are replaced one by one, never the
  * folder, since Chrome keeps loading from it. Returns whether anything changed.
  */
-export function syncExtension(from = PACKAGED_EXTENSION_DIR, to = INSTALLED_EXTENSION_DIR): { changed: boolean; dir: string } {
+export function syncExtension(from = PACKAGED_EXTENSION_DIR, to = INSTALLED_EXTENSION_DIR, copy: (src: string, dest: string) => void = copyFileSync): { changed: boolean; dir: string } {
   let changed = false;
   const wanted = new Set(filesIn(from));
-  for (const file of wanted) {
+  // manifest.json last: the extension reloads itself once the version in it is newer (#111),
+  // so every other file must already be in place by then.
+  const order = [...wanted].sort((a, b) => Number(a === "manifest.json") - Number(b === "manifest.json"));
+  for (const file of order) {
     const target = join(to, file);
     if (sameFile(join(from, file), target)) continue;
     mkdirSync(join(target, ".."), { recursive: true });
-    copyFileSync(join(from, file), target);
+    copy(join(from, file), target);
     changed = true;
   }
   for (const file of filesIn(to)) {

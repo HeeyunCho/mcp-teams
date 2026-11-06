@@ -459,6 +459,16 @@ describe("writePairing", () => {
 describe("syncExtension", () => {
   const tmp = () => mkdtempSync(join(tmpdir(), "mcp-teams-ext-"));
 
+  it("copies manifest.json last, so the extension never sees the new version before the files it needs (#111)", () => {
+    const from = tmp();
+    const to = join(tmp(), "extension");
+    for (const f of ["a.js", "manifest.json", "z.js"]) writeFileSync(join(from, f), f);
+    const copied: string[] = [];
+    syncExtension(from, to, (src) => void copied.push(src.split(/[\\/]/).at(-1)!));
+    expect(copied.at(-1)).toBe("manifest.json");
+    expect(copied).toHaveLength(3);
+  });
+
   it("copies the extension, updates changed files and removes stale ones", () => {
     const from = tmp();
     const to = join(tmp(), "extension");
