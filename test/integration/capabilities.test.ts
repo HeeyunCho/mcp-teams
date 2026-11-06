@@ -4,9 +4,13 @@
 // for it. Real sockets: hubs and peers (ExtensionBridge), fake extensions, and old-format peers
 // and hubs scripted by hand.
 import { randomUUID } from "node:crypto";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { afterEach, describe, expect, it } from "vitest";
 import WebSocket, { WebSocketServer } from "ws";
-import { MAX_MESSAGE_BYTES, proof } from "../../src/bridge.js";
+import { MAX_MESSAGE_BYTES, proof, type ExtensionBridge } from "../../src/bridge.js";
+import { registerTools } from "../../src/tools.js";
 import { TOKEN, bridgeHarness, type BridgeHarness } from "../helpers/bridgeHarness.js";
 import { until } from "../helpers/timing.js";
 
@@ -131,5 +135,64 @@ describe("#115: a peer and its hub's capabilities", () => {
     const { peer } = await peerOf({ capabilities: { features: ["other"] } });
     expect(peer.hubCapabilities).toEqual({ features: ["other"], maxMessageBytes: null });
     expect(peer.hubChecksSend).toBe(false);
+  });
+});
+
+/** get_version through `bridge`'s tools, parsed. */
+async function getVersion(bridge: ExtensionBridge) {
+  const server = new McpServer({ name: "mcp-teams", version: "0.0.0" });
+  registerTools(server, bridge, { port: bridge.port, token: TOKEN });
+  const client = new Client({ name: "test", version: "0.0.0" });
+  const [a, b] = InMemoryTransport.createLinkedPair();
+  await Promise.all([server.connect(a), client.connect(b)]);
+  const r = (await client.callTool({ name: "get_version", arguments: {} })) as { content: { text: string }[] };
+  await client.close();
+  return JSON.parse(r.content[0].text);
+}
+
+describe("#115: get_version shows both sides' capabilities and the transport", () => {
+  const SERVER = { features: ["checksSend"], maxMessageBytes: MAX_MESSAGE_BYTES };
+  const CHROME = { features: ["someFeature"], maxMessageBytes: 1024 };
+  const NONE = { features: [], maxMessageBytes: null };
+
+  it("on the hub: this server's and the extension's, and no hub", async () => {
+    h = await bridgeHarness();
+    const hub = await h.session();
+    await h.extension({ capabilities: CHROME });
+    await until(() => hub.connected, 3_000, "the hub sees the extension");
+    const v = await getVersion(hub);
+    expect(v.capabilities).toEqual({ server: SERVER, extension: CHROME });
+    expect(v.transport).toBe("websocket");
+  });
+
+  it("on a peer: the hub's too, and with several browsers each one's in browsers", async () => {
+    h = await bridgeHarness();
+    await h.session();
+    const peer = await h.session("1.0.0", { maxMessageBytes: 4 * 1024 * 1024 });
+    await h.extension({ browser: "Chrome", instance: "profile-1", capabilities: CHROME });
+    // An extension from before #115: no features.
+    await h.extension({ browser: "Edge", instance: "profile-2" });
+    await until(() => peer.extensions.length === 2, 3_000, "the peer sees both extensions");
+    const v = await getVersion(peer);
+    expect(v.capabilities).toEqual({
+      server: { features: ["checksSend"], maxMessageBytes: 4 * 1024 * 1024 },
+      hub: SERVER,
+      extension: v.browser === "Chrome" ? CHROME : NONE,
+    });
+    expect(v.browsers).toEqual(
+      expect.arrayContaining([
+        { browser: "Chrome", version: "0.0.0", capabilities: CHROME },
+        { browser: "Edge", version: "0.0.0", capabilities: NONE },
+      ]),
+    );
+    expect(v.transport).toBe("websocket");
+  });
+
+  it("without an extension: only this server's", async () => {
+    h = await bridgeHarness();
+    const hub = await h.session();
+    const v = await getVersion(hub);
+    expect(v.capabilities).toEqual({ server: SERVER });
+    expect(v.transport).toBe("websocket");
   });
 });
