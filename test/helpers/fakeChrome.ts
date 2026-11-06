@@ -357,6 +357,11 @@ export interface Worker {
    * second. Not needed for teardown: a pending save goes to the fake chrome the call was made in.
    */
   savePendingCalls: () => void;
+  /**
+   * Saves the api_traffic log now if a save is pending, instead of waiting the half second. Not
+   * needed for teardown either: a pending save goes to the fake chrome the request was recorded in.
+   */
+  savePendingTraffic: () => void;
 }
 
 /** Every worker loadWorker loaded that stopWorkers hasn't stopped yet. */
