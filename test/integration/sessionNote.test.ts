@@ -58,7 +58,7 @@ describe("#103: get_version names why there is no session", () => {
     );
     expect(v.teams).toMatchObject({ lastTeamsCall: { at: "2026-10-01T10:26:37.000Z", host: "teams.cloud.microsoft" }, lastSignedInCall: null });
     expect(v.note).toBe(
-      "The Teams tab hasn't made a signed-in call since the browser (or the extension) started; its last call (2026-10-01T10:26:37.000Z, teams.cloud.microsoft) wasn't signed in. It looks stuck at sign-in: open the Teams tab and finish signing in (an account picker, a sign-in page or a prompt may be waiting there).",
+      "The Teams tab hasn't made a signed-in call since the extension started watching; its last call (2026-10-01T10:26:37.000Z, teams.cloud.microsoft) wasn't signed in. It looks stuck at sign-in. Within about a minute and a half of the browser or the extension starting, the extension tries to bring the session back by itself; if this note is still there after that, open the Teams tab and finish signing in (an account picker, a sign-in page or a prompt may be waiting there).",
     );
   });
 
@@ -81,7 +81,7 @@ describe("#103: get_version names why there is no session", () => {
   it("a tab that made no calls at all may be asleep", async () => {
     const v = await getVersion(uncaptured({ lastTeamsCall: null, lastSignedInCall: null }), "2026-10-01T10:30:00Z");
     expect(v.note).toBe(
-      "The Teams tab has made no calls since the browser (or the extension) started; it may be asleep. Click into the Teams tab, or add teams.cloud.microsoft to Chrome's \"Always keep these sites active\" (Settings > Performance).",
+      "The Teams tab has made no calls since the extension started watching; it may be asleep. Click into the Teams tab, or add teams.cloud.microsoft to Chrome's \"Always keep these sites active\" (Settings > Performance).",
     );
   });
 
