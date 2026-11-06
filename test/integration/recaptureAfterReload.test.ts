@@ -1,10 +1,11 @@
-// After the extension reloads (an update, reload_extension), Chrome has cleared
-// chrome.storage.session, so the captured Teams sessions are gone. A Teams tab left in
-// the background may make no request of its own for a long time, so status said "session not
-// captured" until someone used Teams. The worker now gets Teams to sign in again without
-// touching the user's tab: it opens Teams in a background tab next to it, and closes that tab
-// once Teams' requests there brought the session back. The real worker (extension/background.js)
-// runs under a fake chrome; the reload is Chrome's onInstalled event for the new worker.
+// recaptureMissingChatSession (via recaptureOnce). After the extension reloads (an update,
+// reload_extension) or the browser starts, Chrome has cleared chrome.storage.session, so the
+// captured Teams sessions are gone. A Teams tab left in the background (or restored at the start)
+// may make no request of its own for a long time, so status said "session not captured" until
+// someone used Teams. The worker now gets Teams to sign in again without touching the user's tab:
+// it opens Teams in a background tab next to it, and closes that tab once Teams' requests there
+// brought the session back. The real worker (extension/background.js) runs under a fake chrome;
+// the reload is Chrome's onInstalled event for the new worker, the browser start its onStartup.
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { BASES, createFakeChrome, loadWorker, openedSockets, reply, TEAMS_ORIGIN, type FakeChrome, type Worker } from "../helpers/fakeChrome.js";
 
