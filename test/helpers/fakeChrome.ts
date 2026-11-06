@@ -357,6 +357,8 @@ export interface Worker {
    * second. Not needed for teardown: a pending save goes to the fake chrome the call was made in.
    */
   savePendingCalls: () => void;
+  /** The error a call fails with when a service's session is missing, per service. */
+  SERVICE_HELP: Record<"chatsvc" | "csa" | "mt" | "substrate", string>;
 }
 
 /** Every worker loadWorker loaded that stopWorkers hasn't stopped yet. */
