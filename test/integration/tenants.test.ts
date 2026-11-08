@@ -3,6 +3,7 @@
 // nothing of the first one (its chats, its captured sessions) is used or returned.
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { BASES, createFakeChrome, loadWorker, openedSockets, reply, SHAREPOINT_ORIGIN, TEAMS_ORIGIN, type SentRequest } from "../helpers/fakeChrome.js";
+import { fakeJwt } from "../helpers/jwt.js";
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -55,22 +56,29 @@ const TENANT = {
 };
 type Tenant = keyof typeof TENANT;
 
-/** An unsigned JWT with these claims (the worker only reads ids from it). */
-const fakeJwt = (claims: object) => `${[{ alg: "none", typ: "JWT" }, claims].map((o) => Buffer.from(JSON.stringify(o)).toString("base64url")).join(".")}.`;
+/** When each tenant's tokens were issued (`iat`, seconds since 1970): b's after a's, as when the user switches from a to b. */
+const ISSUED: Record<Tenant, number> = { a: 1_790_000_000, b: 1_790_000_600 };
 /** Each tenant's tokens: AAD bearer tokens for csa and mt, a skype token for chatsvc. */
 const TOKENS = Object.fromEntries(
   (Object.keys(TENANT) as Tenant[]).map((t) => [
     t,
     {
-      bearer: `Bearer ${fakeJwt({ tid: TENANT[t].tid, oid: TENANT[t].oid, name: `fake ${t}` })}`,
-      skype: `skypetoken=${fakeJwt({ skypeid: `orgid:${TENANT[t].oid}`, rgn: "emea" })}`,
+      bearer: `Bearer ${fakeJwt({ tid: TENANT[t].tid, oid: TENANT[t].oid, name: `fake ${t}`, iat: ISSUED[t] })}`,
+      skype: `skypetoken=${fakeJwt({ skypeid: `orgid:${TENANT[t].oid}`, rgn: "emea", iat: ISSUED[t] })}`,
     },
   ]),
 ) as Record<Tenant, { bearer: string; skype: string }>;
+/** Tenant a's tokens when Teams switches back to a: fresh ones, issued after b's (an older token of a's would be dropped, #77). */
+const BACK_TO_A = {
+  bearer: `Bearer ${fakeJwt({ tid: TENANT.a.tid, oid: TENANT.a.oid, name: "fake a", iat: ISSUED.b + 600 })}`,
+  skype: `skypetoken=${fakeJwt({ skypeid: `orgid:${TENANT.a.oid}`, rgn: "emea", iat: ISSUED.b + 600 })}`,
+};
 
 /** The tenant whose token a request carried. */
 const tenantOf = (req: SentRequest): Tenant | undefined =>
-  (Object.keys(TOKENS) as Tenant[]).find((t) => req.headers.authorization === TOKENS[t].bearer || req.headers.authentication === TOKENS[t].skype);
+  (Object.keys(TOKENS) as Tenant[]).find((t) =>
+    [TOKENS[t], ...(t === "a" ? [BACK_TO_A] : [])].some((k) => req.headers.authorization === k.bearer || req.headers.authentication === k.skype),
+  );
 
 /** Each tenant's chats, as its own csa lists them. */
 const CHATS: Record<Tenant, [string, string][]> = {
@@ -95,13 +103,13 @@ const tenantServices = {
 };
 
 /** Teams in the tab makes a request to `service` as tenant `t`, which the worker captures. */
-async function teamsRequest(fake: ReturnType<typeof createFakeChrome>, service: "csa" | "chatsvc" | "mt", t: Tenant) {
+async function teamsRequest(fake: ReturnType<typeof createFakeChrome>, service: "csa" | "chatsvc" | "mt", t: Tenant, tokens = TOKENS[t]) {
   const url = {
     csa: `${BASES.csa}/api/v1/teams/users/me?isPrefetch=false`,
     chatsvc: `${BASES.chatsvc}/v1/users/ME/conversations?view=msnp24Equivalent`,
     mt: `${BASES.mt}/beta/users/${TENANT[t].oid}/capabilities`,
   }[service];
-  const header = service === "chatsvc" ? { name: "Authentication", value: TOKENS[t].skype } : { name: "Authorization", value: TOKENS[t].bearer };
+  const header = service === "chatsvc" ? { name: "Authentication", value: tokens.skype } : { name: "Authorization", value: tokens.bearer };
   await fake.fire("beforeSendHeaders", { url, initiator: TEAMS_ORIGIN, requestHeaders: [header] });
 }
 
@@ -581,7 +589,9 @@ describe("77.3: what a 401 and an account switch make the worker read again", ()
       if (event.as === "a") await read;
       else await expect(read).rejects.toThrow(/account changed/);
     }
-    for (const t of event.switches) for (const s of ["csa", "chatsvc", "mt"] as const) await teamsRequest(fake, s, t);
+    // Back to a (where it started), Teams brings fresh tokens.
+    for (const t of event.switches) for (const s of ["csa", "chatsvc", "mt"] as const) await teamsRequest(fake, s, t, t === "a" ? BACK_TO_A : TOKENS[t]);
+    expect((await worker.handlers.status({})).signedInAs).toBe(meMri(event.as));
 
     const at = fake.sent.length;
     await worker.handlers.listChats({});

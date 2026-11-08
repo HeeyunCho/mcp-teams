@@ -43,6 +43,11 @@ function captureSession(details) {
 
 const CAPTURED_SERVICES = ["chatsvc", "csa", "mt", "substrate"];
 let captureQueue = Promise.resolve(); // one capture at a time, so a switch is seen in order
+/** Whose session is stored, once the captures already queued are stored (a switch may be among them). */
+async function signedInOid() {
+  await captureQueue;
+  return (await chrome.storage.session.get("oid")).oid;
+}
 
 /**
  * Stores a capture. One from another user than the signed-in one (the user switched Teams to
@@ -52,13 +57,21 @@ let captureQueue = Promise.resolve(); // one capture at a time, so a switch is s
  *
  * The same session again (same base, headers and user: every request Teams, or this worker in
  * its tab, makes with it) isn't written: it only marks the stored one as seen now (`seenAt`).
+ *
+ * A request Teams retries with the previous user's old token isn't a switch back (#77): see
+ * isOldToken. Such a capture is dropped (not stored, nothing cleared) and counted.
  */
 async function storeCapture(service, capture) {
   const key = `capture:${service}`;
-  const { [key]: held, oid: was } = await chrome.storage.session.get([key, "oid"]);
+  const { [key]: held, oid: was, [SWITCH_KEY]: lastSwitch, [DROPPED_KEY]: dropped = NO_DROPS } = await chrome.storage.session.get([key, "oid", SWITCH_KEY, DROPPED_KEY]);
   if (sameSession(held, capture) && (!capture.oid || capture.oid === was)) {
     seenAt.set(service, capture.at);
     for (const f of [...captureSeen]) f(service);
+    return;
+  }
+  const iat = teams.tokenIssuedAt(capture.headers);
+  if (capture.oid && was && was !== capture.oid && isOldToken(capture, iat, lastSwitch)) {
+    await chrome.storage.session.set({ [DROPPED_KEY]: { count: dropped.count + 1, lastAt: capture.at } });
     return;
   }
   seenAt.delete(service);
@@ -70,10 +83,34 @@ async function storeCapture(service, capture) {
       const stale = others.filter((k) => held[k] && held[k].oid !== capture.oid);
       if (stale.length) await chrome.storage.session.remove(stale);
       forgetAccount();
+      update[SWITCH_KEY] = { from: was, at: capture.at, iat };
     }
     update.oid = capture.oid;
   }
   await chrome.storage.session.set(update);
+}
+
+/**
+ * The last switch of the signed-in user: { from (the previous user's oid), at (ms since 1970),
+ * iat (of the token that switched, null without one) }. Kept in chrome.storage.session like the
+ * captures, so a restart of this worker keeps it and a browser restart clears it.
+ */
+const SWITCH_KEY = "accountSwitch";
+/** Captures dropped as an old token of the previous user: { count, lastAt (ms since 1970) }, no account data. */
+const DROPPED_KEY = "droppedOldCaptures";
+const NO_DROPS = { count: 0, lastAt: null };
+const OLD_TOKEN_WINDOW_MS = 30_000;
+
+/**
+ * Whether a capture of another user than the signed-in one is the previous user's old token (a
+ * request Teams retries with it) rather than a switch: within 30 s of the switch, for the user it
+ * switched from, issued before the token that switched. A token without a readable `iat` (or a
+ * switch caused by one), a later one, a third user, or one after the 30 s switches as before.
+ */
+function isOldToken(capture, iat, lastSwitch) {
+  if (!lastSwitch || lastSwitch.from !== capture.oid) return false;
+  if (!(capture.at - lastSwitch.at < OLD_TOKEN_WINDOW_MS)) return false;
+  return Number.isFinite(iat) && Number.isFinite(lastSwitch.iat) && iat < lastSwitch.iat;
 }
 
 // service -> when Teams last sent the stored session again (in memory: no storage write for it)
@@ -206,6 +243,12 @@ export function savePendingCalls() {
 }
 
 const callAt = (c) => (c ? { at: new Date(c.at).toISOString(), host: c.host } : null);
+
+/** For status: how many captures were dropped as an old token of the previous user, and when the last one was (#77). */
+async function droppedOldCaptures() {
+  const { count, lastAt } = (await chrome.storage.session.get(DROPPED_KEY))[DROPPED_KEY] ?? NO_DROPS;
+  return { count, lastAt: lastAt == null ? null : new Date(lastAt).toISOString() };
+}
 
 function recordCompleted(details) {
   if (!teams.isTeamsOrigin(details.initiator)) return;
@@ -696,15 +739,18 @@ const GATE_MARGIN_MS = 250;
  * Before anything goes to a throttled service: waits until Teams' Retry-After is over when
  * `wait` and that fits before the request's deadline, else fails at once as busy. A request
  * that holds one of the hub's turns gives it back while it waits, and goes on once it has one
- * again (35), so calls to services that aren't throttled run meanwhile.
+ * again (35), so calls to services that aren't throttled run meanwhile. Resolves with whether
+ * it waited (for the gate or for a turn back).
  */
 async function passGate(key, ctx, wait) {
   let gaveBack = false;
+  let waited = false;
   try {
     for (let ms = gatedFor(key); ms > 0; ms = gatedFor(key)) {
       const deadline = Math.min(ctx?.deadline ?? Infinity, Date.now() + REQUEST_TIMEOUT_MS);
       if (!wait || Date.now() + ms + GATE_MARGIN_MS > deadline) throw busy(Date.now() + ms);
       if (ctx?.turn && !gaveBack) gaveBack = (ctx.turn.giveBack(), true);
+      waited = true;
       await guarded(sleep(ms), ctx);
     }
   } finally {
@@ -713,7 +759,8 @@ async function passGate(key, ctx, wait) {
   }
   ctx?.check();
   // The gate may have shut again while it waited for its turn back.
-  if (gaveBack && gatedFor(key) > 0) return passGate(key, ctx, wait);
+  if (gaveBack && gatedFor(key) > 0) await passGate(key, ctx, wait);
+  return waited;
 }
 
 const originOf = (tab) => (tab?.url ? new URL(tab.url).origin : null);
@@ -728,21 +775,27 @@ const originOf = (tab) => (tab?.url ? new URL(tab.url).origin : null);
  * or gone to another page) is looked up again with `findTab`, and the read goes once more there,
  * by the same deadline. A fetch that failed in the same tab, still on the same page (e.g.
  * offline), isn't sent again. A post never is: it may have reached Teams.
+ *
+ * `oid`: whose headers they are. Before they go after a wait (for the gate, also on the first
+ * attempt, since another request's 429 may have shut it) or again (in the other tab), that user
+ * must still be the signed-in one; otherwise the call fails as account changed (#77) and the
+ * previous user's headers are never sent (again).
  */
-async function sendTo(key, tab, findTab, url, method, headers, body, ctx, wait, repeatable = method === "GET") {
+async function sendTo(key, tab, findTab, url, method, headers, body, ctx, wait, repeatable = method === "GET", oid = null) {
   let foundAgain = false;
-  for (let attempt = 0; ; ) {
-    await passGate(key, ctx, wait);
+  for (let attempt = 0, repeat = false; ; repeat = true) {
+    const waited = await passGate(key, ctx, wait);
+    if ((waited || repeat) && oid && (await signedInOid()) !== oid) throw new Error(ACCOUNT_CHANGED_WHILE("a request waited to be sent", "sends it as that account"));
     let res;
     try {
       res = await runInTab(tab, url, method, headers, body, ctx);
     } catch (err) {
       if (!err?.tabFailed || !repeatable || foundAgain) throw err;
       foundAgain = true;
-      const again = await guarded(findTab(), ctx);
-      if (err.tabFailed === "fetch" && again.id === tab.id && originOf(again) === originOf(tab)) throw err;
-      if (again.status === "loading") await guarded(waitForTabLoaded(again.id), ctx);
-      tab = again;
+      const found = await guarded(findTab(), ctx);
+      if (err.tabFailed === "fetch" && found.id === tab.id && originOf(found) === originOf(tab)) throw err;
+      if (found.status === "loading") await guarded(waitForTabLoaded(found.id), ctx);
+      tab = found;
       continue;
     }
     if (res.status !== 429) return res;
@@ -773,7 +826,7 @@ async function api(service, path, { method = "GET", body, raw = false, withLocat
   const urlFor = (c) => teams.serviceUrl(path, c.base);
   const findTab = () => findTeamsTab(new URL(cap.base).origin, ctx);
   await onCapture?.(cap); // may refuse the session (it throws), before anything is sent
-  let res = await sendTo(gateKey(service, cap.base), tab, findTab, urlFor(cap), method, cap.headers, body, ctx, wait, repeatable);
+  let res = await sendTo(gateKey(service, cap.base), tab, findTab, urlFor(cap), method, cap.headers, body, ctx, wait, repeatable, cap.oid);
   if (res.status === 401) {
     // Rejected before running (expired token), so trying once more is safe. A 403 is a
     // real answer (e.g. no longer a member of that chat).
@@ -786,7 +839,7 @@ async function api(service, path, { method = "GET", body, raw = false, withLocat
     if (ctx) ctx.tabs = null;
     tab = await guarded(findTab(), ctx);
     await onCapture?.(cap);
-    res = await sendTo(gateKey(service, cap.base), tab, findTab, urlFor(cap), method, cap.headers, body, ctx, wait, repeatable);
+    res = await sendTo(gateKey(service, cap.base), tab, findTab, urlFor(cap), method, cap.headers, body, ctx, wait, repeatable, cap.oid);
   }
   if (raw) return res;
   if (res.status >= 400) {
@@ -1231,6 +1284,7 @@ export const handlers = {
       region: (await getCapture("chatsvc"))?.region ?? null,
       signedInAs: await myMri(),
       ...(await teamsCalls().then((c) => ({ lastTeamsCall: callAt(c?.lastTeamsCall), lastSignedInCall: callAt(c?.lastSignedInCall) }))),
+      droppedOldCaptures: await droppedOldCaptures(),
     };
   },
 

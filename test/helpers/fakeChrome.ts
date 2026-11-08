@@ -330,6 +330,15 @@ export function createFakeChrome({ services = {}, captured = [...TEAMS_SERVICES]
       webRequest: webRequestBefore.length + webRequestCompleted.length,
       onAlarm: chrome.alarms.onAlarm.listeners.length,
     }),
+    /**
+     * The worker stops (Chrome suspends it): its listeners go with it, chrome.storage stays. Load
+     * the next one with loadWorker(fake) and call its registerListeners().
+     */
+    stopWorker() {
+      webRequestBefore.length = 0;
+      webRequestCompleted.length = 0;
+      for (const e of [runtimeMessage, windowRemoved, storageChanged, tabUpdated, tabRemoved, chrome.runtime.onStartup, chrome.runtime.onInstalled, chrome.alarms.onAlarm]) e.listeners.length = 0;
+    },
     reset() {
       sent.length = 0;
       for (const s of Object.values(spies)) s.mockClear();
