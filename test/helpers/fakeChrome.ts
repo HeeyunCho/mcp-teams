@@ -366,6 +366,8 @@ export interface Worker {
    * second. Not needed for teardown: a pending save goes to the fake chrome the call was made in.
    */
   savePendingCalls: () => void;
+  /** The error a call fails with when a service's session is missing, per service. */
+  SERVICE_HELP: Record<"chatsvc" | "csa" | "mt" | "substrate", string>;
   /**
    * Saves the api_traffic log now if a save is pending, instead of waiting the half second. Not
    * needed for teardown either: a pending save goes to the fake chrome the request was recorded in.
