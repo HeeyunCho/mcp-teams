@@ -42,7 +42,7 @@ export function sessionNote(status: TeamsStatus | null | undefined, now: number,
     // load, a tab that signed in before the extension listened looks like this until the extension's
     // own recovery (a 15 s grace, then a background Teams tab for up to a minute) brings the session back.
     if (!signedIn && noteFor === "failed call") {
-      return `${stuck}It looks stuck at sign-in. The extension already tried to bring the session back for this call: ${FINISH_SIGN_IN}`;
+      return `${stuck}It looks stuck at sign-in. Waiting for the Teams tab, or the extension's own recovery, didn't bring the session back for this call: ${FINISH_SIGN_IN}`;
     }
     if (!signedIn) {
       return (

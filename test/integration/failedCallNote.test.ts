@@ -80,7 +80,7 @@ describe("#103: a call that fails for a missing session says why", () => {
     const r = await failing("list_chats", help.chatsvc, neverSignedIn, "2026-10-01T11:30:00Z");
     expect(r.isError).toBe(true);
     expect(r.text).toBe(
-      "Teams' chat session is not available. The Teams tab hasn't made a signed-in call since the extension started watching; its last call (2026-10-01T10:26:37.000Z, teams.cloud.microsoft) wasn't signed in. It looks stuck at sign-in. The extension already tried to bring the session back for this call: open the Teams tab and finish signing in (an account picker, a sign-in page or a prompt may be waiting there).",
+      "Teams' chat session is not available. The Teams tab hasn't made a signed-in call since the extension started watching; its last call (2026-10-01T10:26:37.000Z, teams.cloud.microsoft) wasn't signed in. It looks stuck at sign-in. Waiting for the Teams tab, or the extension's own recovery, didn't bring the session back for this call: open the Teams tab and finish signing in (an account picker, a sign-in page or a prompt may be waiting there).",
     );
   });
 
