@@ -330,6 +330,15 @@ export function createFakeChrome({ services = {}, captured = [...TEAMS_SERVICES]
       webRequest: webRequestBefore.length + webRequestCompleted.length,
       onAlarm: chrome.alarms.onAlarm.listeners.length,
     }),
+    /**
+     * The worker stops (Chrome suspends it): its listeners go with it, chrome.storage stays. Load
+     * the next one with loadWorker(fake) and call its registerListeners().
+     */
+    stopWorker() {
+      webRequestBefore.length = 0;
+      webRequestCompleted.length = 0;
+      for (const e of [runtimeMessage, windowRemoved, storageChanged, tabUpdated, tabRemoved, chrome.runtime.onStartup, chrome.runtime.onInstalled, chrome.alarms.onAlarm]) e.listeners.length = 0;
+    },
     reset() {
       sent.length = 0;
       for (const s of Object.values(spies)) s.mockClear();
@@ -357,6 +366,13 @@ export interface Worker {
    * second. Not needed for teardown: a pending save goes to the fake chrome the call was made in.
    */
   savePendingCalls: () => void;
+  /** The error a call fails with when a service's session is missing, per service. */
+  SERVICE_HELP: Record<"chatsvc" | "csa" | "mt" | "substrate", string>;
+  /**
+   * Saves the api_traffic log now if a save is pending, instead of waiting the half second. Not
+   * needed for teardown either: a pending save goes to the fake chrome the request was recorded in.
+   */
+  savePendingTraffic: () => void;
   /** Reloads the extension when its folder on disk holds a newer version (#111); true when it did. */
   reloadIfUpdatedOnDisk: (now?: number) => Promise<boolean>;
   /** How long a reload into the same version on disk waits before it is tried again. */

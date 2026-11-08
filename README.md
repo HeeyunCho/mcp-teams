@@ -71,11 +71,17 @@ Several AI sessions share one connection to the browser: the first one runs it, 
 
 `get_version` showing `teamsTabs: 1` (or more) but `sessionCaptured: false` means the extension hasn't seen Teams sign in to its chat service. The extension always keeps when the Teams tab last made a call (`lastTeamsCall`) and when it last made a signed-in one (`lastSignedInCall`), only the time and the host, and `get_version` adds a `note` naming the case:
 
-- **Stuck at sign-in**: the tab has made no signed-in call at all, or none for more than 5 minutes while it keeps making other calls. Within about a minute and a half of a browser start or an extension load, the extension tries to bring the session back by itself; if the note is still there after that, open the Teams tab and finish signing in: an account picker, a sign-in page or a prompt may be waiting there.
+- **Stuck at sign-in**: the tab has made no signed-in call at all, or none for more than 5 minutes while it keeps making other calls. Within about a minute and a half of a browser start or an extension load, the extension tries to bring the session back by itself; if `get_version` still says so after that, open the Teams tab and finish signing in: an account picker, a sign-in page or a prompt may be waiting there.
 - **Asleep**: the tab has made no calls for more than 5 minutes (or none at all). Click into the Teams tab, or add `teams.cloud.microsoft` to Chrome's *Always keep these sites active* (Settings > Performance) so Chrome doesn't put it to sleep.
 - **Missed by the capture**: the tab made a signed-in call to a Teams service (chat, teams, people or search) in the last 5 minutes, but no chat session was captured. Refresh the Teams tab or reload the extension; if that doesn't help, it's a bug in mcp-teams: please report it with the output of `api_traffic` (call it with `record: true`, use Teams for a minute, then call it again).
 
+A tool call that fails because the chat, team list or people session is missing gives the same note in place of "Reload the Teams tab and try again" (e.g. "Teams' chat session is not available. The Teams tab hasn't made a signed-in call since …"). Such a call has already had the extension's attempt to bring the session back, so when stuck at sign-in it says to finish signing in right away. When there is nothing to name (the chat session is there, or the extension is older than 0.3.46), and for search's session, the error stays as it was.
+
 These times live in the browser's session storage like the sessions themselves: a restart of the browser (or a reload of the extension) clears them.
+
+### Switching accounts
+
+When Teams switches to another account or tenant, the extension follows Teams' first request as the new account and forgets what the previous one saw. For 30 s after a switch, a request Teams retries with the previous account's older token (issued before the one that switched) doesn't switch back: it is ignored, and `get_version` counts it in `teams.droppedOldCaptures` (`count`, and `lastAt`, the time of the last one; no account data). A real switch back brings a newer token and takes effect at once. A request that had to wait before it went out (Teams' throttling) or that the extension would send again (after the throttling, or in another Teams tab after its own was closed) fails with "account changed" instead when the account changed meanwhile: it is never sent as the previous account.
 
 ## Setup
 

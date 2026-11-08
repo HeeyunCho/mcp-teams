@@ -4,6 +4,7 @@
 // account switching through Teams' own requests.
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { BASES, createFakeChrome, loadWorker, openedSockets, TEAMS_ORIGIN, type FakeChrome, type SentRequest } from "../helpers/fakeChrome.js";
+import { fakeJwt } from "../helpers/jwt.js";
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -20,10 +21,14 @@ type Account = keyof typeof ACCOUNT;
 const JAMIE = { mri: "8:orgid:00000000-0000-4000-8000-0000000000c1", name: "Jamie Poe", email: "jamie.poe@contoso.example" };
 const ACCOUNTS = Object.keys(ACCOUNT) as Account[];
 
-const fakeJwt = (claims: object) => `${[{ alg: "none", typ: "JWT" }, claims].map((o) => Buffer.from(JSON.stringify(o)).toString("base64url")).join(".")}.`;
-const bearer = (t: Account) => `Bearer ${fakeJwt({ oid: ACCOUNT[t].oid })}`;
-const skype = (t: Account) => `skypetoken=${fakeJwt({ skypeid: `orgid:${ACCOUNT[t].oid}` })}`;
-const accountOf = (req: SentRequest) => ACCOUNTS.find((t) => req.headers.authorization === bearer(t) || req.headers.authentication === skype(t));
+// When each account's tokens were issued (`iat`, seconds since 1970): Sam's after Alex's, as when Teams switches from Alex to Sam.
+const ISSUED: Record<Account, number> = { a: 1_790_000_000, b: 1_790_000_600 };
+// A fresh token of Alex's, issued after Sam's: a real switch back to Alex.
+const FRESH = 1_790_001_200;
+const bearer = (t: Account, iat = ISSUED[t]) => `Bearer ${fakeJwt({ oid: ACCOUNT[t].oid, iat })}`;
+const skype = (t: Account, iat = ISSUED[t]) => `skypetoken=${fakeJwt({ skypeid: `orgid:${ACCOUNT[t].oid}`, iat })}`;
+const accountOf = (req: SentRequest) =>
+  ACCOUNTS.find((t) => [ISSUED[t], FRESH].some((iat) => req.headers.authorization === bearer(t, iat) || req.headers.authentication === skype(t, iat)));
 
 const ALPHA = "19:alpha@thread.v2";
 const chatsOf = (t?: Account) => ({
@@ -66,11 +71,11 @@ function gate() {
 }
 
 /** Teams in the tab calls its services as this account, which the worker captures. */
-async function teamsShows(fake: FakeChrome, t: Account) {
-  await fake.fire("beforeSendHeaders", { url: `${BASES.csa}/api/v1/teams/users/me?isPrefetch=false`, initiator: TEAMS_ORIGIN, requestHeaders: [{ name: "Authorization", value: bearer(t) }] });
-  await fake.fire("beforeSendHeaders", { url: `${BASES.chatsvc}/v1/users/ME/conversations?view=x`, initiator: TEAMS_ORIGIN, requestHeaders: [{ name: "Authentication", value: skype(t) }] });
-  await fake.fire("beforeSendHeaders", { url: `${BASES.mt}/beta/users/${ACCOUNT[t].oid}/capabilities`, initiator: TEAMS_ORIGIN, requestHeaders: [{ name: "Authorization", value: bearer(t) }] });
-  await fake.fire("beforeSendHeaders", { url: `${BASES.substrate}/search/api/v1/suggestions?scenario=peoplepicker.newChat`, initiator: TEAMS_ORIGIN, requestHeaders: [{ name: "Authorization", value: bearer(t) }] });
+async function teamsShows(fake: FakeChrome, t: Account, iat = ISSUED[t]) {
+  await fake.fire("beforeSendHeaders", { url: `${BASES.csa}/api/v1/teams/users/me?isPrefetch=false`, initiator: TEAMS_ORIGIN, requestHeaders: [{ name: "Authorization", value: bearer(t, iat) }] });
+  await fake.fire("beforeSendHeaders", { url: `${BASES.chatsvc}/v1/users/ME/conversations?view=x`, initiator: TEAMS_ORIGIN, requestHeaders: [{ name: "Authentication", value: skype(t, iat) }] });
+  await fake.fire("beforeSendHeaders", { url: `${BASES.mt}/beta/users/${ACCOUNT[t].oid}/capabilities`, initiator: TEAMS_ORIGIN, requestHeaders: [{ name: "Authorization", value: bearer(t, iat) }] });
+  await fake.fire("beforeSendHeaders", { url: `${BASES.substrate}/search/api/v1/suggestions?scenario=peoplepicker.newChat`, initiator: TEAMS_ORIGIN, requestHeaders: [{ name: "Authorization", value: bearer(t, iat) }] });
 }
 
 /** A worker where Teams hasn't shown anyone yet: no sessions, no account. */
@@ -373,7 +378,8 @@ describe("warm: a switch during the lookups", () => {
     await vi.waitFor(() => expect(fake.count(service)).toBe(1));
 
     await teamsShows(fake, "b");
-    await teamsShows(fake, "a");
+    await teamsShows(fake, "a", FRESH); // a real switch back: Alex's token is newer than Sam's
+    expect((await worker.handlers.status({})).signedInAs).toBe(`8:orgid:${ACCOUNT.a.oid}`);
     lookup.open();
 
     await answerOrWindow(fake, result);
