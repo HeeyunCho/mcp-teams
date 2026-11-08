@@ -2,7 +2,7 @@
 import { readFileSync } from "node:fs";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { ExtensionBridge } from "./bridge.js";
+import { DRAIN_MAX_WAIT_MS, ExtensionBridge } from "./bridge.js";
 import { CONFIG_PATH, SERVER_VERSION, loadConfig } from "./config.js";
 import { registerTools } from "./tools.js";
 import { setup } from "./setup.js";
@@ -92,13 +92,24 @@ const server = new McpServer({
 registerTools(server, bridge, config);
 await server.connect(new StdioServerTransport());
 
+// A signal closes at once. When the AI session ends (stdin closes), this server takes no more MCP
+// calls, but as the hub it first lets other sessions' running calls finish for a few seconds
+// (#112, ported from mcp-newoutlook src/index.ts, PR #108 there); TEAMS_MCP_DRAIN_MS changes that
+// bound (tests). The process exits soon after the bound even if a connection is slow to close.
 const shutdown = async () => {
   await bridge.close();
   process.exit(0);
 };
 process.on("SIGINT", shutdown);
 process.on("SIGTERM", shutdown);
-process.stdin.on("close", shutdown);
+process.stdin.on("close", async () => {
+  const fromEnv = process.env.TEAMS_MCP_DRAIN_MS ? Number(process.env.TEAMS_MCP_DRAIN_MS) : NaN;
+  const drainMs = Number.isFinite(fromEnv) && fromEnv >= 0 ? fromEnv : DRAIN_MAX_WAIT_MS; // 0: no drain
+  setTimeout(() => process.exit(0), drainMs + 2_000).unref();
+  await server.close().catch(() => {});
+  await bridge.drainAndClose(drainMs);
+  process.exit(0);
+});
 
 // After an update of the folder, reloads the extension (one of 0.2.0 or older reloads
 // itself when it connects, see bridge.ts).
