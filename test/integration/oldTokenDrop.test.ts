@@ -221,7 +221,7 @@ describe("77.2: a request is never sent again with the headers of an account tha
 
     // Sam's capture is held at its first storage read, so it is still queued when the retry checks.
     const get = vi.mocked(fake.chrome.storage.session.get);
-    const realGet = get.getMockImplementation()!;
+    const realGet = get.getMockImplementation() as (keys?: string | string[] | null) => Promise<Record<string, unknown>>;
     let release!: () => void;
     const held = new Promise<void>((r) => (release = r));
     let holding = true;
