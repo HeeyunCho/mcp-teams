@@ -40,6 +40,8 @@ export interface FakeExtensionOptions {
   browser?: string;
   instance?: string;
   version?: string;
+  /** What its hello declares (#115); left out: an extension from before #115, which declares nothing. */
+  capabilities?: unknown;
   /** Answer WebSocket pings (default true; false: a frozen browser). */
   pong?: boolean;
   /** Connect again soon after the connection closes, like the real extension (default true). */
@@ -63,6 +65,7 @@ export async function fakeExtension(port: number, opts: FakeExtensionOptions = {
     version = "0.0.0",
     pong = true,
     reconnect: again = true,
+    capabilities,
   } = opts;
   const received: any[] = [];
   let ws!: WebSocket;
@@ -79,7 +82,7 @@ export async function fakeExtension(port: number, opts: FakeExtensionOptions = {
         received.push(msg);
         if (msg.type === "challenge") {
           const hello = token === null ? { token: null } : { proof: proof(token, "client", msg.nonce), nonce };
-          socket.send(JSON.stringify({ type: "hello", ...hello, version, browser, instance }));
+          socket.send(JSON.stringify({ type: "hello", ...hello, version, browser, instance, ...(capabilities === undefined ? {} : { capabilities }) }));
           return;
         }
         if (msg.type === "welcome") {

@@ -5,6 +5,13 @@ import * as teams from "./teams.js";
 
 const VERSION = chrome.runtime.getManifest().version;
 const DEFAULT_PORT = 47393;
+/**
+ * What hello declares to the hub (#115), as mcp-newoutlook's extension does (EXTENSION_FEATURES in
+ * its extension/background.js). No features yet: "native" is only for a native host's port.
+ * maxMessageBytes: the largest message it takes, the server's own MAX_MESSAGE_BYTES (Chrome's
+ * WebSocket sets no lower limit of its own).
+ */
+const CAPABILITIES = Object.freeze({ features: Object.freeze([]), maxMessageBytes: 256 * 1024 * 1024 });
 const CONFIRM_TIMEOUT_MS = 5 * 60_000;
 // One Teams request; below the server's own timeout.
 const REQUEST_TIMEOUT_MS = 60_000;
@@ -102,7 +109,7 @@ const TRAFFIC_KEY = "traffic";
 const TRAFFIC_UNTIL_KEY = "trafficUntil";
 const TRAFFIC_RECORD_MS = 30 * 60_000;
 let traffic = null;
-let trafficSave = null;
+let trafficSave = null; // { timer, store }: the pending save, and the storage it goes to
 let trafficQueue = Promise.resolve();
 let trafficUntil = null; // ms since 1970 when recording ends (0: off); null until read from storage
 
@@ -123,11 +130,23 @@ function updateTraffic(fn, { ifRecording = false } = {}) {
       const next = fn(traffic);
       if (next === traffic) return;
       traffic = next;
-      clearTimeout(trafficSave);
-      trafficSave = setTimeout(() => chrome.storage.session.set({ [TRAFFIC_KEY]: traffic }), 500);
+      clearTimeout(trafficSave?.timer);
+      // The storage is taken now: the save goes where the request was recorded, whatever `chrome` is
+      // by then (in tests, the next test's fake or none).
+      const store = chrome.storage.session;
+      trafficSave = { store, timer: setTimeout(savePendingTraffic, 500) };
     })
     .catch(() => {});
   return trafficQueue;
+}
+
+/** Saves the log now if a save is pending (also for tests, instead of waiting half a second). */
+export function savePendingTraffic() {
+  if (!trafficSave) return;
+  const { store, timer } = trafficSave;
+  clearTimeout(timer);
+  trafficSave = null;
+  store.set({ [TRAFFIC_KEY]: traffic }).catch(() => {}); // kept in memory: the next change saves again
 }
 
 const trafficFilter = { urls: teams.TRAFFIC_URLS, types: ["xmlhttprequest", "other", "media"] };
@@ -1991,7 +2010,7 @@ async function connect() {
         secret = await pairingToken(token);
         if (!secret) return refuse("This copy of the extension has no pairing file. Run `npx mcp-teams setup` and load the extension from the folder it shows.");
         const proof = await teams.pairingProof(secret, "client", msg.nonce);
-        socket.send(JSON.stringify({ type: "hello", proof, nonce, version: VERSION, browser: browserName(), instance }));
+        socket.send(JSON.stringify({ type: "hello", proof, nonce, version: VERSION, browser: browserName(), instance, capabilities: CAPABILITIES }));
       } else if (msg.type === "welcome" && !checking) {
         const notProven = () => refuse(`The program on port ${port || DEFAULT_PORT} could not prove it is your mcp-teams server, so the extension doesn't answer it.`);
         checking = (async () => {
@@ -2045,6 +2064,53 @@ async function connect() {
 
 /** Requests being run, by id, so they can be withdrawn (a cancel from the server, or their connection closed). */
 const running = new Map();
+
+/** True when version a is newer than b (x.y.z; anything else never counts as newer), as isNewer in src/bridge.ts. */
+function isNewerVersion(a, b) {
+  const parse = (v) => (typeof v === "string" && /^\d+\.\d+\.\d+$/.test(v) ? v.split(".").map(Number) : null);
+  const x = parse(a);
+  const y = parse(b);
+  if (!x || !y) return false;
+  for (let i = 0; i < 3; i++) if (x[i] !== y[i]) return x[i] > y[i];
+  return false;
+}
+
+// chrome.storage.local: { version, at } of the last reload into a newer version found on disk.
+const SELF_UPDATE_KEY = "selfUpdateTried";
+/** A reload into the same version on disk is tried again only after this long (no reload loop). */
+export const SELF_UPDATE_RETRY_MS = 10 * 60_000;
+
+/** The version in this extension's folder on disk (read fresh, not the one loaded), or null. */
+async function versionOnDisk() {
+  try {
+    const res = await fetch(chrome.runtime.getURL("manifest.json"), { cache: "no-store" });
+    return res.ok ? ((await res.json()).version ?? null) : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * #111: a server updated this extension's folder (syncExtension) but its reload never got
+ * through, e.g. the hub restarted while it asked, or that server's session ended first. The
+ * old code then kept running against the new files until someone reloaded the extension by
+ * hand. On each reconnect alarm, the extension compares its folder with what it runs and
+ * reloads itself into a newer version, without any server. Never while it runs a request (a
+ * send's confirmation window would close), and the same version at most every
+ * SELF_UPDATE_RETRY_MS, so a version Chrome fails to load can't make it reload on every alarm.
+ */
+export async function reloadIfUpdatedOnDisk(now = Date.now()) {
+  const onDisk = await versionOnDisk();
+  if (!isNewerVersion(onDisk, VERSION)) return false;
+  if (running.size || pendingSends.size || autoSending) return false; // the next alarm looks again
+  const tried = (await chrome.storage.local.get(SELF_UPDATE_KEY))[SELF_UPDATE_KEY];
+  if (tried?.version === onDisk && now - tried.at < SELF_UPDATE_RETRY_MS) return false;
+  await chrome.storage.local.set({ [SELF_UPDATE_KEY]: { version: onDisk, at: now } });
+  // Again: a request may have come in during the storage calls.
+  if (running.size || pendingSends.size || autoSending) return false;
+  chrome.runtime.reload();
+  return true;
+}
 
 /**
  * What a handler gets besides its params: whether the request was withdrawn (by the server,
@@ -2172,6 +2238,7 @@ export function registerListeners() {
   chrome.runtime.onMessage.addListener(onPopupMessage);
   chrome.alarms.onAlarm.addListener((a) => {
     if (a.name !== "reconnect") return;
+    reloadIfUpdatedOnDisk().catch(() => {});
     connect();
     closeLeftoverHelperTab().catch(() => {});
     recaptureOnce().catch(() => {});
