@@ -362,6 +362,10 @@ export interface Worker {
    * needed for teardown either: a pending save goes to the fake chrome the request was recorded in.
    */
   savePendingTraffic: () => void;
+  /** Reloads the extension when its folder on disk holds a newer version (#111); true when it did. */
+  reloadIfUpdatedOnDisk: (now?: number) => Promise<boolean>;
+  /** How long a reload into the same version on disk waits before it is tried again. */
+  SELF_UPDATE_RETRY_MS: number;
 }
 
 /** Every worker loadWorker loaded that stopWorkers hasn't stopped yet. */

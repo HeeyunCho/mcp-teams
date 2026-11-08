@@ -1,6 +1,6 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { isLostCall, type ExtensionBridge } from "./bridge.js";
+import { isLostCall, type Capabilities, type ExtensionBridge, type ExtensionInfo } from "./bridge.js";
 import type { Config } from "./config.js";
 import { readBuildInfo, restartCheck, restartHint } from "./buildInfo.js";
 import { BUILD_DIR, RUNNING_BUILD } from "./config.js";
@@ -83,6 +83,9 @@ export interface ToolsOptions {
   build?: { dir: string; now?: () => number };
 }
 
+/** What an extension declared (#115); one from before #115, or seen through a hub from before it, has no features. */
+const declaredBy = (e: ExtensionInfo): Capabilities => e.capabilities ?? { features: [], maxMessageBytes: null };
+
 export function registerTools(server: McpServer, bridge: ExtensionBridge, config: ToolsConfig, options: ToolsOptions = {}) {
   const running = options.build ? readBuildInfo(options.build.dir) : RUNNING_BUILD;
   // The version of the code that runs (its build.json), not package.json's.
@@ -113,13 +116,27 @@ export function registerTools(server: McpServer, bridge: ExtensionBridge, config
         // With several browsers connected, calls go to the one shown above (list_teams and
         // list_chats: to one with a Teams tab open, if that one has none).
         ...(bridge.extensions.length > 1
-          ? { browsers: bridge.extensions.map((e) => ({ browser: e.browser ?? null, version: e.version })) }
+          ? { browsers: bridge.extensions.map((e) => ({ browser: e.browser ?? null, version: e.version, capabilities: declaredBy(e) })) }
           : {}),
         versionsMatch: bridge.extension ? bridge.extension.version === serverVersion : null,
         bridge: bridge.listenError ?? (bridge.connected ? "connected" : "waiting for extension"),
+        // #111: what the user can do; the extension tries to connect every 30 s on its own.
+        ...(bridge.connected || bridge.listenError
+          ? {}
+          : {
+              hint: "No browser extension is connected. Open Chrome or Edge (the extension connects within 30 s). If it stays disconnected, open chrome://extensions, reload mcp-teams and look for errors there; then reload the Teams tab.",
+            }),
         // hub: this session owns the port; peer: it forwards through another session's server.
         role: bridge.role,
         ...(bridge.role === "peer" ? { hubServer: bridge.hubVersion } : {}),
+        // #115: what each side declared in the handshake. hub: only on a peer; extension: the one calls go to.
+        capabilities: {
+          server: bridge.capabilities,
+          ...(bridge.role === "peer" && bridge.hubCapabilities ? { hub: bridge.hubCapabilities } : {}),
+          ...(bridge.extension ? { extension: declaredBy(bridge.extension) } : {}),
+        },
+        // How the extension reaches the hub: only the WebSocket until the native host (ADR 0001) ships.
+        transport: "websocket",
         // The port the bridge uses (with port 0 configured, the free one it got).
         port: bridge.port,
         teams,
