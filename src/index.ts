@@ -8,6 +8,7 @@ import { registerTools } from "./tools.js";
 import { setup } from "./setup.js";
 import { installedVersion, PACKAGED_EXTENSION_DIR, syncExtension, writePairing } from "./extension.js";
 import { isNewer } from "./bridge.js";
+import { reloadUntilUpdated } from "./extensionUpdate.js";
 
 // A stray error in a socket callback must not end the server (the AI app would show it
 // as "failed"); log it on stderr, which isn't the MCP channel.
@@ -103,12 +104,9 @@ process.stdin.on("close", shutdown);
 // itself when it connects, see bridge.ts).
 void (async () => {
   if (!extensionUpdated) return;
-  for (const end = Date.now() + 120_000; !bridge.connected && Date.now() < end; ) await new Promise((r) => setTimeout(r, 1_000));
-  if (!bridge.connected) return;
-  try {
-    const { before, after } = await bridge.reloadExtension();
-    console.error(`[mcp-teams ${SERVER_VERSION}] extension updated: ${before ?? "?"} → ${after}`);
-  } catch (err) {
-    console.error(`[mcp-teams] extension update needs a reload in the browser: ${(err as Error).message}`);
-  }
+  // #111: retried while the hub changes hands right after the update (see reloadUntilUpdated).
+  const r = await reloadUntilUpdated(bridge, installedVersion() ?? SERVER_VERSION);
+  if (r.ok) console.error(`[mcp-teams ${SERVER_VERSION}] extension updated: ${r.before ?? "?"} → ${r.after}`);
+  // From 0.3.47 on, the extension also reloads itself when its folder holds a newer version.
+  else console.error(`[mcp-teams] extension update needs a reload in the browser: ${r.error}`);
 })();

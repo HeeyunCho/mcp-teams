@@ -46,6 +46,38 @@ export interface ExtensionInfo {
   origin?: string;
   /** Stays the same for one browser profile across reconnects. */
   instance?: string;
+  /** What it declared in hello (#115); no features for an extension from before #115. Hubs before #115 send none to peers. */
+  capabilities?: Capabilities;
+}
+
+/**
+ * What one side of the bridge tells the other it can do (#115), in hello, peer-hello, welcome and
+ * peer-welcome, so newer behaviour is only used with a side that declares it. Ported from
+ * mcp-newoutlook src/bridge.ts (Capabilities, SERVER_FEATURES, featuresOf; commit 693e827).
+ */
+export interface Capabilities {
+  /** Protocol features beyond the original request/response (see SERVER_FEATURES). */
+  features: string[];
+  /** The largest message this side accepts; null when it didn't say (a side from before #115). */
+  maxMessageBytes: number | null;
+}
+
+/**
+ * Protocol features this server supports, sent in welcome, peer-hello and peer-welcome.
+ * - "checksSend": as the hub, it checks the browser it picks for a send (#22).
+ * Reserved, declared once they ship (ADR 0001): "native" (sent only by a native host) and
+ * "hostSwitch" (the hub can hand over to a newer build).
+ */
+export const SERVER_FEATURES: readonly string[] = Object.freeze(["checksSend"]);
+
+/** The string features of a message's capabilities; none for a side too old to send them. */
+const featuresOf = (msg: any): string[] =>
+  Array.isArray(msg?.capabilities?.features) ? msg.capabilities.features.filter((f: unknown): f is string => typeof f === "string") : [];
+
+/** What a hello or welcome declares; no features (and no known limit) for a side too old to send any. */
+function capabilitiesOf(msg: any): Capabilities {
+  const max = Number(msg?.capabilities?.maxMessageBytes);
+  return { features: featuresOf(msg), maxMessageBytes: Number.isFinite(max) && max > 0 ? max : null };
 }
 
 export type BridgeRole = "hub" | "peer" | "none";
@@ -256,7 +288,12 @@ export class ExtensionBridge {
   listenError?: string;
   /** Peer only: version of the hub server it forwards through. */
   hubVersion?: string;
-  /** Peer only: whether that hub checks the browser it picks for a send (#22); hubs before it don't. */
+  /** Peer only: what that hub declared in peer-welcome (#115); no features for a hub from before #115. */
+  hubCapabilities?: Capabilities;
+  /**
+   * Peer only: whether that hub checks the browser it picks for a send (#22); hubs before it don't.
+   * Its "checksSend" feature, or the bare checksSend: true of hubs before #115.
+   */
   hubChecksSend = false;
 
   private wss?: WebSocketServer;
@@ -302,6 +339,11 @@ export class ExtensionBridge {
 
   private get maxMessageBytes(): number {
     return this.opts.maxMessageBytes;
+  }
+
+  /** What this server tells extensions, peers and the hub it can do (#115). */
+  get capabilities(): Capabilities {
+    return { features: [...SERVER_FEATURES], maxMessageBytes: this.maxMessageBytes };
   }
 
   /** Read-only, for tests: calls waiting for an answer, and (hub) peers' calls being run. */
@@ -436,6 +478,7 @@ export class ExtensionBridge {
       browser: msg.browser,
       ...(origin ? { origin } : {}),
       ...(typeof msg.instance === "string" ? { instance: msg.instance } : {}),
+      capabilities: capabilitiesOf(msg),
     };
     const ours = origin === TRUSTED_EXTENSION_ORIGIN;
     const others = [...this.sockets].filter(([s]) => s !== ws);
@@ -466,7 +509,9 @@ export class ExtensionBridge {
     }
     this.sockets.set(ws, info);
     // heartbeatMs: this hub sends {type:"ping"} that often; the extension reconnects when they stop.
-    ws.send(JSON.stringify({ type: "welcome", serverVersion: this.serverVersion, heartbeatMs: this.opts.keepAliveMs, ...welcome }));
+    ws.send(
+      JSON.stringify({ type: "welcome", serverVersion: this.serverVersion, heartbeatMs: this.opts.keepAliveMs, capabilities: this.capabilities, ...welcome }),
+    );
     this.startKeepAlive(ws);
     this.updateExtensions();
   }
@@ -534,6 +579,8 @@ export class ExtensionBridge {
         extension: this.extension ?? null,
         extensions: this.extensions,
         heartbeatMs: this.opts.keepAliveMs,
+        capabilities: this.capabilities,
+        // Peers from before #115 read this instead of the "checksSend" feature.
         checksSend: true,
         ...welcome,
       }),
@@ -779,7 +826,9 @@ export class ExtensionBridge {
         if (!msg || typeof msg !== "object") return;
         if (msg.type === "challenge" && !challenged && typeof msg.nonce === "string") {
           challenged = true;
-          ws.send(JSON.stringify({ type: "peer-hello", proof: proof(this.token, "client", msg.nonce), nonce, version: this.serverVersion }));
+          ws.send(
+            JSON.stringify({ type: "peer-hello", proof: proof(this.token, "client", msg.nonce), nonce, version: this.serverVersion, capabilities: this.capabilities }),
+          );
         } else if (msg.type === "peer-welcome" && !joined) {
           // Only the real hub can answer our nonce; never forward calls to anything else.
           if (!challenged || !sameProof(msg.proof, proof(this.token, "server", nonce))) {
@@ -790,7 +839,8 @@ export class ExtensionBridge {
           clearTimeout(timer);
           this.hub = ws;
           this.hubVersion = String(msg.serverVersion ?? "unknown");
-          this.hubChecksSend = msg.checksSend === true;
+          this.hubCapabilities = capabilitiesOf(msg);
+          this.hubChecksSend = this.hubCapabilities.features.includes("checksSend") || msg.checksSend === true;
           this.extension = msg.extension ?? undefined;
           this.extensions = msg.extensions ?? (msg.extension ? [msg.extension] : []);
           heartbeatMs = Number(msg.heartbeatMs) > 0 ? Number(msg.heartbeatMs) : 0;
@@ -822,6 +872,7 @@ export class ExtensionBridge {
         // The hub went away: take over the port or join whoever did.
         this.hub = undefined;
         this.hubVersion = undefined;
+        this.hubCapabilities = undefined;
         this.hubChecksSend = false;
         this.extension = undefined;
         this.extensions = [];
