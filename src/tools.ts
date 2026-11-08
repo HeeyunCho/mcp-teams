@@ -4,7 +4,7 @@ import { isLostCall, type Capabilities, type ExtensionBridge, type ExtensionInfo
 import type { Config } from "./config.js";
 import { readBuildInfo, restartCheck, restartHint } from "./buildInfo.js";
 import { BUILD_DIR, RUNNING_BUILD } from "./config.js";
-import { sessionNote, type TeamsStatus } from "./sessionNote.js";
+import { failedCallNote, isMissingSession, sessionNote, type TeamsStatus } from "./sessionNote.js";
 
 /** Sending waits for the user's click in the confirmation window (5 minutes at most). */
 const SEND_TIMEOUT_MS = 6 * 60_000;
@@ -28,16 +28,17 @@ type Extra = { signal?: AbortSignal };
 
 /**
  * Makes `safe`, which wraps a handler so thrown errors become MCP tool errors instead of protocol errors,
- * each with `hint()`'s line when it has one. Handlers pass extra.signal to bridge.call, so cancelling a
- * tool withdraws its extension call.
+ * each with `hint()`'s line when it has one. `explain` may give an error's message in place of its own
+ * (null keeps it). Handlers pass extra.signal to bridge.call, so cancelling a tool withdraws its
+ * extension call.
  */
-function safeWith(hint: () => string | null) {
+function safeWith(hint: () => string | null, explain: (err: unknown, extra: Extra) => Promise<string | null>) {
   return <A, E extends Extra = Extra>(fn: (args: A, extra: E) => Promise<ReturnType<typeof text>>) =>
     async (args: A, extra: E) => {
       try {
         return await fn(args, extra);
       } catch (err) {
-        return fail(err, hint());
+        return fail((await explain(err, extra).catch(() => null)) ?? err, hint());
       }
     };
 }
@@ -92,7 +93,16 @@ export function registerTools(server: McpServer, bridge: ExtensionBridge, config
   const serverVersion = running.version;
   // Read on demand only (get_version, a failed call): no timers, no watchers.
   const onDisk = restartCheck(running, options.build?.dir ?? BUILD_DIR, options.build?.now);
-  const safe = safeWith(() => restartHint(running, onDisk()));
+  const now = options.build?.now ?? (() => Date.now());
+  // A call that failed for a missing session says why, as get_version's note does (#103), from the
+  // extension's status, read only for such a failure.
+  const explain = async (err: unknown, extra: Extra) => {
+    const message = err instanceof Error ? err.message : String(err);
+    if (!isMissingSession(message) || !bridge.connected) return null;
+    const status = await bridge.call("status", {}, undefined, extra.signal);
+    return failedCallNote(message, status as TeamsStatus | null, now());
+  };
+  const safe = safeWith(() => restartHint(running, onDisk()), explain);
   const autoSendTo = config.autoSendTo ?? [];
   server.registerTool(
     "get_version",
@@ -141,7 +151,7 @@ export function registerTools(server: McpServer, bridge: ExtensionBridge, config
         port: bridge.port,
         teams,
         // A Teams tab without a session: which case it looks like and what to do (#103).
-        ...noteOf(sessionNote(teams as TeamsStatus | null, (options.build?.now ?? Date.now)())),
+        ...noteOf(sessionNote(teams as TeamsStatus | null, now())),
       });
     }),
   );

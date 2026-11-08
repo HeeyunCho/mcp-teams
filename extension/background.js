@@ -566,7 +566,8 @@ async function closeLeftoverHelperTab() {
   if (tabId != null) await closeHelperTab(tabId);
 }
 
-const SERVICE_HELP = {
+// Exported for the tests: the server recognises the missing-session errors by this wording (src/sessionNote.ts).
+export const SERVICE_HELP = {
   chatsvc: "Teams' chat session is not available. Reload the Teams tab and try again.",
   csa: "Teams' team list session is not available. Reload the Teams tab and try again.",
   mt: "Teams' people session is not available. Reload the Teams tab and try again.",

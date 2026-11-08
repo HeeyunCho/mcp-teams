@@ -22,8 +22,14 @@ const FINISH_SIGN_IN = "open the Teams tab and finish signing in (an account pic
 /** A signed-in Teams page calls its services every few seconds; a tab silent for longer than this may be asleep. */
 export const IDLE_MS = 5 * 60_000;
 
-/** The note for get_version, or null when there is nothing to explain (or an older extension doesn't say). */
-export function sessionNote(status: TeamsStatus | null | undefined, now: number): string | null {
+/**
+ * Where the note goes: get_version's output, or the error of a call that found no session. The worker
+ * fails such a call only after its own recovery (a background Teams tab) failed for it.
+ */
+export type NoteFor = "get_version" | "failed call";
+
+/** The note, or null when there is nothing to explain (or an older extension doesn't say). */
+export function sessionNote(status: TeamsStatus | null | undefined, now: number, noteFor: NoteFor = "get_version"): string | null {
   if (!status || !status.teamsTabs || status.sessions?.some((s) => s.sessionCaptured)) return null;
   if (!("lastTeamsCall" in status)) return null; // an extension from before #103
   const last = status.lastTeamsCall ?? null;
@@ -35,11 +41,14 @@ export function sessionNote(status: TeamsStatus | null | undefined, now: number)
     // No signed-in call since the extension started: right after a browser start or an extension
     // load, a tab that signed in before the extension listened looks like this until the extension's
     // own recovery (a 15 s grace, then a background Teams tab for up to a minute) brings the session back.
+    if (!signedIn && noteFor === "failed call") {
+      return `${stuck}It looks stuck at sign-in. Waiting for the Teams tab, or the extension's own recovery, didn't bring the session back for this call: ${FINISH_SIGN_IN}`;
+    }
     if (!signedIn) {
       return (
         stuck +
         "It looks stuck at sign-in. Within about a minute and a half of the browser or the extension starting, the extension tries to bring the session back by itself; " +
-        `if this note is still there after that, ${FINISH_SIGN_IN}`
+        `if get_version still says so after that, ${FINISH_SIGN_IN}`
       );
     }
     return `${stuck}It looks stuck at sign-in: ${FINISH_SIGN_IN}`;
@@ -60,4 +69,23 @@ export function sessionNote(status: TeamsStatus | null | undefined, now: number)
     );
   }
   return null;
+}
+
+/**
+ * The worker's error for a call that found no chat, team list or people session (SERVICE_HELP in
+ * extension/background.js), up to its generic remedy. Search's (substrate) has a remedy of its own.
+ */
+const MISSING_SESSION = /^(Teams' (?:chat|team list|people) session is not available\.) Reload the Teams tab and try again\.$/;
+
+/** Whether a failed call's error is a missing session that sessionNote may explain. */
+export const isMissingSession = (message: string) => MISSING_SESSION.test(message);
+
+/**
+ * A failed call's error with the generic remedy replaced by sessionNote's, or null to keep the error
+ * as it is (not a missing session, or nothing to explain).
+ */
+export function failedCallNote(message: string, status: TeamsStatus | null | undefined, now: number): string | null {
+  const missing = MISSING_SESSION.exec(message);
+  const note = missing && sessionNote(status, now, "failed call");
+  return note ? `${missing[1]} ${note}` : null;
 }
