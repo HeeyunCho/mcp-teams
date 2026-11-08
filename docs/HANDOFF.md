@@ -1,6 +1,6 @@
 # Handoff: mcp-teams after 0.3.52 (2026-11-08)
 
-Repo: GitHub `HeeyunCho/mcp-teams`. Branch `main`, at `80620c9 Merge pull request #118` and its release commit `chore(release): v0.3.52`. No PRs are open, and no worktrees or work branches are left.
+Repo: GitHub `HeeyunCho/mcp-teams`. Branch `main`: 0.3.52 is the latest release (`31e06fb chore(release): v0.3.52`), followed only by docs merges (#119 and this handoff). No PRs are open, and no worktrees or work branches are left.
 
 ## Where things stand
 
@@ -33,6 +33,16 @@ Repo: GitHub `HeeyunCho/mcp-teams`. Branch `main`, at `80620c9 Merge pull reques
 - **Releases are automatic.** `.github/workflows/version.yml` runs on every push to `main` except Markdown-only pushes:
   - it bumps the version from the commit messages (`scripts/bump-version.mjs`), tags it, and publishes to npm with trusted publishing (OIDC);
   - npm can take a minute or two to show the new version (`npm view mcp-teams version --prefer-online`).
+
+## This Mac (checked 2026-11-08, about 08:10 local time)
+
+- **Versions:** the hub on port 47393 and the extension both run 0.3.52; the shared npx cache holds 0.3.52. `get_version` reports `restartNeeded: false` and `versionsMatch: true`.
+  - The hub belongs to the Claude Code session in this repo; the user reconnected it with `/mcp` after the release.
+- **Teams session:** captured, all four services signed in.
+  - After the extension reloaded into 0.3.52 its captures were empty, as expected.
+  - Its own recovery brought the session back within about 90 s, with no tab or extension reload.
+- **Other sessions:** the older Claude Code sessions (scion, MeetNotes, PM-HUB, local-plugins, mcp-newoutlook) still run their old mcp-teams servers. They join as peers and pick up new code only when each one reconnects.
+- **Claude Desktop:** not running. Its teams log ends with a clean shutdown at 04:47 UTC on 2026-11-08.
 
 ## Next up
 
