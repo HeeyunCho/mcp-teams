@@ -177,6 +177,11 @@ export const NOT_SENT = Object.freeze({
   waitedOut: (running: number) =>
     `Busy: this call waited its whole time limit for a turn (${running} calls at once run on the Teams tab, shared between AI sessions) and was not sent; try again shortly.`,
   gone: "The connection to the browser extension closed before this call's turn came; it was not sent. Try again.",
+  /**
+   * A call that came while the hub drains before it closes (#112), or one a peer still had on its
+   * way to a hub that said it had answered everything it accepted (its {type:"drained"} note).
+   */
+  hubClosing: "The mcp-teams hub is closing (the AI session that ran it ended); this call was not sent. Try again in a few seconds.",
   /** A send on an extension that can't close its confirmation window when the send is withdrawn. */
   extensionTooOld: (version: unknown) =>
     `Nothing was sent: the browser extension (${String(version)}) is older than ${MIN_SEND_EXTENSION} and can't close its confirmation window when the AI stops waiting, so a late click could still post. Update it with reload_extension (it loads the version mcp-teams put in its folder), or run \`npx mcp-teams setup\` if it was loaded from another folder, then send again.`,
@@ -193,6 +198,14 @@ function oldestTooOld(extensions: ExtensionInfo[]): string {
   const unreadable = tooOld.find((v) => !/^\d+\.\d+\.\d+$/.test(v));
   return unreadable ?? tooOld.reduce<string | undefined>((a, v) => (a === undefined || isNewer(a, v) ? v : a), undefined) ?? "unknown";
 }
+
+/**
+ * How long a hub whose AI session ended (its stdin closed) keeps serving the calls in flight before
+ * it closes (#112). Ported from mcp-newoutlook src/bridge.ts DRAIN_MAX_WAIT_MS (PR #108 there, #68b).
+ * The AI app may kill the process soon after, so this stays short, and is not made longer for a
+ * send waiting for the user's click: that one is withdrawn at the end, as on any close.
+ */
+export const DRAIN_MAX_WAIT_MS = 5_000;
 
 /** A peer's watchdog never waits less for its hub's ping: a busy machine runs timers late. */
 const MIN_HUB_SILENCE_MS = 2_000;
@@ -310,6 +323,10 @@ export class ExtensionBridge {
   private retry?: NodeJS.Timeout;
   private closed = false;
   private steppingDown = false;
+  /** Hub: its session ended and it drains before closing (#112); it starts no new call. */
+  private draining = false;
+  /** Hub: calls being run (from run() until they settle), the hub's own and its peers'. */
+  private active = 0;
   private alive = new WeakSet<WebSocket>(); // hub: extensions and peers that answered the last ping
   private backlogged = new WeakSet<WebSocket>(); // hub: peers over maxPeerBufferedBytes at the last tick
   private legacyReloaded = false; // hub: an extension of 0.2.0 or older was told to reload
@@ -358,6 +375,12 @@ export class ExtensionBridge {
     let n = 0;
     for (const t of this.turns.values()) n += t.queue.waiting;
     return n;
+  }
+
+  /** Hub: anything accepted and not answered yet: calls being run, sent, or waiting for a turn. */
+  private get busy(): boolean {
+    const { pending, peerCalls } = this.inFlight;
+    return !!(this.active || pending || peerCalls || this.queued);
   }
 
   /** Becomes the hub, or a peer of the existing hub. Keeps retrying in the background if neither works. */
@@ -668,6 +691,8 @@ export class ExtensionBridge {
         console.error(`[mcp-teams] could not answer a peer: ${(err as Error).message}`);
       }
     };
+    // Draining (#112): never run, so the peer may say it was not sent.
+    if (this.draining) return reply({ ok: false, error: NOT_SENT.hubClosing });
     let calls = this.peerCalls.get(ws);
     if (!calls) this.peerCalls.set(ws, (calls = new Map()));
     const ac = new AbortController();
@@ -801,6 +826,9 @@ export class ExtensionBridge {
       // 0.2.13 and older never ping peers: no watchdog.
       let watchdog: NodeJS.Timeout | undefined;
       let heartbeatMs = 0;
+      // The hub said it answered every call it accepted and runs no more (#112): whatever is still
+      // pending here when it closes never ran, so it fails as not sent rather than as a lost call.
+      let drained = false;
       // When the watchdog itself runs late, this peer stalled: the hub's ping may wait unread, so
       // it waits once more instead, but not twice in a row (see STALL_SLACK).
       const watch = (afterLate = false) => {
@@ -846,6 +874,8 @@ export class ExtensionBridge {
           heartbeatMs = Number(msg.heartbeatMs) > 0 ? Number(msg.heartbeatMs) : 0;
           if (heartbeatMs) watch();
           resolve(true);
+        } else if (msg.type === "drained" && joined && this.hub === ws) {
+          drained = true;
         } else if (msg.type === "ext-state") {
           this.extension = msg.extension ?? undefined;
           this.extensions = msg.extensions ?? (msg.extension ? [msg.extension] : []);
@@ -877,7 +907,7 @@ export class ExtensionBridge {
         this.extension = undefined;
         this.extensions = [];
         this.role = "none";
-        this.rejectAll(LOST_CALL.hubRestarted);
+        this.rejectAll(drained ? NOT_SENT.hubClosing : LOST_CALL.hubRestarted);
         if (!this.closed) {
           clearTimeout(this.retry);
           this.retry = setTimeout(() => void this.start(), 100 + Math.random() * 400);
@@ -899,6 +929,18 @@ export class ExtensionBridge {
 
   /** A call from `session` (null: this server's own, else the peer it came from). */
   private async run<T>(session: WebSocket | null, method: string, params: unknown = {}, timeoutMs = 60_000, signal?: AbortSignal, deadline?: number): Promise<T> {
+    // A hub that drains before it closes starts no new call (#112), its own session's included.
+    if (this.draining) throw new Error(NOT_SENT.hubClosing);
+    const counted = this.role === "hub";
+    if (counted) this.active++;
+    try {
+      return await this.runCall<T>(session, method, params, timeoutMs, signal, deadline);
+    } finally {
+      if (counted) this.active--;
+    }
+  }
+
+  private async runCall<T>(session: WebSocket | null, method: string, params: unknown, timeoutMs: number, signal?: AbortSignal, deadline?: number): Promise<T> {
     if (method === "reloadAll" && this.role === "hub") return this.reloadAll(timeoutMs) as Promise<T>;
     const target = this.role === "hub" ? await this.pickExtension(method) : this.role === "peer" ? this.hub : undefined;
     if (!this.connected || !target) {
@@ -1089,6 +1131,46 @@ export class ExtensionBridge {
       p.reject(new Error(reason));
       this.pending.delete(id);
     }
+  }
+
+  /**
+   * Closes the bridge when this server's AI session ends (#112; ported from mcp-newoutlook
+   * src/bridge.ts drainAndClose, PR #108 there). A hub with calls in flight (other sessions', a
+   * confirmation window) first stops taking new ones: they fail as not sent (NOT_SENT.hubClosing).
+   * It waits up to maxWaitMs for the running ones to be answered, then closes as close() does: a
+   * call still running fails as on any close, and a send still waiting for a click is withdrawn
+   * (its window closes). A peer, and a hub with nothing in flight, close at once.
+   *
+   * When nothing it accepted is left unanswered, it tells its peers ({type:"drained"}) just before
+   * it closes: from then on it runs nothing, so a call still on its way to it never ran, and the
+   * peer fails it as not sent instead of as a lost call. Peers from before #112 ignore the note.
+   */
+  async drainAndClose(maxWaitMs = DRAIN_MAX_WAIT_MS) {
+    if (this.closed) return;
+    if (this.role === "hub") {
+      this.draining = true;
+      const end = Date.now() + maxWaitMs;
+      while (this.busy && Date.now() < end && !this.closed && this.role === "hub") await new Promise((r) => setTimeout(r, 25));
+      if (this.closed) return;
+      if (this.role === "hub") {
+        if (!this.busy) {
+          const note = JSON.stringify({ type: "drained" });
+          for (const peer of this.peers) this.sendToPeer(peer, note);
+        } else {
+          // The bound ran out: have the extension drop what is still running first, so an open
+          // confirmation window closes rather than posting on a click before it sees the close.
+          for (const [id, p] of this.pending) {
+            if (p.socket?.readyState !== WebSocket.OPEN) continue;
+            try {
+              p.socket.send(JSON.stringify({ type: "cancel", id }));
+            } catch {
+              // closing anyway
+            }
+          }
+        }
+      }
+    }
+    await this.close();
   }
 
   async close() {
