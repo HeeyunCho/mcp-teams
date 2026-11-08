@@ -103,7 +103,8 @@ const shutdown = async () => {
 process.on("SIGINT", shutdown);
 process.on("SIGTERM", shutdown);
 process.stdin.on("close", async () => {
-  const drainMs = Number(process.env.TEAMS_MCP_DRAIN_MS) || DRAIN_MAX_WAIT_MS;
+  const fromEnv = process.env.TEAMS_MCP_DRAIN_MS ? Number(process.env.TEAMS_MCP_DRAIN_MS) : NaN;
+  const drainMs = Number.isFinite(fromEnv) && fromEnv >= 0 ? fromEnv : DRAIN_MAX_WAIT_MS; // 0: no drain
   setTimeout(() => process.exit(0), drainMs + 2_000).unref();
   await server.close().catch(() => {});
   await bridge.drainAndClose(drainMs);

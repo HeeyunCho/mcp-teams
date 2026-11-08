@@ -177,7 +177,7 @@ describe("#112: the hub drains when its session ends", { timeout: 15_000 }, () =
 
     const t0 = Date.now();
     await hub.drainAndClose(3_000);
-    expect(Date.now() - t0).toBeLessThan(200);
+    expect(Date.now() - t0).toBeLessThan(1_000); // "at once": well under the 3 s drain
     await until(() => peer.role === "hub", 3_000, "the peer to take over");
   });
 
@@ -191,7 +191,7 @@ describe("#112: the hub drains when its session ends", { timeout: 15_000 }, () =
     const own = hub.call("readMessages", {}, 5_000);
     const t0 = Date.now();
     await peer.drainAndClose(3_000);
-    expect(Date.now() - t0).toBeLessThan(200);
+    expect(Date.now() - t0).toBeLessThan(1_000); // "at once": well under the 3 s drain
     await expect(own).resolves.toEqual({ ok: true });
   });
 

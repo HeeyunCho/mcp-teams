@@ -47,8 +47,13 @@ async function startHub(env: Record<string, string>) {
   return { p, port };
 }
 
+/** Resolves once the fake extension has a readMessages request: the call is then in flight at the hub. */
+let readArrived: Promise<void> = Promise.resolve();
+
 /** A fake extension that answers readMessages after delayMs (never, when null). */
 function connectExtension(port: number, delayMs: number | null) {
+  let arrived!: () => void;
+  readArrived = new Promise<void>((r) => (arrived = r));
   return new Promise<WebSocket>((resolve) => {
     const ws = new WebSocket(`ws://127.0.0.1:${port}`, { origin: "chrome-extension://fake" });
     ws.on("message", async (raw) => {
@@ -56,6 +61,7 @@ function connectExtension(port: number, delayMs: number | null) {
       if (msg.type === "challenge") ws.send(JSON.stringify({ type: "hello", token: "tok", version: VERSION, browser: "Chrome" }));
       if (msg.type === "welcome") resolve(ws);
       if (msg.type !== "request") return;
+      if (msg.method === "readMessages") arrived();
       if (msg.method !== "status" && delayMs === null) return;
       const result =
         msg.method === "status"
@@ -93,7 +99,7 @@ describe("#112: closing the hub's session", { timeout: HUB_LISTEN_MS + 25_000 },
     peer = await startPeer(env, started.port);
 
     const read = readMessages(peer);
-    await new Promise((r) => setTimeout(r, 200));
+    await readArrived;
     const t0 = Date.now();
     hub.stdin!.end();
     const r = await read;
@@ -120,7 +126,7 @@ describe("#112: closing the hub's session", { timeout: HUB_LISTEN_MS + 25_000 },
     peer = await startPeer(env, started.port);
 
     const read = readMessages(peer);
-    await new Promise((r) => setTimeout(r, 200));
+    await readArrived;
     const t0 = Date.now();
     hub.stdin!.end();
     expect(await exited(hub)).toBe(0);
@@ -139,7 +145,7 @@ describe("#112: closing the hub's session", { timeout: HUB_LISTEN_MS + 25_000 },
     peer = await startPeer(env, started.port);
 
     void readMessages(peer).catch(() => {});
-    await new Promise((r) => setTimeout(r, 200));
+    await readArrived;
     const t0 = Date.now();
     hub.kill("SIGTERM");
     await exited(hub);
