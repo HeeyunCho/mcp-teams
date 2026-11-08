@@ -43,6 +43,11 @@ function captureSession(details) {
 
 const CAPTURED_SERVICES = ["chatsvc", "csa", "mt", "substrate"];
 let captureQueue = Promise.resolve(); // one capture at a time, so a switch is seen in order
+/** Whose session is stored, once the captures already queued are stored (a switch may be among them). */
+async function signedInOid() {
+  await captureQueue;
+  return (await chrome.storage.session.get("oid")).oid;
+}
 
 /**
  * Stores a capture. One from another user than the signed-in one (the user switched Teams to
@@ -779,7 +784,7 @@ async function sendTo(key, tab, findTab, url, method, headers, body, ctx, wait, 
   let foundAgain = false;
   for (let attempt = 0, repeat = false; ; repeat = true) {
     const waited = await passGate(key, ctx, wait);
-    if ((waited || repeat) && oid && (await chrome.storage.session.get("oid")).oid !== oid) throw new Error(ACCOUNT_CHANGED_WHILE("a request waited to be sent", "sends it as that account"));
+    if ((waited || repeat) && oid && (await signedInOid()) !== oid) throw new Error(ACCOUNT_CHANGED_WHILE("a request waited to be sent", "sends it as that account"));
     let res;
     try {
       res = await runInTab(tab, url, method, headers, body, ctx);

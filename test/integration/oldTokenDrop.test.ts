@@ -208,6 +208,41 @@ describe("77.2: a request is never sent again with the headers of an account tha
     expect(fake.sent.map((r) => [accountOf(r), r.tabId])).toEqual([["alex", 1]]); // never again, in tab 2
   });
 
+  it("77.2: the tab closes under a read of Alex's while Teams' switch to Sam is still being stored: the retry waits for that capture and fails as account changed", async () => {
+    // Tab 1 never answers; tab 2 answers whoever's token asks, so a retry as Alex would succeed.
+    const fake = createFakeChrome({ captured: [], services: { csa: (req) => (req.tabId === 1 ? never() : services.csa(req)) } });
+    fake.tabs.push({ id: 2, url: `${TEAMS_ORIGIN}/v2/`, status: "complete" });
+    fake.session.delete("oid");
+    const worker = await loadWorker(fake);
+    worker.registerListeners();
+    await teamsSends(fake, bearer("alex", OLD));
+    const read = worker.handlers.listChats({});
+    await vi.waitFor(() => expect(csaReads(fake)).toBe(1));
+
+    // Sam's capture is held at its first storage read, so it is still queued when the retry checks.
+    const get = vi.mocked(fake.chrome.storage.session.get);
+    const realGet = get.getMockImplementation()!;
+    let release!: () => void;
+    const held = new Promise<void>((r) => (release = r));
+    let holding = true;
+    get.mockImplementation(async (keys) => {
+      if (holding && Array.isArray(keys) && keys.includes("accountSwitch")) {
+        holding = false;
+        await held;
+      }
+      return realGet(keys);
+    });
+    const switching = teamsSends(fake, bearer("sam", SWITCHING));
+    fake.closeTab(1);
+    // Only unblocks the capture: the outcome doesn't depend on when.
+    setTimeout(release, 50);
+
+    await expect(read).rejects.toThrow(WAITED);
+    await switching;
+    expect(fake.sent.map((r) => [accountOf(r), r.tabId])).toEqual([["alex", 1]]); // never again, in tab 2
+    expect(await signedInAs(worker)).toBe(`8:orgid:${ACCOUNT.sam.oid}`);
+  });
+
   it("77.2: Teams switches to Sam while a read of Alex's waits for the gate another read's 429 closed: its first send fails as account changed, and Alex's headers go out only once", async () => {
     let throttled = false;
     const fake = createFakeChrome({
