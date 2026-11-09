@@ -1,7 +1,7 @@
 // #103: a tool call that fails because a Teams session is missing says why, as get_version's note does
 // (stuck at sign-in, asleep, or a call the capture missed), instead of only "Reload the Teams tab". The
 // tools against a scripted bridge: its extension fails the call with the worker's own error for that
-// service, and answers status with the given object.
+// service, and answers status as the test says.
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -25,40 +25,72 @@ afterEach(async () => {
   vi.useRealTimers();
 });
 
-type Status = object | Error;
+/**
+ * What the extension answers status with: an object, an Error it fails with, or a function given the
+ * timeout and signal the server read status with (for a status that doesn't answer).
+ */
+type Status = object | Error | ((timeoutMs: number | undefined, signal: AbortSignal | undefined) => Promise<unknown>);
+
+type Options = {
+  /** The bridge's `connected` (true). */
+  connected?: boolean;
+  /** The client's signal for the call, to cancel it. */
+  signal?: AbortSignal;
+  /** Fake setTimeout too (Date always is), to show how long a status that doesn't answer is waited for. */
+  timers?: boolean;
+};
 
 /**
  * Calls `tool` at `now` against an extension that fails it with `error` and answers status with
- * `status` (or fails status with it, if an Error). Returns the result and the methods called.
+ * `status`. Returns the result (a promise) and the methods called so far.
  */
-async function failing(tool: string, error: string, status: Status, now: string) {
-  vi.useFakeTimers({ toFake: ["Date"] });
+function start(tool: string, error: string, status: Status, now: string, opts: Options = {}) {
+  vi.useFakeTimers({ toFake: opts.timers ? ["Date", "setTimeout", "clearTimeout"] : ["Date"] });
   vi.setSystemTime(new Date(now));
   const calls: string[] = [];
   const bridge = {
-    connected: true,
+    connected: opts.connected ?? true,
     extension: { version: "0.3.47", browser: "Chrome" },
     extensions: [{ version: "0.3.47", browser: "Chrome" }],
     listenError: null,
     role: "hub",
     port: 0,
     hubVersion: null,
-    call: async (method: string) => {
+    call: async (method: string, _params?: unknown, timeoutMs?: number, signal?: AbortSignal) => {
       calls.push(method);
       if (method !== "status") throw new Error(error);
+      if (typeof status === "function") return status(timeoutMs, signal);
       if (status instanceof Error) throw status;
       return status;
     },
   } as unknown as Parameters<typeof registerTools>[1];
   const server = new McpServer({ name: "mcp-teams", version: "0.0.0" });
   registerTools(server, bridge, { port: 0, token: TOKEN });
-  client = new Client({ name: "test", version: "0.0.0" });
+  const c = new Client({ name: "test", version: "0.0.0" });
+  client = c;
   const [a, b] = InMemoryTransport.createLinkedPair();
-  await Promise.all([server.connect(a), client.connect(b)]);
   const args = tool === "search_messages" || tool === "find_people" ? { query: "contoso" } : {};
-  const r = (await client.callTool({ name: tool, arguments: args })) as { isError?: boolean; content: { text: string }[] };
-  return { isError: r.isError, text: r.content[0].text, calls };
+  const result = Promise.all([server.connect(a), c.connect(b)])
+    .then(() => c.callTool({ name: tool, arguments: args }, undefined, { signal: opts.signal }))
+    .then((r) => {
+      const { isError, content } = r as { isError?: boolean; content: { text: string }[] };
+      return { isError, text: content[0].text, calls };
+    });
+  return { result, calls };
 }
+
+/** start's result, awaited. */
+const failing = (tool: string, error: string, status: Status, now: string, opts: Options = {}) => start(tool, error, status, now, opts).result;
+
+/** A status the extension never answers: it fails as the bridge's own timeout (60 s if none is given) or the signal ends it. */
+const unanswered: Status = (timeoutMs, signal) =>
+  new Promise((_, reject) => {
+    const timer = setTimeout(() => reject(new Error("The extension did not answer status in time.")), timeoutMs ?? 60_000);
+    signal?.addEventListener("abort", () => {
+      clearTimeout(timer);
+      reject(new Error("Cancelled."));
+    });
+  });
 
 const noServices = { chatsvc: null, csa: null, mt: null, substrate: null };
 /** A status with a Teams tab open and no chat session, as the extension reports it. */
@@ -73,59 +105,32 @@ const uncaptured = (calls: object, services: object = noServices) => ({
 });
 const neverSignedIn = uncaptured({ lastTeamsCall: { at: "2026-10-01T10:26:37.000Z", host: "teams.cloud.microsoft" }, lastSignedInCall: null });
 
+// Which note fits which status is test/unit/failedCallNote.test.ts; here, that the tools give the
+// worker's own errors the note, and how they read status for it.
 describe("#103: a call that fails for a missing session says why", () => {
-  // The worker fails the call only after its own recovery (a background Teams tab) failed for it, so
-  // the error doesn't send the user to wait for that recovery.
-  it("the chat session missing, the tab never signed in: the call's error says it looks stuck at sign-in, and that the recovery was tried", async () => {
-    const r = await failing("list_chats", help.chatsvc, neverSignedIn, "2026-10-01T11:30:00Z");
-    expect(r.isError).toBe(true);
-    expect(r.text).toBe(
-      "Teams' chat session is not available. The Teams tab hasn't made a signed-in call since the extension started watching; its last call (2026-10-01T10:26:37.000Z, teams.cloud.microsoft) wasn't signed in. It looks stuck at sign-in. Waiting for the Teams tab, or the extension's own recovery, didn't bring the session back for this call: open the Teams tab and finish signing in (an account picker, a sign-in page or a prompt may be waiting there).",
-    );
+  const asleep = uncaptured({ lastTeamsCall: null, lastSignedInCall: null });
+  const note = "The Teams tab has made no calls since the extension started watching; it may be asleep.";
+
+  it("the chat session missing: list_chats' error has the note, from status", async () => {
+    const r = await failing("list_chats", help.chatsvc, asleep, "2026-10-01T10:30:00Z");
+    expect(r).toMatchObject({ isError: true, calls: ["listChats", "status"] });
+    expect(r.text).toMatch(new RegExp(`^Teams' chat session is not available\\. ${note}`));
   });
 
-  it("the chat session missing, unsigned calls since the last signed-in one: the call's error says it looks stuck at sign-in", async () => {
-    const status = uncaptured(
-      {
-        lastTeamsCall: { at: "2026-10-01T10:26:37.000Z", host: "go.trouter.teams.microsoft.com" },
-        lastSignedInCall: { at: "2026-10-01T09:00:00.000Z", host: "teams.cloud.microsoft" },
-      },
-      { ...noServices, csa: "2026-10-01T09:00:00.000Z" },
-    );
-    const r = await failing("list_chats", help.chatsvc, status, "2026-10-01T10:27:00Z");
-    expect(r.text).toBe(
-      "Teams' chat session is not available. The Teams tab hasn't made a signed-in call since 2026-10-01T09:00:00.000Z; its last call (2026-10-01T10:26:37.000Z, go.trouter.teams.microsoft.com) wasn't signed in. It looks stuck at sign-in: open the Teams tab and finish signing in (an account picker, a sign-in page or a prompt may be waiting there).",
-    );
-  });
-
-  it("the team list session missing, the tab silent: the call's error says it may be asleep", async () => {
-    const r = await failing("list_teams", help.csa, uncaptured({ lastTeamsCall: null, lastSignedInCall: null }), "2026-10-01T10:30:00Z");
+  it("the team list session missing: list_teams' error has the note, from status", async () => {
+    const r = await failing("list_teams", help.csa, asleep, "2026-10-01T10:30:00Z");
     expect(r).toMatchObject({ isError: true, calls: ["listTeams", "status"] });
-    expect(r.text).toBe(
-      "Teams' team list session is not available. The Teams tab has made no calls since the extension started watching; it may be asleep. Click into the Teams tab, or add teams.cloud.microsoft to Chrome's \"Always keep these sites active\" (Settings > Performance).",
-    );
+    expect(r.text).toMatch(new RegExp(`^Teams' team list session is not available\\. ${note}`));
   });
 
-  it("the people session missing after a recent signed-in call: the call's error says it looks like a capture problem", async () => {
-    const call = { at: "2026-10-01T10:00:08.000Z", host: "teams.cloud.microsoft" };
-    const r = await failing("find_people", help.mt, uncaptured({ lastTeamsCall: call, lastSignedInCall: call }), "2026-10-01T10:00:10Z");
-    expect(r.text).toBe(
-      "Teams' people session is not available. The Teams tab made a signed-in call at 2026-10-01T10:00:08.000Z (teams.cloud.microsoft), but no chat session was captured. Refresh the Teams tab or reload the extension; if that doesn't help, this looks like a capture problem: please report it with api_traffic output (call it with record: true, use Teams for a minute, then call it again).",
-    );
+  it("the people session missing: find_people's error has the note, from status", async () => {
+    const r = await failing("find_people", help.mt, asleep, "2026-10-01T10:30:00Z");
+    expect(r).toMatchObject({ isError: true, calls: ["findPeople", "status"] });
+    expect(r.text).toMatch(new RegExp(`^Teams' people session is not available\\. ${note}`));
   });
 });
 
 describe("#103: a failed call keeps its error when there is nothing to explain", () => {
-  it("the chat session captured but the team list's missing", async () => {
-    const call = { at: "2026-10-01T10:00:08.000Z", host: "teams.cloud.microsoft" };
-    const captured = {
-      ...uncaptured({ lastTeamsCall: call, lastSignedInCall: call }, { ...noServices, chatsvc: call.at }),
-      sessions: [{ sessionCaptured: true }],
-    };
-    const r = await failing("list_teams", help.csa, captured, "2026-10-01T10:00:10Z");
-    expect(r).toEqual({ isError: true, text: "Teams' team list session is not available. Reload the Teams tab and try again.", calls: ["listTeams", "status"] });
-  });
-
   it("search's session missing: its own remedy stays, and status isn't asked", async () => {
     const r = await failing("search_messages", help.substrate, neverSignedIn, "2026-10-01T11:30:00Z");
     expect(r).toEqual({
@@ -133,12 +138,6 @@ describe("#103: a failed call keeps its error when there is nothing to explain",
       text: "Teams' search session is not available yet. Click into the search box at the top of Teams once (that makes Teams sign in to search), then try again.",
       calls: ["searchMessages"],
     });
-  });
-
-  it("an extension that doesn't report its last calls", async () => {
-    const old = { extensionVersion: "0.3.43", teamsTabs: 1, sessions: [{ sessionCaptured: false }], services: noServices };
-    const r = await failing("list_chats", help.chatsvc, old, "2026-10-01T11:30:00Z");
-    expect(r.text).toBe("Teams' chat session is not available. Reload the Teams tab and try again.");
   });
 
   it("status failing too", async () => {
@@ -149,5 +148,36 @@ describe("#103: a failed call keeps its error when there is nothing to explain",
   it("another error: status isn't asked", async () => {
     const r = await failing("list_chats", "Teams HTTP 500 (chatsvc)", neverSignedIn, "2026-10-01T11:30:00Z");
     expect(r).toEqual({ isError: true, text: "Teams HTTP 500 (chatsvc)", calls: ["listChats"] });
+  });
+});
+
+describe("#103: reading status for a failed call's note", () => {
+  // The call has failed already: a stuck worker mustn't hold its error back for the bridge's default minute.
+  it("a status that doesn't answer is given up within a few seconds, and the call keeps its error", async () => {
+    const { result } = start("list_chats", help.chatsvc, unanswered, "2026-10-01T11:30:00Z", { timers: true });
+    let settled: Awaited<typeof result> | undefined;
+    // A call still waiting when the test ends fails as the client closes.
+    result.then((r) => (settled = r)).catch(() => {});
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(settled).toEqual({ isError: true, text: "Teams' chat session is not available. Reload the Teams tab and try again.", calls: ["listChats", "status"] });
+  });
+
+  it("with no extension connected, status isn't asked and the call keeps its error", async () => {
+    const r = await failing("list_chats", help.chatsvc, neverSignedIn, "2026-10-01T11:30:00Z", { connected: false });
+    expect(r).toEqual({ isError: true, text: "Teams' chat session is not available. Reload the Teams tab and try again.", calls: ["listChats"] });
+  });
+
+  it("a call the client cancels while its status is read ends that status read too", async () => {
+    const cancel = new AbortController();
+    let ended: Promise<boolean> | undefined;
+    // The client cancels as soon as status is asked; the read ends when its signal does (false: it has none).
+    const status: Status = (_timeoutMs, signal) => {
+      ended = signal ? new Promise((resolve) => signal.addEventListener("abort", () => resolve(true))) : Promise.resolve(false);
+      cancel.abort();
+      return ended.then(() => Promise.reject(new Error("Cancelled.")));
+    };
+    const { result } = start("list_chats", help.chatsvc, status, "2026-10-01T11:30:00Z", { signal: cancel.signal });
+    await expect(result).rejects.toThrow();
+    expect(await ended).toBe(true);
   });
 });
