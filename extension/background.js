@@ -60,6 +60,13 @@ async function signedInOid() {
  *
  * A request Teams retries with the previous user's old token isn't a switch back (#77): see
  * isOldToken. Such a capture is dropped (not stored, nothing cleared) and counted.
+ *
+ * A dropped capture also leaves it unknown which account Teams shows (it may be the previous
+ * user's again, #77): the account is unsure until that switch's window closes (see
+ * accountUnsure). A capture of the previous user that switches back (a newer token, or one
+ * without `iat`) starts a new switch with its own window, not unsure: should Teams still show
+ * the other user, that user's next capture within it is dropped and marks it unsure (or, newer,
+ * switches again).
  */
 async function storeCapture(service, capture) {
   const key = `capture:${service}`;
@@ -71,7 +78,10 @@ async function storeCapture(service, capture) {
   }
   const iat = teams.tokenIssuedAt(capture.headers);
   if (capture.oid && was && was !== capture.oid && isOldToken(capture, iat, lastSwitch)) {
-    await chrome.storage.session.set({ [DROPPED_KEY]: { count: dropped.count + 1, lastAt: capture.at } });
+    await chrome.storage.session.set({
+      [DROPPED_KEY]: { count: dropped.count + 1, lastAt: capture.at },
+      [SWITCH_KEY]: { ...lastSwitch, unsureSince: lastSwitch.unsureSince ?? capture.at },
+    });
     return;
   }
   seenAt.delete(service);
@@ -83,7 +93,7 @@ async function storeCapture(service, capture) {
       const stale = others.filter((k) => held[k] && held[k].oid !== capture.oid);
       if (stale.length) await chrome.storage.session.remove(stale);
       forgetAccount();
-      update[SWITCH_KEY] = { from: was, at: capture.at, iat };
+      update[SWITCH_KEY] = { from: was, at: capture.at, iat, unsureSince: null };
     }
     update.oid = capture.oid;
   }
@@ -92,8 +102,10 @@ async function storeCapture(service, capture) {
 
 /**
  * The last switch of the signed-in user: { from (the previous user's oid), at (ms since 1970),
- * iat (of the token that switched, null without one) }. Kept in chrome.storage.session like the
- * captures, so a restart of this worker keeps it and a browser restart clears it.
+ * iat (of the token that switched, null without one), unsureSince (ms since 1970: when a capture
+ * of the previous user was first dropped, null before one was) }. Kept in
+ * chrome.storage.session like the captures, so a restart of this worker keeps it and a browser
+ * restart clears it.
  */
 const SWITCH_KEY = "accountSwitch";
 /** Captures dropped as an old token of the previous user: { count, lastAt (ms since 1970) }, no account data. */
@@ -112,6 +124,29 @@ function isOldToken(capture, iat, lastSwitch) {
   if (!(capture.at - lastSwitch.at < OLD_TOKEN_WINDOW_MS)) return false;
   return Number.isFinite(iat) && Number.isFinite(lastSwitch.iat) && iat < lastSwitch.iat;
 }
+
+/**
+ * Whether the account is unsure (#77): the previous user showed again within the last switch's
+ * window, so Teams may show either. { since, until } (ms since 1970; until = the switch's `at` +
+ * OLD_TOKEN_WINDOW_MS), or null. Read once the captures already queued are stored. Sends are
+ * refused meanwhile (UNSURE_SEND); reads go on, with a note (UNSURE_READ).
+ */
+async function accountUnsure() {
+  await captureQueue;
+  const lastSwitch = (await chrome.storage.session.get(SWITCH_KEY))[SWITCH_KEY];
+  if (lastSwitch?.unsureSince == null) return null;
+  const until = lastSwitch.at + OLD_TOKEN_WINDOW_MS;
+  return Date.now() < until ? { since: lastSwitch.unsureSince, until } : null;
+}
+
+/** A time as the user's clock shows it (HH:MM:SS, local), rounded up to the second. */
+const clockTime = (ms) => {
+  const d = new Date(Math.ceil(ms / 1000) * 1000);
+  return [d.getHours(), d.getMinutes(), d.getSeconds()].map((n) => String(n).padStart(2, "0")).join(":");
+};
+const UNSURE_SEND = (u) => `Teams switched accounts moments ago; try again after ${clockTime(u.until)}. Nothing was sent: until then it isn't certain which account Teams shows.`;
+const UNSURE_READ = (u) =>
+  `Teams switched accounts moments ago: until ${clockTime(u.until)} it isn't certain that this answer is from the account Teams shows (signedInAs in get_version).`;
 
 // service -> when Teams last sent the stored session again (in memory: no storage write for it)
 const seenAt = new Map();
@@ -243,6 +278,12 @@ export function savePendingCalls() {
 }
 
 const callAt = (c) => (c ? { at: new Date(c.at).toISOString(), host: c.host } : null);
+
+/** For status: whether the account is unsure (#77), { since, until } as ISO times, or null. */
+async function accountUnsureStatus() {
+  const u = await accountUnsure();
+  return u && { since: new Date(u.since).toISOString(), until: new Date(u.until).toISOString() };
+}
 
 /** For status: how many captures were dropped as an old token of the previous user, and when the last one was (#77). */
 async function droppedOldCaptures() {
@@ -785,7 +826,10 @@ async function sendTo(key, tab, findTab, url, method, headers, body, ctx, wait, 
   let foundAgain = false;
   for (let attempt = 0, repeat = false; ; repeat = true) {
     const waited = await passGate(key, ctx, wait);
-    if ((waited || repeat) && oid && (await signedInOid()) !== oid) throw new Error(ACCOUNT_CHANGED_WHILE("a request waited to be sent", "sends it as that account"));
+    if ((waited || repeat) && oid && (await signedInOid()) !== oid) {
+      const what = waited || !foundAgain ? "a request waited to be sent" : "a request was about to be retried after its Teams tab closed or reloaded";
+      throw new Error(ACCOUNT_CHANGED_WHILE(what, "sends it as that account"));
+    }
     let res;
     try {
       res = await runInTab(tab, url, method, headers, body, ctx);
@@ -1285,6 +1329,7 @@ export const handlers = {
       signedInAs: await myMri(),
       ...(await teamsCalls().then((c) => ({ lastTeamsCall: callAt(c?.lastTeamsCall), lastSignedInCall: callAt(c?.lastSignedInCall) }))),
       droppedOldCaptures: await droppedOldCaptures(),
+      accountUnsure: await accountUnsureStatus(),
     };
   },
 
@@ -1532,6 +1577,9 @@ export const handlers = {
 
   async requestSend({ conversation, to, title, text, threadId, subject, autoSendTo }, ctx) {
     if (!String(text ?? "").trim()) throw new Error("The message is empty.");
+    // While it isn't certain which account Teams shows, nothing is sent, nor looked up for a send.
+    const unsure = await accountUnsure();
+    if (unsure) return { sent: false, reason: UNSURE_SEND(unsure) };
     // Who the window (or an auto-send) is for: taken before anything is looked up for it.
     const switches = accountSwitches;
     const account = await signedInAccount();
@@ -1624,10 +1672,12 @@ async function createChat({ members, title }, account) {
 /**
  * An onCapture check for a post confirmed as `account` (an oid; requestSend goes no further
  * without one): fails before anything is sent when the session it would go out with is
- * another account's (Teams switched since the click).
+ * another account's (Teams switched since the click), or when the account is unsure (#77).
  */
 const asConfirmed = (account) => async (cap) => {
   if ((cap.oid ?? (await signedInAccount())) !== account) throw Object.assign(new Error(ACCOUNT_CHANGED), { accountChanged: true });
+  const unsure = await accountUnsure();
+  if (unsure) throw Object.assign(new Error(UNSURE_SEND(unsure)), { accountUnsure: true });
 };
 
 const UNREADABLE = Symbol("unreadable answer");
@@ -1649,7 +1699,7 @@ async function sendMessage({ conversation, newChat, people, text, threadId, subj
     try {
       r = await sendMessage({ conversation: { id, title }, text }, account);
     } catch (err) {
-      if (err.accountChanged) err.chatCreated = true;
+      if (err.accountChanged || err.accountUnsure) err.chatCreated = true;
       throw err;
     }
     return { ...r, newChat: true, conversationId: id };
@@ -1764,6 +1814,8 @@ async function sendWithoutConfirming(request, ctx, account) {
   autoSending++;
   try {
     if ((await signedInAccount()) !== account) return { sent: false, autoSent: true, reason: ACCOUNT_CHANGED };
+    const unsure = await accountUnsure();
+    if (unsure) return { sent: false, autoSent: true, reason: UNSURE_SEND(unsure) };
     return { ...(await sendMessage(request, account)), autoSent: true, note: AUTO_SENT_NOTE };
   } catch (err) {
     return { sent: false, autoSent: true, reason: sendFailure(err) };
@@ -1813,6 +1865,9 @@ const WITHDRAWN = {
  */
 async function askUserToConfirm(request, ctx, account) {
   if (ctx?.cancelled) return WITHDRAWN;
+  // Unsure since the send began (during its lookups): no window (#77).
+  const unsure = await accountUnsure();
+  if (unsure) return { sent: false, reason: UNSURE_SEND(unsure) };
   const id = crypto.randomUUID();
   const win = await chrome.windows.create({
     url: chrome.runtime.getURL(`confirm.html?id=${id}`),
@@ -1845,6 +1900,7 @@ async function askUserToConfirm(request, ctx, account) {
 function sendFailure(err) {
   // Without an answer the post may have gone through: saying it failed would invite a second one.
   const cause = /[.!?]$/.test(err.message) ? err.message : `${err.message}.`;
+  if (err.accountUnsure) return err.chatCreated ? `The chat was created, but no message was sent: ${err.message}` : err.message;
   return err.accountChanged
     ? err.chatCreated
       ? CHAT_CREATED_ACCOUNT_CHANGED
@@ -2244,6 +2300,9 @@ function withdrawAll(conn) {
   for (const ctx of running.values()) if (ctx.conn === conn) ctx.cancel();
 }
 
+/** The handlers that read Teams for the AI: their answers carry a note while the account is unsure (#77). */
+const READS = new Set(["listTeams", "listChats", "readMessages", "searchMessages", "findPeople", "listMeetings", "getMeeting", "readTranscript", "searchTranscripts"]);
+
 /**
  * Runs one request from the server with its handler and sends back the response.
  * {type:"cancel", id} withdraws a running request that came on the same connection (`conn`);
@@ -2264,7 +2323,10 @@ export async function dispatch(msg, send, conn = null) {
   const handler = Object.hasOwn(handlers, msg.method) ? handlers[msg.method] : null;
   try {
     if (!handler) throw new Error(`Unknown method ${msg.method}`);
-    const result = await handler(msg.params ?? {}, ctx);
+    let result = await handler(msg.params ?? {}, ctx);
+    // A read while the account is unsure (#77) goes on, and says so.
+    const unsure = READS.has(msg.method) && result && typeof result === "object" ? await accountUnsure() : null;
+    if (unsure) result = { ...result, accountNote: UNSURE_READ(unsure) };
     send({ type: "response", id: msg.id, ok: true, result });
   } catch (err) {
     send({ type: "response", id: msg.id, ok: false, error: err?.message ?? String(err) });

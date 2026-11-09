@@ -13,6 +13,8 @@ export type TeamsStatus = {
   services?: Record<string, string | null>;
   lastTeamsCall?: Call;
   lastSignedInCall?: Call;
+  /** #77: the account is unsure after a switch, until `until` (ISO times); missing from an older extension. */
+  accountUnsure?: { since: string; until: string } | null;
 };
 
 const SINCE_START = "the extension started watching";

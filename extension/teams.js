@@ -64,19 +64,26 @@ const GUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
  * verifying; nothing else of the token is kept.
  */
 export function tokenOid(headers) {
-  for (const claims of tokenClaims(headers)) {
-    const oid = String(claims?.oid ?? /^orgid:(.+)$/i.exec(String(claims?.skypeid ?? ""))?.[1] ?? "").toLowerCase();
-    if (GUID.test(oid)) return oid;
-  }
-  return null;
+  return userToken(headers)?.oid ?? null;
 }
 
 /**
- * When a request's token was issued (its `iat`, seconds since 1970), or null when it has none or
- * one that isn't a number. Tells an old token from a fresh one of the same user (#77).
+ * When a request's token was issued (its `iat`, seconds since 1970): of the token whose user
+ * tokenOid names, so a capture's user and age come from one token. Null when that token has no
+ * `iat` or one that isn't a number, or no token names a user. Tells an old token from a fresh one
+ * of the same user (#77).
  */
 export function tokenIssuedAt(headers) {
-  for (const claims of tokenClaims(headers)) if (Number.isFinite(claims?.iat)) return claims.iat;
+  const iat = userToken(headers)?.claims.iat;
+  return Number.isFinite(iat) ? iat : null;
+}
+
+/** The first of a request's tokens that names a user: its oid (lowercase) and its claims, or null. */
+function userToken(headers) {
+  for (const claims of tokenClaims(headers)) {
+    const oid = String(claims?.oid ?? /^orgid:(.+)$/i.exec(String(claims?.skypeid ?? ""))?.[1] ?? "").toLowerCase();
+    if (GUID.test(oid)) return { oid, claims };
+  }
   return null;
 }
 
