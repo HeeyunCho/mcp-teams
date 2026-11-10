@@ -127,8 +127,13 @@ describe("#24: quote", () => {
       expect(quote("C:\\Users\\al`ex\\index.js", "win32")).toBe('"C:\\Users\\al`ex\\index.js"');
     });
 
-    it("#24: leaves everything else unquoted, a backslash and a single quote included", () => {
-      for (const arg of ["C:\\nodejs\\node.exe", "C:\\Users\\Alex's\\index.js", "-y", "mcp-teams@latest"]) expect(quote(arg, "win32")).toBe(arg);
+    it("#76: wraps a single quote and ; in double quotes", () => {
+      expect(quote("C:\\Users\\Alex's\\index.js", "win32")).toBe(`"C:\\Users\\Alex's\\index.js"`);
+      expect(quote("C:\\Users\\Alex;Sam\\index.js", "win32")).toBe('"C:\\Users\\Alex;Sam\\index.js"');
+    });
+
+    it("#24: leaves everything else unquoted, a backslash included", () => {
+      for (const arg of ["C:\\nodejs\\node.exe", "-y", "mcp-teams@latest"]) expect(quote(arg, "win32")).toBe(arg);
     });
   });
 
@@ -137,6 +142,28 @@ describe("#24: quote", () => {
     for (const arg of ["/Users/Alex Doe/x", "$HOME", "`id`", "a&b", "Alex's", "it''s", "a\\b", 'a"b', "a;b", "*", "~", "50%"]) {
       expect(execFileSync("/bin/sh", ["-c", `printf %s ${quote(arg, "linux")}`], { encoding: "utf8" })).toBe(arg);
     }
+  });
+
+  // PowerShell, as when a printed command is pasted into a Windows terminal. $ and a
+  // backtick stay out: they still expand inside double quotes, which #24 accepted. The
+  // command goes in encoded, so nothing between here and PowerShell's parser re-quotes it.
+  it.runIf(process.platform === "win32")("#76: PowerShell reads each quoted argument back byte for byte", { timeout: 20_000 }, () => {
+    const script = join(mkdtempSync(join(tmpdir(), "quote-")), "argv.js");
+    writeFileSync(script, "process.stdout.write(JSON.stringify(process.argv.slice(2)));");
+    const args = [
+      "C:\\Users\\Alex Doe\\x",
+      "a&b",
+      "50%",
+      "C:\\Users\\Alex's\\index.js",
+      "C:\\Users\\Alex;Sam\\index.js",
+      "C:\\nodejs\\node.exe",
+      "-y",
+      "mcp-teams@latest",
+    ];
+    const command = ["node", script, ...args].map((part) => quote(part, "win32")).join(" ");
+    const encoded = Buffer.from(command, "utf16le").toString("base64");
+    const out = execFileSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-EncodedCommand", encoded], { encoding: "utf8" });
+    expect(JSON.parse(out)).toEqual(args);
   });
 });
 
