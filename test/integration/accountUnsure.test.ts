@@ -154,7 +154,7 @@ async function getVersion(status: () => Promise<unknown>) {
 }
 
 describe("#77: sends are refused while the account is unsure", () => {
-  it("1: A → B, then A's old token within 30 s: dropped, the account is unsure, and a send is refused before the window opens, naming when to retry", async () => {
+  it("A → B, then A's old token within 30 s: dropped, the account is unsure, and a send is refused before the window opens, naming when to retry", async () => {
     const { fake, worker } = await switchedToSam();
     expect((await worker.handlers.status({})).accountUnsure).toBeNull();
 
@@ -168,7 +168,7 @@ describe("#77: sends are refused while the account is unsure", () => {
     expect(posts(fake)).toEqual([]);
   });
 
-  it("2: unsure starts while the confirmation window is open: the click is refused, and nothing is posted", async () => {
+  it("unsure starts while the confirmation window is open: the click is refused, and nothing is posted", async () => {
     const { fake, worker } = await switchedToSam();
     const result = worker.handlers.requestSend({ conversation: "Alpha launch", text: "Hi all" });
     await windowOpened(fake);
@@ -180,7 +180,7 @@ describe("#77: sends are refused while the account is unsure", () => {
     expect(posts(fake)).toEqual([]);
   });
 
-  it("3: auto-send (notes to self), with unsure starting during its lookups: refused, nothing posted", async () => {
+  it("auto-send (notes to self), with unsure starting during its lookups: refused, nothing posted", async () => {
     let lookups = 0;
     const lookup = gate();
     const { fake, worker } = await switchedToSam(servicesWith({ mt: () => (lookups++ === 0 ? lookup.opened : undefined) }));
@@ -195,7 +195,7 @@ describe("#77: sends are refused while the account is unsure", () => {
     expect(posts(fake)).toEqual([]);
   });
 
-  it("4: mirror case: B's switching token is older than A's retry, so the account flips back to A; B's next capture within 30 s marks it unsure, and a send is refused", async () => {
+  it("mirror case: B's switching token is older than A's retry, so the account flips back to A; B's next capture within 30 s marks it unsure, and a send is refused", async () => {
     vi.useFakeTimers({ toFake: ["Date"] });
     vi.setSystemTime(SWITCHED_AT);
     const fake = createFakeChrome({ captured: [], services: servicesWith() });
@@ -220,7 +220,7 @@ describe("#77: sends are refused while the account is unsure", () => {
     expect(posts(fake)).toEqual([]);
   });
 
-  it("5: once the switch's window closes, the next capture decides normally: unsure is null again, and sends go through", async () => {
+  it("once the switch's window closes, the next capture decides normally: unsure is null again, and sends go through", async () => {
     const { fake, worker } = await switchedToSam();
     await teamsRetries(fake, "alex", OLD);
     expect((await worker.handlers.status({})).accountUnsure).toEqual(UNSURE);
@@ -240,7 +240,7 @@ describe("#77: sends are refused while the account is unsure", () => {
 });
 
 describe("#77: reads and status while the account is unsure", () => {
-  it("6a: a read works and carries a note; get_version shows accountUnsure", async () => {
+  it("a read works and carries a note; get_version shows accountUnsure", async () => {
     const { fake, worker } = await switchedToSam();
     await teamsRetries(fake, "alex", OLD);
 
@@ -256,7 +256,7 @@ describe("#77: reads and status while the account is unsure", () => {
     expect(v.teams.droppedOldCaptures.count).toBe(1);
   });
 
-  it("6b: a read when the account isn't unsure carries no note", async () => {
+  it("a read when the account isn't unsure carries no note", async () => {
     const { worker } = await switchedToSam();
     const replies: { ok: boolean; result?: object }[] = [];
     await worker.dispatch({ type: "request", id: "r1", method: "listChats", params: {}, timeoutMs: 60_000 }, (r) => replies.push(r as (typeof replies)[number]));
@@ -264,12 +264,12 @@ describe("#77: reads and status while the account is unsure", () => {
     expect(replies[0].result).not.toHaveProperty("accountNote");
   });
 
-  it("6c: get_version with an older extension (no accountUnsure in its status) shows accountUnsure: null", async () => {
+  it("get_version with an older extension (no accountUnsure in its status) shows accountUnsure: null", async () => {
     const v = await getVersion(async () => ({ extensionVersion: "0.3.52", teamsTabs: 1, sessions: [{ sessionCaptured: true }], droppedOldCaptures: { count: 0, lastAt: null } }));
     expect(v.teams).toHaveProperty("accountUnsure", null);
   });
 
-  it("7: a restart of the worker in the middle of the window keeps the unsure state", async () => {
+  it("a restart of the worker in the middle of the window keeps the unsure state", async () => {
     const { fake } = await switchedToSam();
     await teamsRetries(fake, "alex", OLD);
     fake.stopWorker();
@@ -288,7 +288,7 @@ describe("#77: rule 1 as written: any capture of the previous account within 30 
   // A token of Alex's issued after Sam's: not dropped, a switch back.
   const FRESH = SWITCHING + 600;
 
-  it("1b: within 30 s, a capture of the previous account that switches back (a newer token) marks the account unsure too: a send is refused", async () => {
+  it("within 30 s, a capture of the previous account that switches back (a newer token) marks the account unsure too: a send is refused", async () => {
     const { fake, worker } = await switchedToSam();
 
     await teamsRetries(fake, "alex", FRESH);
@@ -299,7 +299,7 @@ describe("#77: rule 1 as written: any capture of the previous account within 30 
     expect(windows(fake)).toBe(0);
   });
 
-  it("1c: a switch back while unsure doesn't clear it: unsure since the drop, until 30 s after the switch back", async () => {
+  it("a switch back while unsure doesn't clear it: unsure since the drop, until 30 s after the switch back", async () => {
     const { fake, worker } = await switchedToSam();
     await teamsRetries(fake, "alex", OLD); // dropped at 14:00:00: unsure
     vi.setSystemTime(SWITCHED_AT.getTime() + 10_000);
@@ -316,7 +316,7 @@ describe("#77: each check that refuses a send while unsure, on its own", () => {
   const answerOrWindow = (fake: FakeChrome, result: Promise<unknown>) =>
     Promise.race([result.catch(() => {}), vi.waitFor(() => expect(windows(fake)).toBeGreaterThan(0), { timeout: 4_000 })]);
 
-  it("4a (requestSend): unsure before the send starts: refused before anything is looked up for it", async () => {
+  it("requestSend: unsure before the send starts: refused before anything is looked up for it", async () => {
     const { fake, worker } = await switchedToSam();
     await teamsRetries(fake, "alex", OLD);
     const before = fake.sent.length;
@@ -326,7 +326,7 @@ describe("#77: each check that refuses a send while unsure, on its own", () => {
     expect(fake.sent.slice(before)).toEqual([]); // not even the chat list
   });
 
-  it("4b (askUserToConfirm): unsure starts during the send's lookups: no window opens", async () => {
+  it("askUserToConfirm: unsure starts during the send's lookups: no window opens", async () => {
     let reads = 0;
     const list = gate();
     const { fake, worker } = await switchedToSam(servicesWith({ csa: () => (reads++ === 0 ? list.opened : undefined) }));
@@ -342,7 +342,7 @@ describe("#77: each check that refuses a send while unsure, on its own", () => {
     expect(posts(fake)).toEqual([]);
   });
 
-  it("4c (sendWithoutConfirming): unsure starts during an auto-send's lookups: refused before it asks Teams anything more", async () => {
+  it("sendWithoutConfirming: unsure starts during an auto-send's lookups: refused before it asks Teams anything more", async () => {
     let lookups = 0;
     const lookup = gate();
     const { fake, worker } = await switchedToSam(servicesWith({ mt: () => (lookups++ === 0 ? lookup.opened : undefined) }));
@@ -359,7 +359,7 @@ describe("#77: each check that refuses a send while unsure, on its own", () => {
 });
 
 describe("#77: a post that waits out Teams' throttling", () => {
-  it("2b: the old token is dropped while the clicked post waits for the gate a 429 closed: nothing is posted", async () => {
+  it("the old token is dropped while the clicked post waits for the gate a 429 closed: nothing is posted", async () => {
     let throttled = false;
     const services = servicesWith({
       chatsvc: (r) => {
@@ -400,7 +400,7 @@ describe("#77: a post that waits out Teams' throttling", () => {
 });
 
 describe("#77: a new chat created just before the account turned unsure", () => {
-  it("5b: the chat was created, then the message is refused: the reason says so once, with when to retry", async () => {
+  it("the chat was created, then the message is refused: the reason says so once, with when to retry", async () => {
     let shown: FakeChrome | null = null;
     const services = servicesWith({
       // The drop lands while Teams creates the chat: after that post's check, before the message's.
