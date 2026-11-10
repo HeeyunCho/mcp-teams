@@ -535,6 +535,23 @@ describe("77.3: what a 401 and an account switch make the worker read again", ()
 
   const autoSendToSelf = (worker: Worker, t: Tenant) =>
     expect(worker.handlers.requestSend({ conversation: "48:notes", text: "Remember the slides", autoSendTo: [myEmail(t)] })).resolves.toMatchObject({ sent: true, autoSent: true });
+  /**
+   * #77: back as a within 30 s of the switch to b, a capture of the account it switched from: the
+   * account is unsure, so the auto-send is refused; once the switch's 30 s are over, it goes through.
+   */
+  const autoSendToSelfOnceSure = async (worker: Worker, t: Tenant) => {
+    await expect(worker.handlers.requestSend({ conversation: "48:notes", text: "Remember the slides", autoSendTo: [myEmail(t)] })).resolves.toEqual({
+      sent: false,
+      reason: expect.stringMatching(/Teams switched accounts moments ago; try again after \d\d:\d\d:\d\d/),
+    });
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      vi.setSystemTime(Date.now() + 30_000);
+      await autoSendToSelf(worker, t);
+    } finally {
+      vi.useRealTimers();
+    }
+  };
 
   /** A 401 renewed with a fresh token for the same user. */
   const renewedForA = (fake: Fake) => () => {
@@ -553,7 +570,8 @@ describe("77.3: what a 401 and an account switch make the worker read again", ()
     "a 401 whose fresh session is tenant b's": { as: "b", on401: switchedToB, switches: [] },
     "a switch to tenant b with no 401": { as: "b", on401: null, switches: ["b"] },
     // Back as a, the account the list and the calls were filed under: what a read before the switches is gone too.
-    "a switch to tenant b and back to a, with no 401": { as: "a", on401: null, switches: ["b", "a"] },
+    // Within 30 s of the switch to b, the account is unsure (#77): the auto-send waits out the 30 s.
+    "a switch to tenant b and back to a, with no 401": { as: "a", on401: null, switches: ["b", "a"], unsure: true },
   } as const;
 
   /**
@@ -596,7 +614,8 @@ describe("77.3: what a 401 and an account switch make the worker read again", ()
     const at = fake.sent.length;
     await worker.handlers.listChats({});
     await worker.handlers.readTranscript({ meeting: MEETING });
-    await autoSendToSelf(worker, event.as);
+    if ("unsure" in event) await autoSendToSelfOnceSure(worker, event.as);
+    else await autoSendToSelf(worker, event.as);
     return { fake, at, as: event.as as Tenant };
   }
 

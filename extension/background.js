@@ -61,12 +61,11 @@ async function signedInOid() {
  * A request Teams retries with the previous user's old token isn't a switch back (#77): see
  * isOldToken. Such a capture is dropped (not stored, nothing cleared) and counted.
  *
- * A dropped capture also leaves it unknown which account Teams shows (it may be the previous
- * user's again, #77): the account is unsure until that switch's window closes (see
- * accountUnsure). A capture of the previous user that switches back (a newer token, or one
- * without `iat`) starts a new switch with its own window, not unsure: should Teams still show
- * the other user, that user's next capture within it is dropped and marks it unsure (or, newer,
- * switches again).
+ * Any capture of the previous user within 30 s of the switch, whatever its `iat`, leaves it
+ * unknown which account Teams shows (#77): the account is unsure until that switch's window
+ * closes (see accountUnsure). The capture is still dropped or switched as above. A switch back it
+ * causes starts a new window, unsure from the start, and keeps an unsure state already there
+ * (its `unsureSince`). A third user's switch is a normal one.
  */
 async function storeCapture(service, capture) {
   const key = `capture:${service}`;
@@ -77,7 +76,8 @@ async function storeCapture(service, capture) {
     return;
   }
   const iat = teams.tokenIssuedAt(capture.headers);
-  if (capture.oid && was && was !== capture.oid && isOldToken(capture, iat, lastSwitch)) {
+  const unsure = !!capture.oid && !!was && was !== capture.oid && previousUserAgain(capture, lastSwitch);
+  if (unsure && isOldToken(capture, iat, lastSwitch)) {
     await chrome.storage.session.set({
       [DROPPED_KEY]: { count: dropped.count + 1, lastAt: capture.at },
       [SWITCH_KEY]: { ...lastSwitch, unsureSince: lastSwitch.unsureSince ?? capture.at },
@@ -93,7 +93,8 @@ async function storeCapture(service, capture) {
       const stale = others.filter((k) => held[k] && held[k].oid !== capture.oid);
       if (stale.length) await chrome.storage.session.remove(stale);
       forgetAccount();
-      update[SWITCH_KEY] = { from: was, at: capture.at, iat, unsureSince: null };
+      // A switch back within the window: unsure from now, or since an unsure state it found (still on, being within the window).
+      update[SWITCH_KEY] = { from: was, at: capture.at, iat, unsureSince: unsure ? (lastSwitch.unsureSince ?? capture.at) : null };
     }
     update.oid = capture.oid;
   }
@@ -102,8 +103,8 @@ async function storeCapture(service, capture) {
 
 /**
  * The last switch of the signed-in user: { from (the previous user's oid), at (ms since 1970),
- * iat (of the token that switched, null without one), unsureSince (ms since 1970: when a capture
- * of the previous user was first dropped, null before one was) }. Kept in
+ * iat (of the token that switched, null without one), unsureSince (ms since 1970: since when
+ * the account is unsure, null when it isn't) }. Kept in
  * chrome.storage.session like the captures, so a restart of this worker keeps it and a browser
  * restart clears it.
  */
@@ -120,9 +121,13 @@ const OLD_TOKEN_WINDOW_MS = 30_000;
  * switch caused by one), a later one, a third user, or one after the 30 s switches as before.
  */
 function isOldToken(capture, iat, lastSwitch) {
-  if (!lastSwitch || lastSwitch.from !== capture.oid) return false;
-  if (!(capture.at - lastSwitch.at < OLD_TOKEN_WINDOW_MS)) return false;
+  if (!previousUserAgain(capture, lastSwitch)) return false;
   return Number.isFinite(iat) && Number.isFinite(lastSwitch.iat) && iat < lastSwitch.iat;
+}
+
+/** Whether a capture is of the user the last switch was from, within 30 s of that switch. */
+function previousUserAgain(capture, lastSwitch) {
+  return !!lastSwitch && lastSwitch.from === capture.oid && capture.at - lastSwitch.at < OLD_TOKEN_WINDOW_MS;
 }
 
 /**
@@ -145,6 +150,9 @@ const clockTime = (ms) => {
   return [d.getHours(), d.getMinutes(), d.getSeconds()].map((n) => String(n).padStart(2, "0")).join(":");
 };
 const UNSURE_SEND = (u) => `Teams switched accounts moments ago; try again after ${clockTime(u.until)}. Nothing was sent: until then it isn't certain which account Teams shows.`;
+/** The refusal of a new chat's message, the chat being created already (the post before it went out). */
+const UNSURE_CHAT_CREATED = (u) =>
+  `The chat was created, but the message wasn't sent: Teams switched accounts moments ago, so it isn't certain which account Teams shows. After ${clockTime(u.until)}, check with list_chats and send the message to that chat.`;
 const UNSURE_READ = (u) =>
   `Teams switched accounts moments ago: until ${clockTime(u.until)} it isn't certain that this answer is from the account Teams shows (signedInAs in get_version).`;
 
@@ -821,8 +829,11 @@ const originOf = (tab) => (tab?.url ? new URL(tab.url).origin : null);
  * attempt, since another request's 429 may have shut it) or again (in the other tab), that user
  * must still be the signed-in one; otherwise the call fails as account changed (#77) and the
  * previous user's headers are never sent (again).
+ *
+ * `recheck`: the caller's own check (api's onCapture, e.g. asConfirmed for a post), run again
+ * then too, since what it refuses (the account unsure, #77) may have begun during the wait.
  */
-async function sendTo(key, tab, findTab, url, method, headers, body, ctx, wait, repeatable = method === "GET", oid = null) {
+async function sendTo(key, tab, findTab, url, method, headers, body, ctx, wait, repeatable = method === "GET", oid = null, recheck = null) {
   let foundAgain = false;
   for (let attempt = 0, repeat = false; ; repeat = true) {
     const waited = await passGate(key, ctx, wait);
@@ -830,6 +841,7 @@ async function sendTo(key, tab, findTab, url, method, headers, body, ctx, wait, 
       const what = waited || !foundAgain ? "a request waited to be sent" : "a request was about to be retried after its Teams tab closed or reloaded";
       throw new Error(ACCOUNT_CHANGED_WHILE(what, "sends it as that account"));
     }
+    if (waited || repeat) await recheck?.();
     let res;
     try {
       res = await runInTab(tab, url, method, headers, body, ctx);
@@ -870,7 +882,7 @@ async function api(service, path, { method = "GET", body, raw = false, withLocat
   const urlFor = (c) => teams.serviceUrl(path, c.base);
   const findTab = () => findTeamsTab(new URL(cap.base).origin, ctx);
   await onCapture?.(cap); // may refuse the session (it throws), before anything is sent
-  let res = await sendTo(gateKey(service, cap.base), tab, findTab, urlFor(cap), method, cap.headers, body, ctx, wait, repeatable, cap.oid);
+  let res = await sendTo(gateKey(service, cap.base), tab, findTab, urlFor(cap), method, cap.headers, body, ctx, wait, repeatable, cap.oid, onCapture && (() => onCapture(cap)));
   if (res.status === 401) {
     // Rejected before running (expired token), so trying once more is safe. A 403 is a
     // real answer (e.g. no longer a member of that chat).
@@ -883,7 +895,7 @@ async function api(service, path, { method = "GET", body, raw = false, withLocat
     if (ctx) ctx.tabs = null;
     tab = await guarded(findTab(), ctx);
     await onCapture?.(cap);
-    res = await sendTo(gateKey(service, cap.base), tab, findTab, urlFor(cap), method, cap.headers, body, ctx, wait, repeatable, cap.oid);
+    res = await sendTo(gateKey(service, cap.base), tab, findTab, urlFor(cap), method, cap.headers, body, ctx, wait, repeatable, cap.oid, onCapture && (() => onCapture(cap)));
   }
   if (raw) return res;
   if (res.status >= 400) {
@@ -1677,7 +1689,7 @@ async function createChat({ members, title }, account) {
 const asConfirmed = (account) => async (cap) => {
   if ((cap.oid ?? (await signedInAccount())) !== account) throw Object.assign(new Error(ACCOUNT_CHANGED), { accountChanged: true });
   const unsure = await accountUnsure();
-  if (unsure) throw Object.assign(new Error(UNSURE_SEND(unsure)), { accountUnsure: true });
+  if (unsure) throw Object.assign(new Error(UNSURE_SEND(unsure)), { accountUnsure: unsure });
 };
 
 const UNREADABLE = Symbol("unreadable answer");
@@ -1900,7 +1912,7 @@ async function askUserToConfirm(request, ctx, account) {
 function sendFailure(err) {
   // Without an answer the post may have gone through: saying it failed would invite a second one.
   const cause = /[.!?]$/.test(err.message) ? err.message : `${err.message}.`;
-  if (err.accountUnsure) return err.chatCreated ? `The chat was created, but no message was sent: ${err.message}` : err.message;
+  if (err.accountUnsure) return err.chatCreated ? UNSURE_CHAT_CREATED(err.accountUnsure) : err.message;
   return err.accountChanged
     ? err.chatCreated
       ? CHAT_CREATED_ACCOUNT_CHANGED

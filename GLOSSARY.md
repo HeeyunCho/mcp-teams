@@ -57,5 +57,5 @@ _Avoid_: takeover, failover, step-down
 ### Teams accounts
 
 **Unsure account**:
-The rest of the 30 s after a switch, once a request with the previous account's older token was ignored: either account may be the one Teams shows. Sends are refused until the window closes; reads go on, with a note.
+The state of the signed-in account when it isn't certain which account Teams shows: the previous account showed again within 30 s of a switch (its request ignored, or switching back). It lasts until that switch's 30 s are over; meanwhile sends are refused and reads go on, with a note.
 _Avoid_: ambiguous account, account conflict

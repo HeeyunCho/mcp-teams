@@ -9,7 +9,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { registerTools } from "../../src/tools.js";
 import { TOKEN } from "../helpers/bridgeHarness.js";
-import { BASES, createFakeChrome, loadWorker, openedSockets, TEAMS_ORIGIN, type FakeChrome, type SentRequest } from "../helpers/fakeChrome.js";
+import { BASES, createFakeChrome, loadWorker, openedSockets, reply, TEAMS_ORIGIN, type FakeChrome, type SentRequest } from "../helpers/fakeChrome.js";
 import { fakeJwt } from "../helpers/jwt.js";
 
 let client: Client | undefined;
@@ -52,9 +52,15 @@ const accountOf = (req: SentRequest) => {
 };
 
 const ALPHA = "19:alpha@thread.v2";
-/** Each account's Teams: its chats (with its notes to self), its profile, and posts that go through. */
-const servicesWith = (holds: { mt?: (r: SentRequest) => Promise<void> | void } = {}) => ({
-  csa: (r: SentRequest) => {
+// Someone else to write to, found by people search: Jamie Poe (no chat with either account yet).
+const JAMIE = { mri: "8:orgid:00000000-0000-4000-8000-0000000000c1", name: "Jamie Poe", email: "jamie.poe@contoso.example" };
+
+/** Holds on a service's answers: a promise to wait for, or an answer of its own (e.g. a 429). */
+type Hold = (r: SentRequest) => unknown;
+/** Each account's Teams: its chats (with its notes to self), its profile, people search, and posts that go through. */
+const servicesWith = (holds: { csa?: Hold; mt?: Hold; chatsvc?: Hold } = {}) => ({
+  csa: async (r: SentRequest) => {
+    await holds.csa?.(r);
     const t = accountOf(r);
     return {
       teams: [],
@@ -69,7 +75,16 @@ const servicesWith = (holds: { mt?: (r: SentRequest) => Promise<void> | void } =
     const t = accountOf(r);
     return t ? (r.body as string[]).filter((m) => m === `8:orgid:${ACCOUNT[t].oid}`).map((mri) => ({ mri, displayName: ACCOUNT[t].name, email: ACCOUNT[t].email })) : [];
   },
-  chatsvc: (r: SentRequest) => (r.method === "POST" ? { OriginalArrivalTime: Date.parse("2026-11-09T13:00:05Z") } : { messages: [] }),
+  substrate: (r: SentRequest) => {
+    const q = String((r.body as { EntityRequests: { Query: { QueryString: string } }[] }).EntityRequests[0].Query.QueryString).toLowerCase();
+    const people = [JAMIE].filter((p) => p.email === q);
+    return { Groups: [{ Suggestions: people.map((p) => ({ EntityType: "People", MRI: p.mri, DisplayName: p.name, EmailAddresses: [p.email] })) }] };
+  },
+  chatsvc: async (r: SentRequest) => {
+    const own = await holds.chatsvc?.(r);
+    if (own !== undefined) return own;
+    return r.method === "POST" ? { OriginalArrivalTime: Date.parse("2026-11-09T13:00:05Z") } : { messages: [] };
+  },
 });
 
 /** Teams in the tab calls its services as this account, which the worker captures. */
@@ -77,16 +92,22 @@ async function teamsShows(fake: FakeChrome, t: Account, iat: number) {
   await fake.fire("beforeSendHeaders", { url: `${BASES.csa}/api/v1/teams/users/me?isPrefetch=false`, initiator: TEAMS_ORIGIN, requestHeaders: [{ name: "Authorization", value: bearer(t, iat) }] });
   await fake.fire("beforeSendHeaders", { url: `${BASES.chatsvc}/v1/users/ME/conversations?view=x`, initiator: TEAMS_ORIGIN, requestHeaders: [{ name: "Authentication", value: skype(t, iat) }] });
   await fake.fire("beforeSendHeaders", { url: `${BASES.mt}/beta/users/${ACCOUNT[t].oid}/capabilities`, initiator: TEAMS_ORIGIN, requestHeaders: [{ name: "Authorization", value: bearer(t, iat) }] });
+  await fake.fire("beforeSendHeaders", { url: `${BASES.substrate}/search/api/v1/suggestions?scenario=peoplepicker.newChat`, initiator: TEAMS_ORIGIN, requestHeaders: [{ name: "Authorization", value: bearer(t, iat) }] });
 }
 
 /** Teams retries one request with this token (one capture, for csa). */
 const teamsRetries = (fake: FakeChrome, t: Account, iat: number) =>
   fake.fire("beforeSendHeaders", { url: `${BASES.csa}/api/v1/teams/users/me?isPrefetch=false`, initiator: TEAMS_ORIGIN, requestHeaders: [{ name: "Authorization", value: bearer(t, iat) }] });
 
-/** At 14:00:00, Teams showed Alex (old token), then switched to Sam. */
-async function switchedToSam(services = servicesWith()) {
-  vi.useFakeTimers({ toFake: ["Date"] });
-  vi.setSystemTime(SWITCHED_AT);
+/**
+ * At 14:00:00, Teams showed Alex (old token), then switched to Sam. `clock: false`: on the real
+ * clock (for a throttle wait, which a clock that stands still never ends).
+ */
+async function switchedToSam(services: ReturnType<typeof servicesWith> = servicesWith(), { clock = true } = {}) {
+  if (clock) {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(SWITCHED_AT);
+  }
   const fake = createFakeChrome({ captured: [], services });
   fake.session.delete("oid");
   const worker = await loadWorker(fake);
@@ -185,6 +206,9 @@ describe("#77: sends are refused while the account is unsure", () => {
     await teamsShows(fake, "sam", OLD); // a cached older token of Sam's switches to Sam
     await teamsRetries(fake, "alex", SWITCHING); // Alex's genuine retry is later: it isn't dropped
     expect(await signedInAs(worker)).toBe(`8:orgid:${ACCOUNT.alex.oid}`);
+    // A capture of the account it switched from, within 30 s: unsure from the flip on, before Sam shows again.
+    expect((await worker.handlers.status({})).accountUnsure).toEqual(UNSURE);
+    await expect(worker.handlers.requestSend({ conversation: "Alpha launch", text: "Hi all" })).resolves.toEqual({ sent: false, reason: expect.stringMatching(RETRY_AT) });
 
     await teamsRetries(fake, "sam", OLD); // Teams still shows Sam
 
@@ -216,7 +240,7 @@ describe("#77: sends are refused while the account is unsure", () => {
 });
 
 describe("#77: reads and status while the account is unsure", () => {
-  it("6: a read works and carries a note; get_version shows accountUnsure", async () => {
+  it("6a: a read works and carries a note; get_version shows accountUnsure", async () => {
     const { fake, worker } = await switchedToSam();
     await teamsRetries(fake, "alex", OLD);
 
@@ -232,7 +256,7 @@ describe("#77: reads and status while the account is unsure", () => {
     expect(v.teams.droppedOldCaptures.count).toBe(1);
   });
 
-  it("6: a read when the account isn't unsure carries no note", async () => {
+  it("6b: a read when the account isn't unsure carries no note", async () => {
     const { worker } = await switchedToSam();
     const replies: { ok: boolean; result?: object }[] = [];
     await worker.dispatch({ type: "request", id: "r1", method: "listChats", params: {}, timeoutMs: 60_000 }, (r) => replies.push(r as (typeof replies)[number]));
@@ -240,7 +264,7 @@ describe("#77: reads and status while the account is unsure", () => {
     expect(replies[0].result).not.toHaveProperty("accountNote");
   });
 
-  it("6: get_version with an older extension (no accountUnsure in its status) shows accountUnsure: null", async () => {
+  it("6c: get_version with an older extension (no accountUnsure in its status) shows accountUnsure: null", async () => {
     const v = await getVersion(async () => ({ extensionVersion: "0.3.52", teamsTabs: 1, sessions: [{ sessionCaptured: true }], droppedOldCaptures: { count: 0, lastAt: null } }));
     expect(v.teams).toHaveProperty("accountUnsure", null);
   });
@@ -257,5 +281,147 @@ describe("#77: reads and status while the account is unsure", () => {
     expect(result).toEqual({ sent: false, reason: expect.stringMatching(RETRY_AT) });
     expect(windows(fake)).toBe(0);
     expect(posts(fake)).toEqual([]);
+  });
+});
+
+describe("#77: rule 1 as written: any capture of the previous account within 30 s marks the account unsure", () => {
+  // A token of Alex's issued after Sam's: not dropped, a switch back.
+  const FRESH = SWITCHING + 600;
+
+  it("1b: within 30 s, a capture of the previous account that switches back (a newer token) marks the account unsure too: a send is refused", async () => {
+    const { fake, worker } = await switchedToSam();
+
+    await teamsRetries(fake, "alex", FRESH);
+
+    expect(await signedInAs(worker)).toBe(`8:orgid:${ACCOUNT.alex.oid}`); // switched back, as before
+    expect((await worker.handlers.status({})).accountUnsure).toEqual(UNSURE);
+    await expect(worker.handlers.requestSend({ conversation: "Alpha launch", text: "Hi all" })).resolves.toEqual({ sent: false, reason: expect.stringMatching(RETRY_AT) });
+    expect(windows(fake)).toBe(0);
+  });
+
+  it("1c: a switch back while unsure doesn't clear it: unsure since the drop, until 30 s after the switch back", async () => {
+    const { fake, worker } = await switchedToSam();
+    await teamsRetries(fake, "alex", OLD); // dropped at 14:00:00: unsure
+    vi.setSystemTime(SWITCHED_AT.getTime() + 10_000);
+
+    await teamsRetries(fake, "alex", FRESH); // 14:00:10: a switch back to Alex
+
+    expect(await signedInAs(worker)).toBe(`8:orgid:${ACCOUNT.alex.oid}`);
+    expect((await worker.handlers.status({})).accountUnsure).toEqual({ since: SWITCHED_AT.toISOString(), until: new Date(2026, 10, 9, 14, 0, 40).toISOString() });
+  });
+});
+
+describe("#77: each check that refuses a send while unsure, on its own", () => {
+  /** Until the send answered or opened a window (a window keeps it waiting for a decision). */
+  const answerOrWindow = (fake: FakeChrome, result: Promise<unknown>) =>
+    Promise.race([result.catch(() => {}), vi.waitFor(() => expect(windows(fake)).toBeGreaterThan(0), { timeout: 4_000 })]);
+
+  it("4a (requestSend): unsure before the send starts: refused before anything is looked up for it", async () => {
+    const { fake, worker } = await switchedToSam();
+    await teamsRetries(fake, "alex", OLD);
+    const before = fake.sent.length;
+
+    await expect(worker.handlers.requestSend({ conversation: "Alpha launch", text: "Hi all" })).resolves.toEqual({ sent: false, reason: expect.stringMatching(RETRY_AT) });
+
+    expect(fake.sent.slice(before)).toEqual([]); // not even the chat list
+  });
+
+  it("4b (askUserToConfirm): unsure starts during the send's lookups: no window opens", async () => {
+    let reads = 0;
+    const list = gate();
+    const { fake, worker } = await switchedToSam(servicesWith({ csa: () => (reads++ === 0 ? list.opened : undefined) }));
+    const result = worker.handlers.requestSend({ conversation: "Alpha launch", text: "Hi all" });
+    await vi.waitFor(() => expect(reads).toBe(1)); // past the first check, reading the chat list
+
+    await teamsRetries(fake, "alex", OLD);
+    list.open();
+
+    await answerOrWindow(fake, result);
+    expect(windows(fake)).toBe(0);
+    await expect(result).resolves.toEqual({ sent: false, reason: expect.stringMatching(RETRY_AT) });
+    expect(posts(fake)).toEqual([]);
+  });
+
+  it("4c (sendWithoutConfirming): unsure starts during an auto-send's lookups: refused before it asks Teams anything more", async () => {
+    let lookups = 0;
+    const lookup = gate();
+    const { fake, worker } = await switchedToSam(servicesWith({ mt: () => (lookups++ === 0 ? lookup.opened : undefined) }));
+    const result = worker.handlers.requestSend({ conversation: "48:notes", text: "Note", autoSendTo: [ACCOUNT.sam.email] });
+    await vi.waitFor(() => expect(lookups).toBe(1));
+
+    await teamsRetries(fake, "alex", OLD);
+    const before = fake.sent.length;
+    lookup.open();
+
+    await expect(result).resolves.toEqual({ sent: false, autoSent: true, reason: expect.stringMatching(RETRY_AT) });
+    expect(fake.sent.slice(before)).toEqual([]); // not even the sender's name
+  });
+});
+
+describe("#77: a post that waits out Teams' throttling", () => {
+  it("2b: the old token is dropped while the clicked post waits for the gate a 429 closed: nothing is posted", async () => {
+    let throttled = false;
+    const services = servicesWith({
+      chatsvc: (r) => {
+        if (r.method !== "GET" || throttled) return undefined;
+        throttled = true;
+        return reply(429, { message: "Too many requests" }, { headers: { "retry-after": "1" } });
+      },
+    });
+    const { fake, worker } = await switchedToSam(services, { clock: false }); // the gate's wait ends on the real clock
+    const result = worker.handlers.requestSend({ conversation: "Alpha launch", text: "Hi all" });
+    await windowOpened(fake);
+    // A read is throttled: chatsvc's gate shuts for a second.
+    const read = worker.handlers.readMessages({ conversation: ALPHA });
+    await vi.waitFor(() => expect(fake.count("chatsvc")).toBe(1));
+
+    // The post's own check before the wait finds the account sure; the drop lands right after it,
+    // while the post waits for the gate (its only read of the switch record before then).
+    const get = vi.mocked(fake.chrome.storage.session.get);
+    const realGet = get.getMockImplementation() as (keys?: string | string[] | null) => Promise<Record<string, unknown>>;
+    let armed = true;
+    let dropped: Promise<unknown> | null = null;
+    get.mockImplementation(async (keys) => {
+      const r = await realGet(keys);
+      if (armed && keys === "accountSwitch") {
+        armed = false;
+        dropped = teamsRetries(fake, "alex", OLD);
+      }
+      return r;
+    });
+    await clickSend(fake);
+
+    await expect(result).resolves.toEqual({ sent: false, reason: expect.stringMatching(/Teams switched accounts moments ago; try again after \d\d:\d\d:\d\d/) });
+    expect(dropped).not.toBeNull();
+    await dropped;
+    expect(posts(fake)).toEqual([]);
+    await read;
+  });
+});
+
+describe("#77: a new chat created just before the account turned unsure", () => {
+  it("5b: the chat was created, then the message is refused: the reason says so once, with when to retry", async () => {
+    let shown: FakeChrome | null = null;
+    const services = servicesWith({
+      // The drop lands while Teams creates the chat: after that post's check, before the message's.
+      chatsvc: async (r) => {
+        if (shown && r.method === "POST" && /\/threads$/.test(r.path)) await teamsRetries(shown, "alex", OLD);
+        return undefined;
+      },
+    });
+    const { fake, worker } = await switchedToSam(services);
+    shown = fake;
+    const result = worker.handlers.requestSend({ to: [JAMIE.email], text: "Hi Jamie" });
+    await windowOpened(fake);
+
+    await clickSend(fake);
+
+    const r = (await result) as { sent: boolean; reason: string };
+    expect(r.sent).toBe(false);
+    expect(r.reason).toMatch(/^The chat was created, but the message wasn't sent: Teams switched accounts moments ago\b/);
+    expect(r.reason).toMatch(/after 14:00:30\b/i);
+    expect(r.reason).not.toMatch(/Nothing was sent/);
+    expect(posts(fake).filter((p) => /\/threads$/.test(p.path))).toHaveLength(1);
+    expect(posts(fake).filter((p) => /\/messages$/.test(p.path))).toEqual([]);
   });
 });
