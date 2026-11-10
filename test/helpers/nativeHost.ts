@@ -55,6 +55,8 @@ export function nativeExtension(home: string, socket: string, opts: NativeExtens
   });
   let stderr = "";
   child.stderr.on("data", (d) => (stderr += d));
+  // A host killed (or exited) while a write is on its way: EPIPE on stdin, not an unhandled error.
+  child.stdin.on("error", () => {});
   const exited = new Promise<number | null>((resolve) => child.once("exit", (code) => resolve(code)));
   let exitCode: number | null | undefined;
   void exited.then((c) => (exitCode = c));
