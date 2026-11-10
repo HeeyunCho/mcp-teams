@@ -153,7 +153,7 @@ export interface BridgeTimings {
 /**
  * Where a bridge meets the native host (#123, ADR 0001). None of these set: TCP only, as before.
  * Ported from mcp-newoutlook src/bridge.ts BridgeOptions (listenPath, hubSocket, socketNeedsToken,
- * features, onExtensionsChange; commit 7ef8ac9).
+ * features, onExtensionsChange; commit eb9d32f).
  */
 export interface NativeHostOptions {
   /**
@@ -446,7 +446,7 @@ function socketAlive(path: string): Promise<boolean> {
  * file or a Windows named pipe. On macOS and Linux the socket is 0600 in a 0700 folder, and a
  * socket file that a crashed host left (nobody listens on it) is replaced. Only local processes
  * connect: any Origin header (a browser page) is refused. Ported from mcp-newoutlook src/bridge.ts
- * listenOnPath, socketAlive and join({ path }) (commit 7ef8ac9).
+ * listenOnPath, socketAlive and join({ path }) (commit eb9d32f).
  */
 export function socketTransport({ path, maxMessageBytes }: { path: string; maxMessageBytes: number }): BridgeTransport {
   const unix = process.platform !== "win32";
@@ -1197,7 +1197,7 @@ export class ExtensionBridge {
    * Joins the hub on `transport` as a peer: the TCP hub, or the native host on its hub socket.
    * adopt (a server on TCP checking for the host): decides on the peer-welcome whether to stay; when
    * it says yes, this server first leaves the TCP bridge (leaveTcp). Ported from mcp-newoutlook
-   * src/bridge.ts join(target, adopt) (commit 7ef8ac9).
+   * src/bridge.ts join(target, adopt) (commit eb9d32f).
    */
   private join(transport: BridgeTransport, adopt?: (welcome: any) => boolean): Promise<boolean> {
     return new Promise((resolve) => {
@@ -1325,7 +1325,7 @@ export class ExtensionBridge {
   /**
    * A server on TCP whose config enables the native host (#123 decision 7): checks the hub socket
    * every hubPollMs. When the host serves the extension there and this server's TCP bridge has none,
-   * it moves to the host. Ported from mcp-newoutlook src/bridge.ts watchHost (commit 7ef8ac9).
+   * it moves to the host. Ported from mcp-newoutlook src/bridge.ts watchHost (commit eb9d32f).
    */
   private watchHost() {
     if (!this.native.hubSocket || this.hostWatch) return;
@@ -1350,7 +1350,7 @@ export class ExtensionBridge {
    * the port and its peers, which join the host too (or, servers that don't look for it, the host's
    * TCP listener once it has the port). Nothing reached an extension here (this server had none),
    * so whatever waits fails with "try again". Ported from mcp-newoutlook src/bridge.ts leaveTcp
-   * (commit 7ef8ac9), without its handover note, which Teams' peers don't know.
+   * (commit eb9d32f), without its handover note, which Teams' peers don't know.
    */
   private leaveTcp() {
     if (this.role === "hub") {

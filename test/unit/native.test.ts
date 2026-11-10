@@ -1,7 +1,7 @@
 // Chrome's native-messaging framing (#123, ADR 0001): a 4-byte little-endian length, then UTF-8
 // JSON; host → extension messages over Chrome's 1 MB limit travel as chunks. And where servers
 // reach the native host: the hub socket, or on Windows a named pipe per user (decision 10).
-// Ported from mcp-newoutlook test/unit/native.test.ts (commit aa0a7a5).
+// Ported from mcp-newoutlook test/unit/native.test.ts (commit 7ef8ac9).
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {

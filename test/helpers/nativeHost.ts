@@ -2,7 +2,7 @@
 // as its first argument, and a fake extension speaking Chrome's framing (4-byte little-endian
 // length + UTF-8 JSON) on its stdin and stdout. Servers join it as peers over a hub socket in a
 // temporary folder (a named pipe named after it on Windows).
-// Ported from mcp-newoutlook test/helpers/nativeHost.ts (commit eb9d32f).
+// Ported from mcp-newoutlook test/helpers/nativeHost.ts (commit ace7f02).
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";

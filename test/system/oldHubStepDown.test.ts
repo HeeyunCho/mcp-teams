@@ -32,7 +32,7 @@ async function offline(): Promise<string | undefined> {
 }
 
 describe("#123 decision 8: an old TCP hub steps down to the native host", () => {
-  it(`#123: the real mcp-teams@${OLD} on the port hands it to the host and joins it as a peer`, { timeout: 300_000 }, async (ctx) => {
+  it(`#123: the real mcp-teams@${OLD} on the port hands it to the host and joins it as a peer`, { timeout: 540_000 }, async (ctx) => {
     const why = await offline();
     if (why) {
       console.warn(`skipped: ${why}`);
@@ -44,12 +44,12 @@ describe("#123 decision 8: an old TCP hub steps down to the native host", () => 
     const npmCli = join(dirname(process.execPath), "node_modules", "npm", "bin", "npm-cli.js");
     const args = ["install", "--no-audit", "--no-fund", "--ignore-scripts", "--prefer-offline", "--prefix", dir, `mcp-teams@${OLD}`];
     const install = existsSync(npmCli)
-      ? spawnSync(process.execPath, [npmCli, ...args], { encoding: "utf8", timeout: 200_000 })
-      : spawnSync(process.platform === "win32" ? "npm.cmd" : "npm", args, { encoding: "utf8", timeout: 200_000, shell: process.platform === "win32" });
+      ? spawnSync(process.execPath, [npmCli, ...args], { encoding: "utf8", timeout: 420_000 })
+      : spawnSync(process.platform === "win32" ? "npm.cmd" : "npm", args, { encoding: "utf8", timeout: 420_000, shell: process.platform === "win32" });
     if (install.status !== 0) {
       const out = `${install.stderr ?? ""}${install.error?.message ?? ""}`;
       // Its own time limit is a failure, not a sign of being offline (the lookup above worked).
-      if (install.signal) throw new Error(`npm install mcp-teams@${OLD} took over 200 s (${install.signal}):\n${out}`);
+      if (install.signal) throw new Error(`npm install mcp-teams@${OLD} took over 420 s (${install.signal}):\n${out}`);
       if (NETWORK_ERROR.test(out)) {
         console.warn(`skipped: npm install failed with a network error: ${out.trim().split("\n").at(-1)}`);
         return ctx.skip(`offline: npm install failed (${out.trim().split("\n").at(-1)})`);

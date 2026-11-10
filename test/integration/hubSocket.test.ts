@@ -3,7 +3,7 @@
 // listens on the TCP port for peers only. Servers whose config enables the native host
 // (hubSocket) join it there first, and leave a TCP hub for it once it has the extension. The
 // host process itself (dist/hub.js) is covered by test/system/nativeHost.test.ts.
-// Ported from mcp-newoutlook test/integration/hubsocket.test.ts (commit ace7f02).
+// Ported from mcp-newoutlook test/integration/hubsocket.test.ts (commit aa0a7a5).
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { connect, createServer, type Server } from "node:net";
 import { tmpdir } from "node:os";
