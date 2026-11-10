@@ -29,8 +29,11 @@ let lastError = null;
  * Teams authenticates each service (chat, teams list, people, search) with its own
  * token, sent in headers. We observe them on Teams' own requests, including those of
  * its workers, and replay them. They live in chrome.storage.session (memory only).
+ * Only requests from the Teams page count (#122): another page calling the same service (Outlook
+ * on the web searching substrate) neither marks the session as sent nor replaces it.
  */
 function captureSession(details) {
+  if (!teams.isTeamsOrigin(details.initiator)) return;
   const svc = teams.serviceOf(details.url);
   if (!svc) return;
   const headers = teams.pickHeaders(details.requestHeaders);
