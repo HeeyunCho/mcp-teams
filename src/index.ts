@@ -38,7 +38,7 @@ let extensionUpdated = false;
 const installed = installedVersion();
 if (installed !== null && !["token", "version", "--version"].includes(command)) {
   try {
-    writePairing(config.token);
+    writePairing(config.token, undefined, { nativeHost: config.nativeHost });
     if (!isNewer(installed, installedVersion(PACKAGED_EXTENSION_DIR))) extensionUpdated = syncExtension().changed;
   } catch (err) {
     console.error(`[mcp-teams] could not update the extension folder: ${(err as Error).message}`);

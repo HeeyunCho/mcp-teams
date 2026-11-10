@@ -69,10 +69,14 @@ export function syncExtension(from = PACKAGED_EXTENSION_DIR, to = INSTALLED_EXTE
   return { changed, dir: to };
 }
 
-/** Writes the pairing token into the installed extension folder (readable by this user only). Returns whether it changed. */
-export function writePairing(token: string, dir = INSTALLED_EXTENSION_DIR): boolean {
+/**
+ * Writes the pairing token into the installed extension folder (readable by this user only). Returns whether it changed.
+ * With `nativeHost` (config.json, #123) it also says `"nativeHost": true`: only then does the
+ * extension try the native host first. Off, the file is the token alone, as before.
+ */
+export function writePairing(token: string, dir = INSTALLED_EXTENSION_DIR, { nativeHost = false }: { nativeHost?: boolean } = {}): boolean {
   const file = join(dir, PAIRING_FILE);
-  const text = `${JSON.stringify({ token })}\n`;
+  const text = `${JSON.stringify(nativeHost ? { token, nativeHost: true } : { token })}\n`;
   if (existsSync(file) && readFileSync(file, "utf8") === text) return false;
   mkdirSync(dir, { recursive: true });
   writeFileSync(file, text, { mode: 0o600 });

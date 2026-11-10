@@ -310,7 +310,8 @@ async function waitFor(cond: () => boolean, ms: number) {
 /** Installs or updates the extension folder and waits until the extension connects. */
 async function connectExtension(bridge: ExtensionBridge, serverVersion: string): Promise<boolean> {
   const { changed, dir } = syncExtension();
-  writePairing(loadConfig().token, dir);
+  const config = loadConfig();
+  writePairing(config.token, dir, { nativeHost: config.nativeHost });
   ok(`Extension ${installedVersion(dir)} ${changed ? "installed in" : "up to date in"} ${dir}`);
 
   // An installed extension connects within seconds (it retries every 30 s).
