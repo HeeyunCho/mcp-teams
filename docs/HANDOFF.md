@@ -1,6 +1,6 @@
-# Handoff: mcp-teams after 0.3.56 (updated 2026-11-10 on the Windows PC)
+# Handoff: mcp-teams after #130, the native host (updated 2026-11-10 on the Windows PC)
 
-Repo: GitHub `HeeyunCho/mcp-teams`. Branch `main`: **0.3.56** is the latest release (`5908395 chore(release): v0.3.56`). One PR is open: **#130**, PR 2 of #123, the native host.
+Repo: GitHub `HeeyunCho/mcp-teams`. Branch `main`: **#130** (PR 2 of #123, the native host) is merged as `05e027b`, on top of 0.3.57 (#132, `.gitattributes` with LF). The release workflow cuts the next version from that merge. No code PRs are open.
 
 ## Merged on 2026-11-09/10
 
@@ -19,9 +19,9 @@ Each had a fresh-subagent review with no blockers and passed CI on Linux and Win
 
 If Teams ever sent a captured-service request from another origin, it would no longer be captured.
 
-## Open: PR #130, the native host (#123 PR 2)
+## Merged: PR #130, the native host (#123 PR 2)
 
-- **Where:** branch `feat/123-native-host`, worktree `.claude/worktrees/agent-a04b8591bbb86674e`.
+- **Merged** on 2026-11-10 as `05e027b` (merge commit, head `c862dab`), after CI passed (test, test-windows, gitleaks). The branch `feat/123-native-host` and its worktree are deleted.
 - **What:**
   - `dist/hub.js`, with Chrome's 4-byte framing and the 1 MB split;
   - the serving and relaying host, with the 30 s linger and `~/.mcp-teams/hub.log` (metadata only);
@@ -37,11 +37,20 @@ If Teams ever sent a captured-service request from another origin, it would no l
   - the holder gets the serving host's `authTimeoutMs` (5 s) for its challenge and again for a proven welcome;
   - at most 64 frames and 1 MB are held before the welcome;
   - `TEAMS_MCP_HUB_AUTH_TIMEOUT_MS` shortens it for tests.
-- **Follow-ups in progress on the same branch, before the push:**
-  - start the welcome deadline at the challenge when the extension's hello hasn't come yet;
-  - a test that a proven relay with a 600 ms deadline still answers well past it;
-  - clamp the env var to 2^31−1.
-- **Testing:** the full `npm test` on Node 26 was green (62 files, 768 passed) before the deadline commits. The full Node 20 run was stopped for low memory, so **CI is the full run**.
+- **Follow-ups, done before the merge:**
+  - `28ee536`: the welcome deadline also starts at the challenge when the extension's hello hasn't come yet, and a later hello restarts it. A proven relay with a 600 ms deadline still passes a call 2 s later. `msFromEnv()` (src/native.ts) takes whole ms above 0 for the `TEAMS_MCP_HUB_*_MS` variables, clamped to 2^31−1.
+  - `462f5f6`: `lostCall.test.ts` finds `describeSocketError`'s end with either line ending (the Windows CI checkout had CRLF).
+  - A fresh review of both found no blockers. Its two should-fix test gaps are fixed in **`c862dab`**:
+    - a test that a hello after the holder's challenge restarts the deadline from the hello. With the restart removed on purpose it failed (exit 1040 ms after the hello, 1250 needed);
+    - a lower bound on the early-challenge test.
+  - The review's four nits are posted on #123 (comment 6772138839):
+    - `msFromEnv` also accepts `1e3`, `0x10` and ` 600 `;
+    - `1e400` (Infinity) falls back to the default while `1e308` clamps;
+    - a late hello can give the holder up to two deadlines, which a comment should say;
+    - the `lostCall` end search needs a trailing newline.
+- **Testing:** the full `npm test` on Node 26 was green (62 files, 768 passed) before the deadline commits; CI was the full run after them.
+  - System tests run the built `dist/hub.js`, so **run `npm run build` first**. A stale `dist/` fails the welcome test with the old `serverVersion`.
+  - Locally with about 1.3 GB free, "a relaying host whose hub socket holder never sends a challenge exits within the auth timeout" took 14.9 s against its limit. It passes alone.
 - **Not blocking, posted on #123 and in the PR:**
   - the relay is a signing oracle for `client:socket` (not exploitable as far as the review saw);
   - the relay overwrites the extension's `nonce` (matters for PR 3);
@@ -71,6 +80,13 @@ If Teams ever sent a captured-service request from another origin, it would no l
   - "the extension lists no features" is by design until #123 PR 3.
 - **#124** (`needs-info`, with #111/#96): the extension stayed disconnected about half an hour while a hub was listening, right after a rebuild.
   - Next time, before reloading anything, capture the service worker's state and console in `chrome://extensions`, and run `Get-NetTCPConnection -LocalPort 47393`.
+  - **Another episode, 2026-11-10 about 16:45 local time:**
+    - Claude Desktop's teams server first reported "Server teams unavailable". After its 60 s retry it ran 0.3.56 with the bridge "waiting for extension" (`extension=null`, `teams=null`, `restartNeeded=false`).
+    - Port 47393 then had the hub (pid 30504, the mcp-atlassian session's server, started 16:28:57) and 8 established connections, all `mcp-teams` servers, none from Chrome.
+    - About a minute later `get_version` showed the extension connected again (0.3.56, websocket). It isn't known whether it came back by itself or because the extension was reloaded.
+    - Teams itself had no session: `teamsTabs: 0`, all services null.
+    - The test runs going on at the time use their own ports (`TEAMS_MCP_PORT` 0 or a test port), never 47393, and the hub predates them.
+  - **`background.js:2104` in Chrome's console** is `new WebSocket(\`ws://127.0.0.1:${port || DEFAULT_PORT}\`)` in the extension's connect. An error there is most likely Chrome's "WebSocket connection … failed" while no hub is listening (for example while the hub moves between sessions). The extension retries, so it is noise, not the fault. The exact error text wasn't captured.
 - **#111/#96** (`bug`, `ready-for-human`): close with the native host and launcher (#123, ADR 0002).
 - **Outlook:** the pipe-name collision for non-ASCII usernames is filed as mcp-newoutlook#178.
 
@@ -109,7 +125,9 @@ If Teams ever sent a captured-service request from another origin, it would no l
 ## This Windows PC (checked 2026-11-09)
 
 - **Live install:** `C:\Orca_Project\mcp-teams` is the live install. Every session's `teams` server runs its `dist/index.js`, and Chrome's Teams extension loads its `extension/` folder.
-  - On 2026-11-10 it was rebuilt on **0.3.56** (build id `554f46ce7222`), after #129 merged. The extension copy in `~/.mcp-teams/extension` is on 0.3.56.
+  - On 2026-11-10 at 17:03 it was rebuilt on `05e027b` (#130 merged; `package.json` still 0.3.57 until the release commit is pulled) with `npm ci` and `npm run build`. The extension copy in `~/.mcp-teams/extension` was on 0.3.56; a starting server syncs it. Since 0.3.56, only the extension's manifest version has changed.
+    - The checkout's uncommitted `package-lock.json` (dependency drift from an `npm install`) was saved as a patch in that session's scratchpad and restored before the pull.
+    - Ten servers were older than that build. The hub was the mcp-atlassian session's server, pid 30504. The others: mcp-newoutlook, mcp-teams, PM-HUB, system-manager, pm-hub-sync, two Claude Desktop servers, and two Claude Code sessions with no recorded folder.
   - **Chrome loads the extension from `~/.mcp-teams/extension`,** a copy that a *starting* server syncs from the checkout (`src/index.ts:41`, `syncExtension`). A rebuild alone doesn't update it.
     - `node dist/index.js reload-extension` syncs it, but on this PC it answers "hub restarted" every time. The extension then reloads itself and reconnects within about 5 s.
     - The `reload_extension` tool only reloads from that copy.
@@ -143,10 +161,8 @@ If Teams ever sent a captured-service request from another origin, it would no l
 1. **Native-messaging host (0.4.0, ADR 0001): issue #123**, grilled with the user on 2026-11-09/10.
    - It has 13 decisions, five PRs in order, and acceptance checkboxes, including manual checks on Windows and the Mac.
    - PR 5 (default on, `feat!:` → 0.4.0) waits for both manual checks.
-   - **PR 1 (the transport interface) is PR #127.**
-     - Branch `refactor/123-transport-interface`, worktree `.claude/worktrees/agent-af25389b385ab3f06`.
-     - It has had a fresh review with no blockers. CI is the full run.
-     - What PR 2 must add is posted on #123.
+   - PR 1 (#127, the transport interface) and PR 2 (#130, the native host) are merged.
+   - **Next is PR 3:** the extension's `connectNative` with the TCP fallback, retrying native after a 4403, chunk joining, `transport` in `get_version`, and the nonce point (the relay overwrites the extension's `nonce`). Read the #123 comments first, including the nits from the #130 reviews.
 2. **Versioned launcher (0.5.0, ADR 0002).** The same: open the issue from the ADR first.
 3. **`ready-for-agent` issues:**
    - #103: finish the branch above.
