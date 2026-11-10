@@ -7,6 +7,9 @@
 // Ported from mcp-newoutlook extension/chunks.js (Reassembler; commit df54b52). The limit is the
 // largest message this extension takes (its hello's maxMessageBytes).
 
+/** Chrome's limit for one message from the extension to its native host (64 MiB). */
+export const NATIVE_MAX_MESSAGE_BYTES = 64 * 1024 * 1024;
+
 /** The largest message joined (the JSON text's length). */
 export const CHUNK_MAX_CHARS = 256 * 1024 * 1024;
 /** How long a set may take to arrive completely. */

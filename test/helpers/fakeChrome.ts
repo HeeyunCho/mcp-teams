@@ -6,6 +6,8 @@
 import { readFileSync } from "node:fs";
 import { expect, vi } from "vitest";
 import WsWebSocket from "ws";
+// @ts-expect-error plain JS extension module without types
+import { NATIVE_MAX_MESSAGE_BYTES } from "../../extension/chunks.js";
 
 export type Service = "chatsvc" | "csa" | "mt" | "substrate" | "sharepoint";
 export const TEAMS_SERVICES = ["chatsvc", "csa", "mt", "substrate"] as const;
@@ -94,6 +96,12 @@ export interface FakeChromeOptions {
    * port it opens is handed to this as the host's side (#123). Left out: no connectNative.
    */
   nativeHost?: (host: FakeNativeHost) => void;
+  /**
+   * The size over which a native port's postMessage throws, as Chrome's does over its 64 MiB
+   * (default: that, NATIVE_MAX_MESSAGE_BYTES). Lower, a test shows Chrome's refusal without
+   * allocating 64 MB.
+   */
+  nativeRefusesOver?: number;
 }
 
 /**
@@ -134,7 +142,7 @@ const event = <F extends Fn = Fn>() => {
 const patternToRegExp = (p: string) => new RegExp(`^${p.replace(/[.+?^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*")}$`);
 
 /** A port of chrome.runtime.connectNative, joined to the `host` side it returns with it. */
-function fakeNativePort(runtime: { lastError?: { message: string } }, name: string) {
+function fakeNativePort(runtime: { lastError?: { message: string } }, name: string, refusesOver: number) {
   const onMessage = event();
   const onDisconnect = event();
   let open = true;
@@ -148,7 +156,7 @@ function fakeNativePort(runtime: { lastError?: { message: string } }, name: stri
     postMessage(msg: unknown) {
       if (!open) throw new Error("Attempting to use a disconnected port object");
       // As Chrome: a message to a native host over 64 MiB is refused, and the port stays open.
-      if (Buffer.byteLength(JSON.stringify(msg)) > 64 * 1024 * 1024) throw new Error("Message length exceeded maximum allowed length.");
+      if (Buffer.byteLength(JSON.stringify(msg)) > refusesOver) throw new Error("Message length exceeded maximum allowed length.");
       const copy = structuredClone(msg);
       later(() => {
         host.received.push(copy);
@@ -188,7 +196,7 @@ function fakeNativePort(runtime: { lastError?: { message: string } }, name: stri
   return { port, host };
 }
 
-export function createFakeChrome({ services = {}, captured = [...TEAMS_SERVICES], teamsTab = true, local: localInit = {}, seesOwnRequests = false, loadMs, nativeHost }: FakeChromeOptions = {}) {
+export function createFakeChrome({ services = {}, captured = [...TEAMS_SERVICES], teamsTab = true, local: localInit = {}, seesOwnRequests = false, loadMs, nativeHost, nativeRefusesOver = NATIVE_MAX_MESSAGE_BYTES }: FakeChromeOptions = {}) {
   const sent: SentRequest[] = [];
   const session = new Map<string, unknown>();
   const local = new Map<string, unknown>(Object.entries(localInit));
@@ -350,7 +358,7 @@ export function createFakeChrome({ services = {}, captured = [...TEAMS_SERVICES]
   const nativePorts: FakeNativeHost[] = [];
   const connectNative = nativeHost
     ? vi.fn((name: string) => {
-        const { port, host } = fakeNativePort(chrome.runtime, name);
+        const { port, host } = fakeNativePort(chrome.runtime, name, nativeRefusesOver);
         nativePorts.push(host);
         nativeHost(host);
         return port;

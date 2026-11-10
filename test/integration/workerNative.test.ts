@@ -39,13 +39,15 @@ function pairing(file: object | null) {
 /**
  * A native host that serves like dist/hub.js: a challenge the extension needn't answer (Chrome
  * vouches for it), then a welcome proving the hello's nonce. `then` runs on it after the welcome.
+ * `maxMessageBytes`: what its welcome declares it takes (null: no capabilities at all).
  */
-function servingHost({ then }: { then?: (host: FakeNativeHost) => void } = {}) {
+function servingHost({ then, maxMessageBytes = 1024 }: { then?: (host: FakeNativeHost) => void; maxMessageBytes?: number | null } = {}) {
   return (host: FakeNativeHost) => {
     host.send({ type: "challenge", nonce: "host-challenge" });
     host.onPost = (msg) => {
       if (msg.type !== "hello") return;
-      host.send({ type: "welcome", serverVersion: "0.0.0", heartbeatMs: 20_000, capabilities: { features: ["native"], maxMessageBytes: 1024 }, proof: proof(TOKEN, "server", msg.nonce) });
+      const capabilities = maxMessageBytes === null ? {} : { capabilities: { features: ["native"], maxMessageBytes } };
+      host.send({ type: "welcome", serverVersion: "0.0.0", heartbeatMs: 20_000, ...capabilities, proof: proof(TOKEN, "server", msg.nonce) });
       then?.(host);
     };
   };
@@ -169,6 +171,44 @@ describe("#123: the worker connects to the native host first, and falls back to 
     await vi.waitFor(() => expect(host.received).toContainEqual({ type: "response", id: "small-1", ok: false, error: "Unknown method noSuchMethod" }), { timeout: 2_000 });
   });
 
+  for (const [what, maxMessageBytes] of [
+    ["declares no limit", null],
+    ["declares more than Chrome passes (256 MB)", 256 * 1024 * 1024],
+  ] as const) {
+    it(`an answer Chrome refuses to post (over its 64 MiB; here lowered) still gets a short error at once, when the host ${what}`, async () => {
+      pairing({ token: TOKEN, nativeHost: true });
+      // Chrome's refusal at 1 KB instead of 64 MiB: the same path, without allocating 64 MB.
+      const f = createFakeChrome({ nativeHost: servingHost({ maxMessageBytes }), nativeRefusesOver: 1024 });
+      await start(f);
+      await connected(f);
+      const host = f.nativePorts[0];
+      host.send({ type: "request", id: "huge-2", method: "x".repeat(2_000), params: {}, timeoutMs: 60_000 });
+      await vi.waitFor(
+        () =>
+          expect(host.received).toContainEqual({
+            type: "response",
+            id: "huge-2",
+            ok: false,
+            error: expect.stringMatching(/too large .*native connection \(Message length exceeded maximum allowed length\.\)/),
+          }),
+        { timeout: 2_000 },
+      );
+      expect(host.open).toBe(true);
+    });
+  }
+
+  it("with a host that declares a tiny limit, the error answer itself fits: a bare 'too large'", async () => {
+    pairing({ token: TOKEN, nativeHost: true });
+    // 100 bytes: the full explanation (about 250) would itself be over, and the hub would drop the connection.
+    const f = createFakeChrome({ nativeHost: servingHost({ maxMessageBytes: 100 }) });
+    await start(f);
+    await connected(f);
+    const host = f.nativePorts[0];
+    host.send({ type: "request", id: "t1", method: "x".repeat(2_000), params: {}, timeoutMs: 60_000 });
+    await vi.waitFor(() => expect(host.received).toContainEqual({ type: "response", id: "t1", ok: false, error: "too large" }), { timeout: 2_000 });
+    for (const m of host.received) expect(Buffer.byteLength(JSON.stringify(m))).toBeLessThanOrEqual(m.type === "hello" ? Infinity : 100);
+  });
+
   it("a TCP hub that refuses it with 4403 (the native host holds the port) sends it back to native messaging, even before pairing.json says so", async () => {
     pairing({ token: TOKEN });
     const hub = await tcpHub({ refuseWith: 4403 });
@@ -193,7 +233,8 @@ describe("#123: the worker connects to the native host first, and falls back to 
     await start(f);
     await until(() => tried.length >= 2, 3_000, "a second native try");
     // Each failed native try goes to TCP once (whose 4403 sends the next one back), and the retries
-    // back off (0.5 s, then 1 s, …): the second native try came a backoff after the first.
+    // back off (RETRY_MIN_MS 0.5 s, doubling): the first 4403 waits 0.5 s, the second (after native
+    // try 1) 1 s, so try 2 comes at least 1 s after try 1; 900 ms leaves room for timer jitter.
     expect(tried[1] - tried[0]).toBeGreaterThanOrEqual(900);
     const hellos = () => hub.received.filter((m) => m.type === "hello").length;
     await until(() => hellos() >= 3, 3_000, "TCP after the second native try");

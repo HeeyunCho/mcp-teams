@@ -2,7 +2,7 @@
 // turns it on, else over WebSocket) and runs Teams requests inside an open Teams tab, with the
 // session Teams itself uses.
 
-import { Reassembler } from "./chunks.js";
+import { NATIVE_MAX_MESSAGE_BYTES, Reassembler } from "./chunks.js";
 import * as teams from "./teams.js";
 
 const VERSION = chrome.runtime.getManifest().version;
@@ -2084,8 +2084,6 @@ const NATIVE_HOST = "com.mcp_teams.hub";
 /** WebSocket readyState values, which a native connection uses too. */
 const OPEN = 1;
 const CLOSED = 3;
-/** Chrome's limit for one message from the extension to its native host. */
-export const NATIVE_MAX_MESSAGE_BYTES = 64 * 1024 * 1024;
 
 const formatSize = (n) => (n >= 1024 * 1024 ? `${(n / 1024 / 1024).toFixed(1)} MB` : `${Math.ceil(n / 1024)} KB`);
 /** `text`'s UTF-8 size, or its length when even 3 bytes a character stay within `max` (no need to count). */
@@ -2111,7 +2109,8 @@ const tooLarge = (id, detail) => ({
  * extension/background.js (openNative; commit df54b52).
  *
  * A response larger than the host takes (maxMessageBytes: Chrome's 64 MB, or less when the host's
- * welcome declares less) goes as a short error instead, as does one Chrome refuses to post.
+ * welcome declares less) goes as a short error instead, as does one Chrome refuses to post; that
+ * error is no larger than the host takes either (see fitting).
  */
 function openNative() {
   const port = chrome.runtime.connectNative(NATIVE_HOST);
@@ -2130,7 +2129,8 @@ function openNative() {
       const over = bytes > conn.maxMessageBytes;
       if (over) {
         if (!answer) return;
-        msg = tooLarge(msg.id, `${formatSize(bytes)}; the limit is ${formatSize(conn.maxMessageBytes)}`);
+        msg = fitting(msg.id, `${formatSize(bytes)}; the limit is ${formatSize(conn.maxMessageBytes)}`);
+        if (!msg) return;
       }
       try {
         port.postMessage(msg);
@@ -2138,8 +2138,9 @@ function openNative() {
         // Chrome refused it (a disconnected port's onDisconnect follows, and the hub fails the call
         // then); on an open port, an answer still goes, short, so the call doesn't wait for nothing.
         if (!answer || over) return;
+        const short = fitting(msg.id, err?.message ?? String(err));
         try {
-          port.postMessage(tooLarge(msg.id, err?.message ?? String(err)));
+          if (short) port.postMessage(short);
         } catch {
           // closed meanwhile
         }
@@ -2150,6 +2151,16 @@ function openNative() {
       port.disconnect();
       closed();
     },
+  };
+  /**
+   * The error answer for request `id` that fits within what the host takes: the full explanation,
+   * else a bare "too large" (a host that declares a tiny limit); null when not even that fits.
+   */
+  const fitting = (id, detail) => {
+    for (const reply of [tooLarge(id, detail), { type: "response", id, ok: false, error: "too large" }]) {
+      if (utf8Bytes(JSON.stringify(reply), conn.maxMessageBytes) <= conn.maxMessageBytes) return reply;
+    }
+    return null;
   };
   // Later, as a WebSocket's close event: the caller may still be setting the connection up.
   const closed = () => {
