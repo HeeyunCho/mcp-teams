@@ -10,6 +10,7 @@ import { basename, join } from "node:path";
 import { ExtensionBridge, type BridgeOptions } from "../../src/bridge.js";
 import { EXTENSION_ORIGIN } from "../../src/extension.js";
 import { FAST, TOKEN, type Handler, type Request } from "./bridgeHarness.js";
+import type { FakeNativeHost } from "./fakeChrome.js";
 import { until } from "./timing.js";
 
 export const HUB_JS = "dist/hub.js";
@@ -27,8 +28,53 @@ export interface NativeExtensionOptions {
   lingerMs?: number;
   /** Don't send hello (to look at a host before the extension says anything). */
   noHello?: boolean;
+  /** The nonce its hello carries, as the real extension's does, for the welcome's proof (left out: none). */
+  nonce?: string;
   /** Env on top of the harness's. */
   env?: Record<string, string>;
+}
+
+/**
+ * dist/hub.js behind a fake chrome's native port (fakeChrome's nativeHost option), as Chrome runs
+ * it: each port the worker opens starts a host process, and messages pass both ways in Chrome's
+ * framing. Chunks the host splits reach the worker as they are, for it to join. The host exiting
+ * closes the port with Chrome's error; the worker disconnecting ends the host's stdin.
+ */
+export function chromeNativeHost(home: string, socket: string, env: Record<string, string> = {}) {
+  const children: ChildProcessWithoutNullStreams[] = [];
+  const attach = (host: FakeNativeHost) => {
+    const child = spawn(process.execPath, [HUB_JS, `${EXTENSION_ORIGIN}/`], {
+      env: { ...process.env, TEAMS_MCP_HOME: home, TEAMS_MCP_HUB_SOCKET: socket, TEAMS_MCP_HUB_KEEPALIVE_MS: String(FAST.keepAliveMs), ...env },
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    children.push(child);
+    child.stdin.on("error", () => {});
+    child.stderr.resume();
+    host.onPost = (msg) => {
+      if (!child.stdin.writable) return;
+      const body = Buffer.from(JSON.stringify(msg), "utf8");
+      const head = Buffer.alloc(4);
+      head.writeUInt32LE(body.length, 0);
+      child.stdin.write(Buffer.concat([head, body]));
+    };
+    host.onClose = () => child.stdin.end();
+    let buf = Buffer.alloc(0);
+    child.stdout.on("data", (d: Buffer) => {
+      buf = Buffer.concat([buf, d]);
+      while (buf.length >= 4 && buf.length >= 4 + buf.readUInt32LE(0)) {
+        const len = buf.readUInt32LE(0);
+        host.send(JSON.parse(buf.subarray(4, 4 + len).toString("utf8")));
+        buf = buf.subarray(4 + len);
+      }
+    });
+    child.once("exit", () => host.disconnect("Native host has exited."));
+  };
+  return {
+    attach,
+    /** Kills every host process it started. */
+    kill: () =>
+      Promise.all(children.map((c) => (c.exitCode !== null || c.signalCode !== null ? undefined : new Promise<void>((r) => (c.once("exit", () => r()), c.kill("SIGKILL")))))),
+  };
 }
 
 /** A host child process with a fake extension on its stdio. */
@@ -114,7 +160,7 @@ export function nativeExtension(home: string, socket: string, opts: NativeExtens
     }
   });
 
-  if (!opts.noHello) write({ type: "hello", version, browser, instance, capabilities: { maxMessageBytes: 256 * 1024 * 1024, features: [] } });
+  if (!opts.noHello) write({ type: "hello", ...(opts.nonce === undefined ? {} : { nonce: opts.nonce }), version, browser, instance, capabilities: { maxMessageBytes: 256 * 1024 * 1024, features: [] } });
 
   return {
     child,

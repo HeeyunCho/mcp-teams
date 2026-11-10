@@ -65,6 +65,11 @@ export interface ExtensionInfo {
   instance?: string;
   /** What it declared in hello (#115); no features for an extension from before #115. Hubs before #115 send none to peers. */
   capabilities?: Capabilities;
+  /**
+   * How it reaches the hub (#123): native messaging (to the native host, or relayed by another
+   * browser's host on the hub socket) or the WebSocket on the TCP port. Hubs before #123 send none.
+   */
+  transport?: "native" | "websocket";
 }
 
 /**
@@ -842,9 +847,7 @@ export class ExtensionBridge {
         authed = true;
         clearTimeout(authTimer);
         const welcome = typeof msg.nonce === "string" ? { proof: proof(this.token, proofRole("server", via), msg.nonce) } : {};
-        // A hello on the hub socket is another browser's host relaying its extension, which that
-        // host checked: ours, on native messaging.
-        if (msg.type === "hello") this.acceptExtension(ws, msg, welcome, via === "tcp" ? origin : TRUSTED_EXTENSION_ORIGIN);
+        if (msg.type === "hello") this.acceptExtension(ws, msg, welcome, via, origin);
         else this.acceptPeer(ws, msg.version, welcome, via);
         return;
       }
@@ -881,13 +884,19 @@ export class ExtensionBridge {
    * connected, copies with another id (e.g. an older one loaded from another folder) are
    * turned away, and connecting ours replaces them.
    */
-  private acceptExtension(ws: BridgeSocket, msg: any, welcome: object, origin?: string) {
+  private acceptExtension(ws: BridgeSocket, msg: any, welcome: object, via: Via, tcpOrigin?: string) {
+    // Not on TCP: native messaging, where Chrome checked it is ours, or a hello on the hub socket,
+    // which is another browser's host relaying its extension (that host checked it).
+    const onTcp = via === "tcp";
+    const origin = onTcp ? tcpOrigin : TRUSTED_EXTENSION_ORIGIN;
+    const transport = onTcp ? "websocket" : "native";
     const info: ExtensionInfo = {
       version: String(msg.version ?? "unknown"),
       browser: msg.browser,
       ...(origin ? { origin } : {}),
       ...(typeof msg.instance === "string" ? { instance: msg.instance } : {}),
       capabilities: capabilitiesOf(msg),
+      transport,
     };
     const ours = origin === TRUSTED_EXTENSION_ORIGIN;
     const others = [...this.sockets].filter(([s]) => s !== ws);

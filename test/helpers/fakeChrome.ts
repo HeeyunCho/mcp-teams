@@ -6,6 +6,8 @@
 import { readFileSync } from "node:fs";
 import { expect, vi } from "vitest";
 import WsWebSocket from "ws";
+// @ts-expect-error plain JS extension module without types
+import { NATIVE_MAX_MESSAGE_BYTES } from "../../extension/chunks.js";
 
 export type Service = "chatsvc" | "csa" | "mt" | "substrate" | "sharepoint";
 export const TEAMS_SERVICES = ["chatsvc", "csa", "mt", "substrate"] as const;
@@ -89,6 +91,37 @@ export interface FakeChromeOptions {
    * chrome.tabs.onUpdated reports (default: complete at once, no event).
    */
   loadMs?: number;
+  /**
+   * The extension has the nativeMessaging permission: chrome.runtime.connectNative exists, and each
+   * port it opens is handed to this as the host's side (#123). Left out: no connectNative.
+   */
+  nativeHost?: (host: FakeNativeHost) => void;
+  /**
+   * The size over which a native port's postMessage throws, as Chrome's does over its 64 MiB
+   * (default: that, NATIVE_MAX_MESSAGE_BYTES). Lower, a test shows Chrome's refusal without
+   * allocating 64 MB.
+   */
+  nativeRefusesOver?: number;
+}
+
+/**
+ * The native host's side of one port the worker opened with chrome.runtime.connectNative. Messages
+ * go both ways as objects, later (as in Chrome), in order.
+ */
+export interface FakeNativeHost {
+  /** The host name the worker asked for. */
+  name: string;
+  /** What the worker posted, in order. */
+  received: any[];
+  /** Called with each message the worker posts (after it is recorded). */
+  onPost?: (msg: any) => void;
+  /** Called when the worker disconnects the port. */
+  onClose?: () => void;
+  /** Sends a message to the worker. */
+  send(msg: unknown): void;
+  /** The port closes from the host's side (or Chrome's, with `error` as chrome.runtime.lastError's message). */
+  disconnect(error?: string): void;
+  readonly open: boolean;
 }
 
 interface Tab {
@@ -108,7 +141,62 @@ const event = <F extends Fn = Fn>() => {
 };
 const patternToRegExp = (p: string) => new RegExp(`^${p.replace(/[.+?^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*")}$`);
 
-export function createFakeChrome({ services = {}, captured = [...TEAMS_SERVICES], teamsTab = true, local: localInit = {}, seesOwnRequests = false, loadMs }: FakeChromeOptions = {}) {
+/** A port of chrome.runtime.connectNative, joined to the `host` side it returns with it. */
+function fakeNativePort(runtime: { lastError?: { message: string } }, name: string, refusesOver: number) {
+  const onMessage = event();
+  const onDisconnect = event();
+  let open = true;
+  // Chrome passes messages on later, never inside postMessage, and in order.
+  let queue = Promise.resolve();
+  const later = (f: () => void) => void (queue = queue.then(f));
+  const port = {
+    name,
+    onMessage,
+    onDisconnect,
+    postMessage(msg: unknown) {
+      if (!open) throw new Error("Attempting to use a disconnected port object");
+      // As Chrome: a message to a native host over 64 MiB is refused, and the port stays open.
+      if (Buffer.byteLength(JSON.stringify(msg)) > refusesOver) throw new Error("Message length exceeded maximum allowed length.");
+      const copy = structuredClone(msg);
+      later(() => {
+        host.received.push(copy);
+        host.onPost?.(copy);
+      });
+    },
+    // As in Chrome, the side that disconnects gets no onDisconnect.
+    disconnect() {
+      if (!open) return;
+      open = false;
+      later(() => host.onClose?.());
+    },
+  };
+  const host: FakeNativeHost = {
+    name,
+    received: [],
+    send(msg) {
+      const copy = structuredClone(msg);
+      later(() => open && onMessage.listeners.forEach((l) => l(copy, port)));
+    },
+    disconnect(error) {
+      later(() => {
+        if (!open) return;
+        open = false;
+        runtime.lastError = error === undefined ? undefined : { message: error };
+        try {
+          onDisconnect.listeners.forEach((l) => l(port));
+        } finally {
+          runtime.lastError = undefined;
+        }
+      });
+    },
+    get open() {
+      return open;
+    },
+  };
+  return { port, host };
+}
+
+export function createFakeChrome({ services = {}, captured = [...TEAMS_SERVICES], teamsTab = true, local: localInit = {}, seesOwnRequests = false, loadMs, nativeHost, nativeRefusesOver = NATIVE_MAX_MESSAGE_BYTES }: FakeChromeOptions = {}) {
   const sent: SentRequest[] = [];
   const session = new Map<string, unknown>();
   const local = new Map<string, unknown>(Object.entries(localInit));
@@ -266,8 +354,22 @@ export function createFakeChrome({ services = {}, captured = [...TEAMS_SERVICES]
     runtimeReload: vi.fn(() => {}),
   };
 
+  /** The host's side of every native port the worker opened, in order. */
+  const nativePorts: FakeNativeHost[] = [];
+  const connectNative = nativeHost
+    ? vi.fn((name: string) => {
+        const { port, host } = fakeNativePort(chrome.runtime, name, nativeRefusesOver);
+        nativePorts.push(host);
+        nativeHost(host);
+        return port;
+      })
+    : undefined;
+
   const chrome = {
     runtime: {
+      /** Set while onDisconnect listeners run for a port Chrome closed with an error. */
+      lastError: undefined as { message: string } | undefined,
+      ...(connectNative ? { connectNative } : {}),
       id: "fake-extension-id",
       getManifest: () => ({ version: EXTENSION_VERSION }),
       getURL: (p: string) => `chrome-extension://fake-extension-id/${p}`,
@@ -295,6 +397,10 @@ export function createFakeChrome({ services = {}, captured = [...TEAMS_SERVICES]
     local,
     tabs,
     spies,
+    /** chrome.runtime.connectNative (with the nativeHost option), to look at its calls. */
+    connectNative,
+    /** The host's side of every native port the worker opened, in order. */
+    nativePorts,
     /** How many requests went to `service` (whose path matches `path`, if given). */
     count: (service: Service, path?: RegExp) => sent.filter((r) => r.service === service && (!path || path.test(r.path))).length,
     /** The user closes a tab: it is no longer found, a script can't run in it, one running there fails, and tabs.onRemoved reports it, as in Chrome. */

@@ -19,8 +19,10 @@
  * (src/hubLog.ts): metadata only.
  *
  * Ported from mcp-newoutlook src/hub.ts (commit 127715c). Teams' relaying host answers the serving
- * host's challenge with a proof of the pairing token (Outlook sends the token itself), and there
- * is no late-answer log or build-mismatch line yet.
+ * host's challenge with a proof of the pairing token (Outlook sends the token itself) and checks
+ * the holder by its own nonce, then gives the extension a welcome whose proof is for the
+ * extension's own nonce (Outlook passes the welcome on as it came); and there is no late-answer log
+ * or build-mismatch line yet.
  */
 import { randomBytes, timingSafeEqual } from "node:crypto";
 import { join } from "node:path";
@@ -197,6 +199,9 @@ let relaySocket: BridgeSocket | undefined;
  *   hello goes there, until the welcome carries proof(token, "server:socket", nonce). Anything
  *   else first (another user's program holding the Windows pipe while no host ran) ends this
  *   host: the extension's port closes and it connects again.
+ * The extension proves the serving host by its own nonce, which never reaches the hub socket: the
+ * welcome it gets carries proof(token, "server", that nonce) instead, as a welcome on the native
+ * port does. This host checked the holder, and it holds the token.
  * After that every message passes through unchanged.
  */
 function relay(pending: Buffer[]): Promise<number> {
@@ -206,6 +211,8 @@ function relay(pending: Buffer[]): Promise<number> {
     const nonce = randomBytes(24).toString("base64url");
     let challenge: string | undefined;
     let proven = false;
+    /** The nonce of the extension's hello that went to the holder: the extension checks the welcome by it. */
+    let extensionNonce: unknown;
     const prepare = (f: Buffer) =>
       isHello(f) && challenge
         ? JSON.stringify({ ...JSON.parse(f.toString("utf8")), proof: proof(config.token, "client:socket", challenge), nonce })
@@ -225,6 +232,7 @@ function relay(pending: Buffer[]): Promise<number> {
     };
     const sendHello = (f: Buffer) => {
       helloSent = true;
+      extensionNonce = JSON.parse(f.toString("utf8")).nonce;
       forward(f);
       // The welcome must come as soon as the serving host has the hello, as it comes to any client.
       awaitWelcome();
@@ -269,7 +277,8 @@ function relay(pending: Buffer[]): Promise<number> {
       if (msg?.type !== "welcome" || !sameText(msg.proof, proof(config.token, "server:socket", nonce))) return refuse();
       proven = true;
       clearTimeout(deadline);
-      port.send(raw.toString("utf8"));
+      const { proof: _forThisHost, ...welcome } = msg;
+      port.send(JSON.stringify(typeof extensionNonce === "string" ? { ...welcome, proof: proof(config.token, "server", extensionNonce) } : welcome));
       for (const f of waiting.splice(0)) if (!isHello(f)) forward(f);
     });
     ws.on("error", () => {});

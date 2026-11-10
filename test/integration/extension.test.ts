@@ -454,6 +454,14 @@ describe("writePairing", () => {
     syncExtension(from, to);
     expect(existsSync(join(to, "pairing.json"))).toBe(true);
   });
+
+  it("#123: tells the extension to try the native host only while config.json turns it on; off, the file is as before", () => {
+    const to = mkdtempSync(join(tmpdir(), "mcp-teams-ext-"));
+    expect(writePairing("tok", to, { nativeHost: true })).toBe(true);
+    expect(JSON.parse(readFileSync(join(to, "pairing.json"), "utf8"))).toEqual({ token: "tok", nativeHost: true });
+    expect(writePairing("tok", to, { nativeHost: false })).toBe(true);
+    expect(readFileSync(join(to, "pairing.json"), "utf8")).toBe('{"token":"tok"}\n');
+  });
 });
 
 describe("syncExtension", () => {

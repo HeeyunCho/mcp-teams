@@ -193,6 +193,7 @@ describe("#115: get_version shows both sides' capabilities and the transport", (
     const hub = await h.session();
     const v = await getVersion(hub);
     expect(v.capabilities).toEqual({ server: SERVER });
-    expect(v.transport).toBe("websocket");
+    // #123: no extension, so no transport it connected by.
+    expect(v.transport).toBeNull();
   });
 });
