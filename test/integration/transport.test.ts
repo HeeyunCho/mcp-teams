@@ -1,6 +1,6 @@
 // What the bridge does at its transport's edges: listening when the port is held, joining
-// something on the port that is not an mcp-teams hub, and freeing the port on close. Written
-// before the transport seam (#123 PR 1) to show the WebSocket transport behind it keeps these.
+// something on the port that is not an mcp-teams hub, and freeing the port on close. The
+// WebSocket transport behind the transport seam (#123) must keep these.
 import { createServer, type Server, type Socket } from "node:net";
 import { afterEach, describe, expect, it } from "vitest";
 import { WebSocketServer } from "ws";
@@ -22,14 +22,12 @@ function bridge(port: number): ExtensionBridge {
 }
 
 /** A program on a free port that drops every connection at once (not a WebSocket server). */
-async function rawHolder(): Promise<{ server: Server; port: number; sockets: Set<Socket> }> {
-  const sockets = new Set<Socket>();
-  const server = createServer((s) => {
-    sockets.add(s);
-    s.destroy();
-  });
+async function rawHolder(): Promise<{ server: Server; port: number }> {
+  const server = createServer((s: Socket) => s.destroy());
   await new Promise<void>((r) => server.listen(0, "127.0.0.1", () => r()));
-  return { server, port: (server.address() as { port: number }).port, sockets };
+  // Closed by afterEach too if a test fails before closing it (closing it twice is harmless here).
+  servers.push({ close: (cb) => (server.listening ? server.close(() => cb()) : cb()) });
+  return { server, port: (server.address() as { port: number }).port };
 }
 
 describe("the bridge's transport edges", () => {
