@@ -1,6 +1,6 @@
 # Handoff: mcp-teams after 0.3.55 (updated 2026-11-10 on the Windows PC)
 
-Repo: GitHub `HeeyunCho/mcp-teams`. Branch `main`: **0.3.55** is the latest release (`525aadd chore(release): v0.3.55`). One work branch is in progress (#122, see below).
+Repo: GitHub `HeeyunCho/mcp-teams`. Branch `main`: **0.3.55** is the latest release (`525aadd chore(release): v0.3.55`). Two work branches are in progress (#122 and #123 PR 2, see below).
 
 ## Merged on 2026-11-09/10
 
@@ -14,10 +14,12 @@ Each had a fresh-subagent review with no blockers and passed CI on Linux and Win
 
 ## In progress
 
-- **#122 item 1:** a subagent works in its own Agent-tool worktree on branch `fix/122-own-requests-not-teams`.
-  - **The problem:** the worker's own requests seem to bump `seenAt`, so `services.substrate` looks fresh while the Teams tab is stuck at sign-in.
-  - **The approach:** confirm it with a failing test first, then stop own requests counting as Teams sending the session.
-  - **Then:** a fresh review, "Part of #122", PR.
+- **#122 item 1:**
+  - **The first hypothesis was wrong** (tested 2026-11-10). The worker's own requests move `services.substrate` and `lastSignedInCall` together, so they can't cause the gap.
+  - **What reproduces it:** `captureSession` (`extension/background.js` ~:33) doesn't check where a request came from, unlike `recordRequest` (`isTeamsOrigin`). So a `substrate.office.com` request from outside the Teams page (most likely an Outlook web tab) moves `services.substrate`. With a different token, it even replaces Teams' substrate capture.
+  - **The revised fix:** `captureSession` requires a Teams origin. It is in progress on branch `fix/122-capture-teams-origin`, with tests for the three rows in the [#122 comment](https://github.com/HeeyunCho/mcp-teams/issues/122#issuecomment-6765067953).
+  - **Out of scope:** whether the worker's own requests should count as Teams' sends.
+- **#123 PR 2** (the native host) is in progress on branch `feat/123-native-host`.
 
 ## Open issues and decisions (2026-11-09/10)
 
@@ -39,7 +41,7 @@ Each had a fresh-subagent review with no blockers and passed CI on Linux and Win
   - the `api_traffic({ clear: true })` wording in docs/testing.md;
   - `{ timeout: 2000 }` in `traffic.test.ts`.
 - **#122** (`ready-for-agent`, with #103/#104):
-  - item 1 is in progress (above);
+  - item 1, revised to `captureSession` requiring a Teams origin, is in progress (above);
   - "the extension lists no features" is by design (`CAPABILITIES.features` is `[]` until #123).
 - **#124** (`needs-info`, with #111/#96): the extension stayed disconnected about half an hour while a hub was listening, right after a rebuild.
   - Next time, before reloading anything, capture the service worker's state and console in `chrome://extensions`, and run `Get-NetTCPConnection -LocalPort 47393`.
