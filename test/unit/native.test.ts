@@ -106,6 +106,11 @@ describe("#123: the host's timings from its environment (TEAMS_MCP_HUB_*_MS)", (
   it("takes a whole number of milliseconds above 0", () => {
     expect(msFromEnv("600")).toBe(600);
     expect(msFromEnv("30000")).toBe(30_000);
+    expect(msFromEnv(" 600 ")).toBe(600);
+  });
+
+  it("takes only plain digits: no exponent, hex, binary, sign or decimal point", () => {
+    for (const v of ["1e3", "1E3", "0x10", "0b11", "0o7", "+600", "600.0", "6_00", "1e12"]) expect(msFromEnv(v), v).toBeUndefined();
   });
 
   it("leaves the default for anything else: missing, empty, 0, negative, not a number, a fraction", () => {
@@ -115,7 +120,9 @@ describe("#123: the host's timings from its environment (TEAMS_MCP_HUB_*_MS)", (
   it("clamps to Node's longest timer, 2^31-1 ms (about 24.8 days): longer ones would fire at once", () => {
     expect(msFromEnv("2147483647")).toBe(2_147_483_647);
     expect(msFromEnv("2147483648")).toBe(2_147_483_647);
-    expect(msFromEnv("1e12")).toBe(2_147_483_647);
+    // 309 digits (about 1e308) and 400 digits (past what a double holds, so Number gives Infinity) alike.
+    expect(msFromEnv("1" + "0".repeat(308))).toBe(2_147_483_647);
+    expect(msFromEnv("9".repeat(400))).toBe(2_147_483_647);
   });
 });
 

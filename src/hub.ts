@@ -259,7 +259,8 @@ function relay(pending: Buffer[]): Promise<number> {
         log("relay", { version: SERVER_VERSION });
         // The hello first, alone: the serving host takes nothing else before it. With no hello yet
         // the clock runs from the challenge (an extension that never says hello gets no longer);
-        // a hello that comes later restarts it.
+        // a hello that comes later restarts it, once (helloSent), so a late hello gives the holder
+        // at most two deadlines in all.
         const first = waiting.filter(isHello).at(-1) ?? hello;
         if (first) sendHello(first);
         else awaitWelcome();
