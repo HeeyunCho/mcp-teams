@@ -31,7 +31,7 @@ async function offline(): Promise<string | undefined> {
   return Promise.race([lookup("registry.npmjs.org").then(() => undefined, (err: Error) => `registry.npmjs.org does not resolve (${err.message})`), timeout]);
 }
 
-describe("#123 decision 8: an old TCP hub steps down to the native host", () => {
+describe("#123 decision 8: an old TCP hub hands over to the native host", () => {
   it(`#123: the real mcp-teams@${OLD} on the port hands it to the host and joins it as a peer`, { timeout: 540_000 }, async (ctx) => {
     const why = await offline();
     if (why) {
@@ -83,11 +83,11 @@ describe("#123 decision 8: an old TCP hub steps down to the native host", () => 
     const ext = await h.host({ env: { TEAMS_MCP_PORT: String(port) } });
     expect(ext.welcome).toMatchObject({ type: "welcome", serverVersion: SERVER_VERSION });
 
-    // The old hub's own stepDown (it saw a newer peer) ...
-    await until(() => stderr.includes(`handing the bridge to mcp-teams ${SERVER_VERSION}`), 10_000, "the old hub stepping down");
+    // The old hub's own handover (its stepDown(): it saw a newer peer) ...
+    await until(() => stderr.includes(`handing the bridge to mcp-teams ${SERVER_VERSION}`), 10_000, "the old hub handing over");
     // ... frees the port, which the host takes ...
     expect(await h.hostPort()).toBe(port);
-    expect(h.logText()).toMatch(new RegExp(` tcp stepDown=${OLD.replace(/\./g, "\\.")}`));
+    expect(h.logText()).toMatch(new RegExp(` tcp handover=${OLD.replace(/\./g, "\\.")}`));
     // ... and the old server comes back as the host's peer there (after its 2 s retry).
     await until(() => new RegExp(` peer version=${OLD.replace(/\./g, "\\.")} via=tcp`).test(h.logText()), 15_000, `mcp-teams ${OLD} as the host's peer`);
     // An extension on the port is refused now: the host takes it only over native messaging.

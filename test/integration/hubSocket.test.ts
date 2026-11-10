@@ -255,7 +255,7 @@ describe("#123: the native host on the TCP port, for peers only (ADR decision 4)
     expect((await server(port, "0.3.52")).role).toBe("peer");
   });
 
-  it("#123 decision 8: an older TCP hub on the port steps down to the host, which then holds the port", async () => {
+  it("#123 decision 8: an older TCP hub on the port hands over to the host, which then holds the port", async () => {
     const old = await server(0, "0.3.52");
     expect(old.role).toBe("hub");
     const port = old.port;

@@ -180,7 +180,7 @@ export interface NativeHostOptions {
    * The native host (dist/hub.js): the hub on this hub socket (Unix socket path or Windows named
    * pipe), with the extension's native port attached (attachExtension). It also listens on the TCP
    * port, for peers only (ADR decision 4): servers from before the host know only the port. It
-   * never joins another hub and never steps down to a newer server.
+   * never joins another hub and never hands over to a newer server.
    */
   hostSocket?: string;
   /** Peers on the hub socket must prove the pairing token (default: on Windows, see socketNeedsProof in native.ts). */
@@ -548,7 +548,7 @@ export class ExtensionBridge {
   private listeners: BridgeListener[] = [];
   private tcpListener?: BridgeListener; // the native host: its TCP listener, for peers only
   private tcpRetry?: NodeJS.Timeout; // the native host: its next try for the TCP port
-  private nudging?: BridgeSocket; // the native host: its connection to an older TCP hub, which steps down to it
+  private nudging?: BridgeSocket; // the native host: its connection to an older TCP hub, which hands over to it
   private hubOnSocket = false; // peer: the hub is the native host, reached on its hub socket
   private hostWatch?: NodeJS.Timeout; // a server on TCP with a hubSocket: checks it for the host
   private checkingHost = false;
@@ -765,7 +765,7 @@ export class ExtensionBridge {
 
   /**
    * The native host: joins the TCP hub on the port as a peer of its own version. A hub older than
-   * that steps down to it (its existing stepDown, #123 decision 8); this waits until that hub has
+   * that hands over to it (its existing stepDown(), #123 decision 8); this waits until that hub has
    * closed and resolves true, so the port is tried again at once. Any other answer (a hub as new or
    * newer, another program, no answer) resolves false: try again later.
    */
@@ -792,7 +792,7 @@ export class ExtensionBridge {
           if (!challenged || !sameProof(msg.proof, proof(this.token, "server", nonce)) || !isNewer(this.serverVersion, msg.serverVersion)) return void ws.close(1000, "not now");
           // It hands over once its own calls are done; until then this stays its (idle) peer.
           older = true;
-          this.native.onEvent?.("tcp", { stepDown: logVersion(msg.serverVersion) });
+          this.native.onEvent?.("tcp", { handover: logVersion(msg.serverVersion) });
         }
       });
       ws.on("error", () => {});
