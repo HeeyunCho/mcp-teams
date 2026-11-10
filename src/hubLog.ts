@@ -1,7 +1,8 @@
 /**
  * The native host's log (#123 decision 6): ~/.mcp-teams/hub.log, 0600 in a 0700 folder, moved to
  * hub.log.1 once it passes 1 MB. Metadata only: the type, method, ok, size and timing of each
- * message, never its text (no chat ids, message bodies, error texts or tokens).
+ * message, never its text (no chat ids, message bodies, error texts or tokens); errors by name and
+ * code only (errorFields), and versions other programs sent as version characters only (logVersion).
  *
  * Ported from mcp-newoutlook src/hub.ts log() and traffic() (commit 127715c), as functions of
  * their own so the rotation and what a line holds can be tested without a host process.
@@ -34,6 +35,21 @@ export function hubLog(file: string, maxBytes = HUB_LOG_MAX_BYTES): Log {
       // logging must never stop the host
     }
   };
+}
+
+/**
+ * An error as hub.log records it: its name and code, never its message (a JSON.parse message
+ * quotes its input; a socket error may name a path). A thrown non-Error counts by its type.
+ */
+export function errorFields(err: unknown): { name: string; code: string | undefined } {
+  const word = (v: unknown, keep: RegExp) => (typeof v === "string" ? v.replace(keep, "").slice(0, 32) || undefined : undefined);
+  if (!(err instanceof Error)) return { name: typeof err, code: undefined };
+  return { name: word(err.name, /[^\w]/g) ?? "Error", code: word((err as NodeJS.ErrnoException).code, /[^\w-]/g) };
+}
+
+/** A version another program sent, as hub.log records it: letters, digits, `.`, `_` and `-` only, at most 32. */
+export function logVersion(v: unknown): string {
+  return v == null ? "unknown" : String(v).replace(/[^\w.-]/g, "").slice(0, 32);
 }
 
 /**

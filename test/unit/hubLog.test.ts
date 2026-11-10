@@ -4,7 +4,7 @@ import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync, existsSync 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { HUB_LOG_MAX_BYTES, hubLog, trafficLogger } from "../../src/hubLog.js";
+import { errorFields, HUB_LOG_MAX_BYTES, hubLog, logVersion, trafficLogger } from "../../src/hubLog.js";
 
 const dirs: string[] = [];
 afterEach(() => {
@@ -63,6 +63,29 @@ describe("#123: hub.log", () => {
     const dir = tempDir();
     writeFileSync(join(dir, "not-a-folder"), "");
     expect(() => hubLog(join(dir, "not-a-folder", "hub.log"))("host")).not.toThrow();
+  });
+});
+
+describe("#123: errors and versions in hub.log", () => {
+  it("logs an error by its name and code only, never its message (a JSON.parse message quotes its input)", () => {
+    let parseError: Error;
+    try {
+      JSON.parse('{"text":"Contoso merger: confidential"');
+    } catch (err) {
+      parseError = err as Error;
+    }
+    expect(errorFields(parseError!)).toEqual({ name: "SyntaxError", code: undefined });
+    const io = Object.assign(new Error("listen EADDRINUSE: address already in use 127.0.0.1:47393"), { code: "EADDRINUSE" });
+    expect(errorFields(io)).toEqual({ name: "Error", code: "EADDRINUSE" });
+    expect(errorFields("thrown text about Sam Roe")).toEqual({ name: "string", code: undefined });
+    expect(errorFields(Object.assign(new Error("x"), { code: "E BAD; rm -rf" }))).toEqual({ name: "Error", code: "EBADrm-rf" });
+  });
+
+  it("logs a version another program sent only as version characters", () => {
+    expect(logVersion("0.3.52")).toBe("0.3.52");
+    expect(logVersion('0.3.52 secret="Contoso"\nforged line')).toBe("0.3.52secretContosoforgedline".slice(0, 32));
+    expect(logVersion(undefined)).toBe("unknown");
+    expect(logVersion("9".repeat(100))).toHaveLength(32);
   });
 });
 

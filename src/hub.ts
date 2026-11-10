@@ -27,7 +27,7 @@ import WebSocket from "ws";
 import { ExtensionBridge, MAX_MESSAGE_BYTES, proof, socketTransport, type BridgeSocket } from "./bridge.js";
 import { CONFIG_DIR, SERVER_VERSION, loadConfig } from "./config.js";
 import { EXTENSION_ORIGIN } from "./extension.js";
-import { hubLog, trafficLogger } from "./hubLog.js";
+import { errorFields, hubLog, trafficLogger } from "./hubLog.js";
 import { FrameDecoder, NativePort, hubSocketPath, socketNeedsProof } from "./native.js";
 
 const envMs = (name: string) => {
@@ -42,8 +42,8 @@ const KEEP_ALIVE_MS = envMs("TEAMS_MCP_HUB_KEEPALIVE_MS");
 const log = hubLog(join(CONFIG_DIR, "hub.log"));
 const traffic = trafficLogger(log);
 
-process.on("unhandledRejection", (err) => log("error", { what: "unhandled rejection", message: (err as Error)?.message?.slice(0, 200) }));
-process.on("uncaughtException", (err) => log("error", { what: "uncaught exception", message: err.message.slice(0, 200) }));
+process.on("unhandledRejection", (err) => log("error", { what: "unhandled-rejection", ...errorFields(err) }));
+process.on("uncaughtException", (err) => log("error", { what: "uncaught-exception", ...errorFields(err) }));
 
 // Chrome passes the caller's origin first ("chrome-extension://<id>/"; on Windows a
 // --parent-window argument follows). Only our extension may use this host.

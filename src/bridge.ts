@@ -6,6 +6,7 @@ import { dirname } from "node:path";
 import { WebSocketServer, WebSocket } from "ws";
 import { EXTENSION_ORIGIN as TRUSTED_EXTENSION_ORIGIN } from "./extension.js";
 import { FairQueue } from "./fairqueue.js";
+import { errorFields, logVersion } from "./hubLog.js";
 
 /**
  * Local WebSocket bridge between MCP server processes and the browser extension.
@@ -734,7 +735,7 @@ export class ExtensionBridge {
     try {
       const listener = await this.listenOn(this.tcpTransport, (err) => {
         // The TCP listener failed: the host stays the hub on its socket and listens again later.
-        this.native.onEvent?.("tcp", { error: err.message.slice(0, 200) });
+        this.native.onEvent?.("tcp", { error: errorFields(err).name, code: errorFields(err).code });
         this.listeners = this.listeners.filter((l) => l !== listener);
         if (this.tcpListener === listener) this.tcpListener = undefined;
         void listener.close();
@@ -791,7 +792,7 @@ export class ExtensionBridge {
           if (!challenged || !sameProof(msg.proof, proof(this.token, "server", nonce)) || !isNewer(this.serverVersion, msg.serverVersion)) return void ws.close(1000, "not now");
           // It hands over once its own calls are done; until then this stays its (idle) peer.
           older = true;
-          this.native.onEvent?.("tcp", { stepDown: String(msg.serverVersion).slice(0, 32) });
+          this.native.onEvent?.("tcp", { stepDown: logVersion(msg.serverVersion) });
         }
       });
       ws.on("error", () => {});
@@ -979,7 +980,7 @@ export class ExtensionBridge {
 
   private acceptPeer(ws: BridgeSocket, peerVersion: unknown, welcome: object, via: Via) {
     this.peers.add(ws);
-    this.native.onEvent?.("peer", { version: String(peerVersion ?? "unknown").replace(/[^\w.-]/g, "").slice(0, 32), via });
+    this.native.onEvent?.("peer", { version: logVersion(peerVersion), via });
     ws.on("close", () => this.native.onEvent?.("peer-left", { via }));
     // heartbeatMs: this hub pings the peer that often, so the peer can tell when it stops.
     ws.send(
