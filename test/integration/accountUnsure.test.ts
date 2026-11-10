@@ -23,10 +23,11 @@ afterEach(async () => {
   openedSockets.length = 0;
 });
 
-// Two fictional accounts: Alex Doe and Sam Roe.
+// Fictional accounts: Alex Doe and Sam Roe, and a third one, Kim Poe.
 const ACCOUNT = {
   alex: { oid: "00000000-0000-4000-8000-0000000000a1", name: "Alex Doe", email: "alex.doe@contoso.example" },
   sam: { oid: "00000000-0000-4000-8000-0000000000b1", name: "Sam Roe", email: "sam.roe@fabrikam.example" },
+  kim: { oid: "00000000-0000-4000-8000-0000000000d1", name: "Kim Poe", email: "kim.poe@contoso.example" },
 } as const;
 type Account = keyof typeof ACCOUNT;
 const ACCOUNTS = Object.keys(ACCOUNT) as Account[];
@@ -304,6 +305,23 @@ describe("#77: rule 1 as written: any capture of the previous account within 30 
 
     expect(await signedInAs(worker)).toBe(`8:orgid:${ACCOUNT.alex.oid}`);
     expect((await worker.handlers.status({})).accountUnsure).toEqual({ since: SWITCHED_AT.toISOString(), until: new Date(2026, 10, 9, 14, 0, 40).toISOString() });
+  });
+
+  it("A → B → C: a switch to a third account while unsure is a normal switch with its own window: get_version shows accountUnsure: null, and a send goes out as C", async () => {
+    const { fake, worker } = await switchedToSam();
+    await teamsRetries(fake, "alex", OLD); // dropped at 14:00:00: unsure
+    expect((await worker.handlers.status({})).accountUnsure).toEqual(UNSURE);
+    vi.setSystemTime(SWITCHED_AT.getTime() + 10_000);
+
+    await teamsShows(fake, "kim", FRESH); // 14:00:10, within the window of the switch to Sam
+
+    expect(await signedInAs(worker)).toBe(`8:orgid:${ACCOUNT.kim.oid}`);
+    expect((await getVersion(() => worker.handlers.status({}))).teams.accountUnsure).toBeNull();
+    const result = worker.handlers.requestSend({ conversation: "Alpha launch", text: "Hi all" });
+    await windowOpened(fake);
+    await clickSend(fake);
+    await expect(result).resolves.toMatchObject({ sent: true, conversation: "Alpha launch" });
+    expect(posts(fake).map(accountOf)).toEqual(["kim"]);
   });
 });
 
