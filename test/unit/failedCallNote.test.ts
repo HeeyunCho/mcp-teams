@@ -40,9 +40,10 @@ describe("#103: isMissingSession", () => {
 });
 
 describe("#103: failedCallNote says why the session is missing", () => {
-  // The worker fails the call only after its own recovery (a background Teams tab) failed for it, so
-  // the note doesn't send the user to wait for that recovery.
-  it("the chat session missing, the tab never signed in: it looks stuck at sign-in, and the recovery was tried", () => {
+  // The worker fails the call only after it waited for the session: for the user's Teams tab while
+  // that is still loading, else for its own recovery (a background Teams tab). So the note doesn't
+  // send the user to wait for that recovery.
+  it("the chat session missing, the tab never signed in: it looks stuck at sign-in, and the wait or the recovery was tried", () => {
     expect(failedCallNote(CHAT, neverSignedIn, at("2026-10-01T11:30:00Z"))).toBe(
       "Teams' chat session is not available. The Teams tab hasn't made a signed-in call since the extension started watching; its last call (2026-10-01T10:26:37.000Z, teams.cloud.microsoft) wasn't signed in. It looks stuck at sign-in. Waiting for the Teams tab, or the extension's own recovery, didn't bring the session back for this call: open the Teams tab and finish signing in (an account picker, a sign-in page or a prompt may be waiting there).",
     );
