@@ -26,11 +26,24 @@ import { FairQueue } from "./fairqueue.js";
  * local process can send any Origin) nor one holding the port while no AI app runs
  * gets anything. The extension reads the token from pairing.json, which setup writes
  * into its installed folder.
+ *
+ * On the native host's hub socket (#123) the proofs carry their own labels, "client:socket" and
+ * "server:socket", so a proof made on the TCP port never counts there. Otherwise a program holding
+ * the port could pass the pipe's challenge to a server (or the native host) joining what it takes
+ * for a hub on the port, and hand the answer to the pipe.
  */
 
-/** HMAC-SHA256 of `${role}:${nonce}` with the pairing token, base64url. The extension computes the same (teams.js). */
-export function proof(token: string, role: "client" | "server", nonce: string): string {
+/** Which proof: by whom, and on the hub socket (":socket") or the TCP port. */
+export type ProofRole = "client" | "server" | "client:socket" | "server:socket";
+
+/** HMAC-SHA256 of `${role}:${nonce}` with the pairing token, base64url. The extension computes the same (teams.js) for the TCP port. */
+export function proof(token: string, role: ProofRole, nonce: string): string {
   return createHmac("sha256", token).update(`${role}:${nonce}`).digest("base64url");
+}
+
+/** The proof role for `side` on a connection of kind `via`: its socket label on the hub socket. */
+function proofRole(side: "client" | "server", via: Via): ProofRole {
+  return via === "socket" ? `${side}:socket` : side;
 }
 
 function sameProof(a: unknown, b: string): boolean {
@@ -814,7 +827,9 @@ export class ExtensionBridge {
         }
         if (via === "native" && msg.type !== "hello") return void ws.close(4401, "bad token");
         // Clients up to 0.2.0 send the token itself (peers, or an extension paired by hand).
-        const proven = sameProof(msg.proof, proof(this.token, "client", challenge)) || (typeof msg.token === "string" && msg.token === this.token);
+        // Only on TCP: the bare token, and a proof without the socket label (see ProofRole).
+        const proven =
+          sameProof(msg.proof, proof(this.token, proofRole("client", via), challenge)) || (via === "tcp" && typeof msg.token === "string" && msg.token === this.token);
         // The native port is our extension (Chrome checked it); the hub socket is owner-only except on Windows.
         const trusted = via === "native" || (via === "socket" && !this.socketNeedsProof);
         if (!proven && !trusted) {
@@ -824,7 +839,7 @@ export class ExtensionBridge {
         }
         authed = true;
         clearTimeout(authTimer);
-        const welcome = typeof msg.nonce === "string" ? { proof: proof(this.token, "server", msg.nonce) } : {};
+        const welcome = typeof msg.nonce === "string" ? { proof: proof(this.token, proofRole("server", via), msg.nonce) } : {};
         // A hello on the hub socket is another browser's host relaying its extension, which that
         // host checked: ours, on native messaging.
         if (msg.type === "hello") this.acceptExtension(ws, msg, welcome, via === "tcp" ? origin : TRUSTED_EXTENSION_ORIGIN);
@@ -1244,11 +1259,11 @@ export class ExtensionBridge {
         if (msg.type === "challenge" && !challenged && typeof msg.nonce === "string") {
           challenged = true;
           ws.send(
-            JSON.stringify({ type: "peer-hello", proof: proof(this.token, "client", msg.nonce), nonce, version: this.serverVersion, capabilities: this.capabilities }),
+            JSON.stringify({ type: "peer-hello", proof: proof(this.token, proofRole("client", transport.kind), msg.nonce), nonce, version: this.serverVersion, capabilities: this.capabilities }),
           );
         } else if (msg.type === "peer-welcome" && !joined && !discarded) {
           // Only the real hub can answer our nonce; never forward calls to anything else.
-          if (!challenged || !sameProof(msg.proof, proof(this.token, "server", nonce))) {
+          if (!challenged || !sameProof(msg.proof, proof(this.token, proofRole("server", transport.kind), nonce))) {
             forged = true;
             return void ws.terminate();
           }

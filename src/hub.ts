@@ -178,7 +178,7 @@ function relay(pending: Buffer[]): Promise<number> {
     relaySocket = ws;
     let challenge: string | undefined;
     const prepare = (f: Buffer) =>
-      isHello(f) && challenge ? JSON.stringify({ ...JSON.parse(f.toString("utf8")), proof: proof(config.token, "client", challenge) }) : f.toString("utf8");
+      isHello(f) && challenge ? JSON.stringify({ ...JSON.parse(f.toString("utf8")), proof: proof(config.token, "client:socket", challenge) }) : f.toString("utf8");
     // Logged as the serving host's NativePort logs what it receives (the frame as the extension sent it, without the proof).
     const forward = (f: Buffer) => {
       traffic("in", f);

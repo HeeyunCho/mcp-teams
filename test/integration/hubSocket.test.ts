@@ -9,7 +9,7 @@ import { connect, createServer, type Server } from "node:net";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { PassThrough } from "node:stream";
-import WebSocket from "ws";
+import WebSocket, { WebSocketServer } from "ws";
 import { afterEach, describe, expect, it } from "vitest";
 import { ExtensionBridge, proof, type BridgeOptions } from "../../src/bridge.js";
 import { EXTENSION_ORIGIN } from "../../src/extension.js";
@@ -61,15 +61,16 @@ const tcpListening = (port: number) =>
 
 /**
  * A raw client on the hub socket: answers the challenge with `hello` (plus a proof of `token`,
- * when given) and resolves with the next message or the close code.
+ * when given, made for the socket's label unless `role` says otherwise) and resolves with the
+ * next message or the close code.
  */
-function rawClient(path: string, hello: object, token?: string): Promise<{ msg?: any; code?: number }> {
+function rawClient(path: string, hello: object, token?: string, role: "client" | "client:socket" = "client:socket"): Promise<{ msg?: any; code?: number }> {
   return new Promise((resolve) => {
     const ws = new WebSocket("ws://localhost/", { createConnection: () => connect(path) });
     cleanups.push(() => ws.close());
     ws.on("message", (raw) => {
       const msg = JSON.parse(raw.toString());
-      if (msg.type === "challenge") return ws.send(JSON.stringify({ ...hello, ...(token ? { proof: proof(token, "client", msg.nonce) } : {}) }));
+      if (msg.type === "challenge") return ws.send(JSON.stringify({ ...hello, ...(token ? { proof: proof(token, role, msg.nonce) } : {}) }));
       resolve({ msg });
     });
     ws.on("close", (code) => resolve({ code }));
@@ -118,6 +119,49 @@ describe("#123: the native host's hub socket", () => {
     expect(await rawClient(path, { type: "peer-hello", version: "1.0.0" })).toEqual({ code: 4401 });
     expect(await rawClient(path, { type: "peer-hello", version: "1.0.0" }, "another-token")).toEqual({ code: 4401 });
     expect((await rawClient(path, { type: "peer-hello", version: "1.0.0" }, TOKEN)).msg?.type).toBe("peer-welcome");
+  });
+
+  it("#123: a proof made for the TCP port doesn't count on the pipe, nor does the bare token", async () => {
+    const path = tempSocket();
+    await host(path, { socketNeedsProof: true });
+    expect(await rawClient(path, { type: "peer-hello", version: "1.0.0" }, TOKEN, "client")).toEqual({ code: 4401 });
+    expect(await rawClient(path, { type: "hello", version: "0.3.56", browser: "Edge", instance: "p" }, TOKEN, "client")).toEqual({ code: 4401 });
+    expect(await rawClient(path, { type: "peer-hello", version: "1.0.0", token: TOKEN })).toEqual({ code: 4401 });
+  });
+
+  it("#123: a program squatting the TCP port can't relay the pipe's challenge to the host's own join and get in", async () => {
+    const path = tempSocket();
+    // The squatter: on every connection to the port (the host joining what it takes for an old
+    // hub), it opens the pipe, takes the pipe's challenge nonce as its own, and relays the answer.
+    const wss = new WebSocketServer({ host: "127.0.0.1", port: 0 });
+    cleanups.push(() => new Promise((r) => wss.close(r)));
+    await new Promise((r) => wss.once("listening", r));
+    const port = (wss.address() as { port: number }).port;
+    const outcome: { code?: number; msg?: any; relayed?: boolean }[] = [];
+    wss.on("connection", (victim) => {
+      const pipe = new WebSocket("ws://localhost/", { createConnection: () => connect(path) });
+      cleanups.push(() => pipe.close());
+      const result: { code?: number; msg?: any; relayed?: boolean } = {};
+      outcome.push(result);
+      pipe.on("error", () => {});
+      pipe.on("close", (code) => (result.code ??= code));
+      pipe.on("message", (raw) => {
+        const msg = JSON.parse(raw.toString());
+        if (msg.type === "challenge") return victim.send(JSON.stringify({ type: "challenge", nonce: msg.nonce }));
+        result.msg ??= msg;
+      });
+      victim.on("message", (raw) => {
+        const msg = JSON.parse(raw.toString());
+        if (msg.type !== "peer-hello") return;
+        result.relayed = true;
+        pipe.send(JSON.stringify({ ...msg, version: "1.0.0" }));
+      });
+    });
+    await host(path, { socketNeedsProof: true, tcpRetryMs: 200 }, port, "0.3.56");
+    await until(() => outcome.some((o) => o.relayed && (o.code !== undefined || o.msg)), 5_000, "the relayed answer on the pipe");
+    const tried = outcome.find((o) => o.relayed)!;
+    expect(tried.msg?.type).not.toBe("peer-welcome");
+    expect(tried.code).toBe(4401);
   });
 
   it("#123: a browser page can't reach the socket (any Origin header is refused)", async () => {
