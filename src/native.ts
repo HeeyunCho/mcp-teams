@@ -191,9 +191,9 @@ const MAX_TIMER_MS = 2 ** 31 - 1;
 
 /**
  * A timing the host reads from its environment (TEAMS_MCP_HUB_*_MS, for tests): a whole number of
- * milliseconds above 0, written as plain digits, clamped to Node's longest timer (however long). Anything else
- * (missing, 0, negative, a fraction, an exponent, hex) is rejected: undefined, so the default
- * applies.
+ * milliseconds above 0, written as plain digits (spaces around them are fine), clamped to Node's
+ * longest timer however long it is. Anything else (missing, 0, a sign, a fraction, an exponent,
+ * hex) is rejected: undefined, so the default applies.
  */
 export function msFromEnv(raw: string | undefined): number | undefined {
   if (!raw || !/^\s*\d+\s*$/.test(raw)) return undefined;
