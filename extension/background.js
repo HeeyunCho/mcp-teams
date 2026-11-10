@@ -2191,10 +2191,10 @@ let skipNative = false; // native just failed before its welcome: the next conne
  * 9). Not right after native failed before its welcome (that connect goes to TCP), and never
  * without connectNative (no nativeMessaging permission). Off, everything stays on TCP.
  */
-function nativeFirst(pairing) {
+function nativeFirst(pairing, canNative) {
   const skip = skipNative;
   skipNative = false;
-  return !skip && (pairing?.nativeHost === true || tcpRefused) && typeof chrome.runtime.connectNative === "function";
+  return !skip && (pairing?.nativeHost === true || tcpRefused) && canNative;
 }
 
 /**
@@ -2229,8 +2229,11 @@ async function connect() {
   // stopReconnecting() may have run while the storage read was waiting.
   if (ws || !reconnecting) return;
   state = "connecting";
+  // Read once, here: the socket's handlers below never touch chrome (#99: a test's teardown removes
+  // it while a connection may still be closing).
+  const canNative = typeof chrome.runtime.connectNative === "function";
   let socket = null;
-  if (nativeFirst(pairing)) {
+  if (nativeFirst(pairing, canNative)) {
     try {
       socket = openNative();
     } catch {
@@ -2327,7 +2330,7 @@ async function connect() {
       tcpRefused = true;
       state = "disconnected";
       lastError =
-        typeof chrome.runtime.connectNative === "function"
+        canNative
           ? "The mcp-teams native host holds the port and refuses extensions there; connecting to it by native messaging."
           : "The mcp-teams native host holds the port and refuses extensions there, and this copy of the extension can't use native messaging (no nativeMessaging permission).";
     } else if (state === "unauthorized" && !authed && lastError) {

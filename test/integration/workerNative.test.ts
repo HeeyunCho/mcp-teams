@@ -13,14 +13,31 @@ const TOKEN = "worker-native-token";
 
 let wss: WebSocketServer | undefined;
 let fake: FakeChrome | undefined;
+/** Every WebSocket the workers opened (start() makes WebSocket record them). */
+const workerSockets: InstanceType<typeof NativeWebSocket>[] = [];
+
+/** The browser's WebSocket, recording each one a worker opens. */
+class RecordedWebSocket extends NativeWebSocket {
+  constructor(...args: ConstructorParameters<typeof NativeWebSocket>) {
+    super(...args);
+    workerSockets.push(this);
+  }
+}
 
 afterEach(async () => {
+  // No retry may run after the test (#99), and no socket may still be closing when chrome goes:
+  // its close handler would run without the fake chrome.
   stopWorkers();
   for (const h of fake?.nativePorts ?? []) h.disconnect();
   fake = undefined;
   for (const c of wss?.clients ?? []) c.terminate();
+  await Promise.all(
+    workerSockets.splice(0).map((s) => (s.readyState === NativeWebSocket.CLOSED ? undefined : new Promise<void>((r) => (s.addEventListener("close", () => r()), s.close())))),
+  );
   await new Promise<void>((r) => (wss ? wss.close(() => r()) : r()));
   wss = undefined;
+  // The native ports' disconnects (queued) are delivered by now; a macrotask more for any close they cause.
+  await new Promise((r) => setTimeout(r, 0));
   vi.unstubAllGlobals();
   openedSockets.length = 0;
 });
@@ -53,9 +70,13 @@ function servingHost({ then, maxMessageBytes = 1024 }: { then?: (host: FakeNativ
   };
 }
 
-/** A TCP hub that welcomes the worker like the real one, or refuses it with `refuseWith`. */
-async function tcpHub({ refuseWith }: { refuseWith?: number } = {}) {
+/**
+ * A TCP hub that welcomes the worker like the real one, or refuses it with `refuseWith`: at once,
+ * or with `holdRefusal` only when the test calls refuse().
+ */
+async function tcpHub({ refuseWith, holdRefusal = false }: { refuseWith?: number; holdRefusal?: boolean } = {}) {
   const received: any[] = [];
+  const held: WebSocket[] = [];
   const server = new WebSocketServer({ host: "127.0.0.1", port: 0 });
   wss = server;
   server.on("connection", (ws: WebSocket) => {
@@ -64,12 +85,18 @@ async function tcpHub({ refuseWith }: { refuseWith?: number } = {}) {
       const msg = JSON.parse(raw.toString());
       received.push(msg);
       if (msg.type !== "hello") return;
+      if (refuseWith && holdRefusal) return void held.push(ws);
       if (refuseWith) return void ws.close(refuseWith, "refused");
       ws.send(JSON.stringify({ type: "welcome", serverVersion: "0.0.0", proof: proof(TOKEN, "server", msg.nonce) }));
     });
   });
   await new Promise<void>((r) => server.once("listening", () => r()));
-  return { port: (server.address() as { port: number }).port, received };
+  return {
+    port: (server.address() as { port: number }).port,
+    received,
+    /** Refuses the connections held so far (holdRefusal). */
+    refuse: () => held.splice(0).forEach((ws) => ws.close(refuseWith, "refused")),
+  };
 }
 
 /** Loads the worker and starts it as the browser does. */
@@ -77,7 +104,7 @@ async function start(f: FakeChrome) {
   fake = f;
   const worker = await loadWorker(f);
   worker.registerListeners();
-  vi.stubGlobal("WebSocket", NativeWebSocket);
+  vi.stubGlobal("WebSocket", RecordedWebSocket);
   for (const l of f.chrome.runtime.onStartup.listeners) l();
   return worker;
 }
@@ -241,5 +268,31 @@ describe("#123: the worker connects to the native host first, and falls back to 
     // The third native try waits 2 s more: TCP once per native try, no loop.
     expect([tried.length, hellos()]).toEqual([2, 3]);
     expect((await status(f)).lastError).toMatch(/native/i);
+  });
+
+  it("#99: a connection a hub refuses (4403) after the worker was stopped (a test's teardown) leaves chrome alone", async () => {
+    pairing({ token: TOKEN });
+    const hub = await tcpHub({ refuseWith: 4403, holdRefusal: true });
+    for (const nativeHost of [undefined, servingHost()]) {
+      const f = createFakeChrome({ local: { port: hub.port }, nativeHost });
+      await start(f);
+      await until(() => hub.received.filter((m) => m.type === "hello").length > 0, 3_000, "the worker's hello");
+      hub.received.length = 0;
+      // As a teardown: the worker stops, and chrome is gone (here: a stand-in that records each use).
+      stopWorkers();
+      const used: string[] = [];
+      const stub = (path: string): any =>
+        new Proxy(() => new Promise(() => {}), {
+          get: (_target, key) => {
+            used.push(`${path}.${String(key)}`);
+            return stub(`${path}.${String(key)}`);
+          },
+        });
+      vi.stubGlobal("chrome", stub("chrome"));
+      hub.refuse();
+      await new Promise((r) => setTimeout(r, 300));
+      expect(used).toEqual([]);
+      vi.stubGlobal("chrome", f.chrome);
+    }
   });
 });
