@@ -122,6 +122,8 @@ export function registerTools(server: McpServer, bridge: ExtensionBridge, config
       let teams: unknown = null;
       if (bridge.connected) {
         teams = await bridge.call("status", {}, undefined, extra.signal).catch((e: Error) => ({ error: e.message }));
+        // #77: whether the account is unsure after a switch; an extension from before it doesn't say (null).
+        if (teams && typeof teams === "object" && !("error" in teams)) teams = { ...teams, accountUnsure: (teams as TeamsStatus).accountUnsure ?? null };
       }
       return text({
         server: serverVersion,

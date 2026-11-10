@@ -122,6 +122,15 @@ describe("77.2: an old token of the previous account doesn't switch back", () =>
     expect((await worker.handlers.status({})).droppedOldCaptures.count).toBe(0);
   });
 
+  it("77.2: within 30 s, a token of Alex's issued at the same second as the switching one isn't older: it switches back", async () => {
+    const { fake, worker } = await switchedToSam();
+
+    await teamsSends(fake, bearer("alex", SWITCHING));
+
+    await expectSignedIn(fake, worker, "alex", { readAgain: true });
+    expect((await worker.handlers.status({})).droppedOldCaptures.count).toBe(0);
+  });
+
   it("77.2: within 30 s, a third account (Kim), even with an older token, switches", async () => {
     const { fake, worker } = await switchedToSam();
 
@@ -166,6 +175,8 @@ describe("77.2: an old token of the previous account doesn't switch back", () =>
 
 describe("77.2: a request is never sent again with the headers of an account that is no longer signed in", () => {
   const WAITED = /account changed while a request waited to be sent; it's now signed in as another account/;
+  // A read sent again after its tab closed or reloaded under it didn't wait to be sent: it was being retried.
+  const RETRIED = /account changed while a request was about to be retried after its Teams tab closed or reloaded; it's now signed in as another account/;
 
   it("77.2: Teams switches to Sam while a read of Alex's waits out a 429: the read fails as account changed, and Alex's headers aren't sent again", async () => {
     let switched: Promise<unknown> | null = null;
@@ -204,7 +215,7 @@ describe("77.2: a request is never sent again with the headers of an account tha
     await teamsSends(fake, bearer("sam", SWITCHING));
     fake.closeTab(1);
 
-    await expect(read).rejects.toThrow(WAITED);
+    await expect(read).rejects.toThrow(RETRIED);
     expect(fake.sent.map((r) => [accountOf(r), r.tabId])).toEqual([["alex", 1]]); // never again, in tab 2
   });
 
@@ -237,7 +248,7 @@ describe("77.2: a request is never sent again with the headers of an account tha
     // Only unblocks the capture: the outcome doesn't depend on when.
     setTimeout(release, 50);
 
-    await expect(read).rejects.toThrow(WAITED);
+    await expect(read).rejects.toThrow(RETRIED);
     await switching;
     expect(fake.sent.map((r) => [accountOf(r), r.tabId])).toEqual([["alex", 1]]); // never again, in tab 2
     expect(await signedInAs(worker)).toBe(`8:orgid:${ACCOUNT.sam.oid}`);
