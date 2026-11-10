@@ -62,7 +62,7 @@ describe("#122: a session is captured only from the Teams page", () => {
     expect(await storedSubstrate(fake)).toEqual(before);
   });
 
-  it("Outlook's own token of the same user is not stored as substrate's session", async () => {
+  it("Outlook's own token (a different token of the same user) is not stored as substrate's session", async () => {
     const { fake, worker, before } = await teamsSentAt152646();
     await substrateRequest(fake, OUTLOOK_ORIGIN, bearer(ALEX, 1_790_000_600));
     expect(await worker.handlers.status({})).toMatchObject({ services: { substrate: "2026-11-10T15:26:46.000Z" } });
