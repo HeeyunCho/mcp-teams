@@ -11,6 +11,7 @@ import { registerTools } from "../../src/tools.js";
 import { TOKEN } from "../helpers/bridgeHarness.js";
 import { BASES, createFakeChrome, loadWorker, openedSockets, reply, TEAMS_ORIGIN, type FakeChrome, type SentRequest } from "../helpers/fakeChrome.js";
 import { fakeJwt } from "../helpers/jwt.js";
+import { until } from "../helpers/timing.js";
 
 let client: Client | undefined;
 
@@ -99,15 +100,10 @@ async function teamsShows(fake: FakeChrome, t: Account, iat: number) {
 const teamsRetries = (fake: FakeChrome, t: Account, iat: number) =>
   fake.fire("beforeSendHeaders", { url: `${BASES.csa}/api/v1/teams/users/me?isPrefetch=false`, initiator: TEAMS_ORIGIN, requestHeaders: [{ name: "Authorization", value: bearer(t, iat) }] });
 
-/**
- * At 14:00:00, Teams showed Alex (old token), then switched to Sam. `clock: false`: on the real
- * clock (for a throttle wait, which a clock that stands still never ends).
- */
-async function switchedToSam(services: ReturnType<typeof servicesWith> = servicesWith(), { clock = true } = {}) {
-  if (clock) {
-    vi.useFakeTimers({ toFake: ["Date"] });
-    vi.setSystemTime(SWITCHED_AT);
-  }
+/** At 14:00:00, Teams showed Alex (old token), then switched to Sam. */
+async function switchedToSam(services: ReturnType<typeof servicesWith> = servicesWith()) {
+  vi.useFakeTimers({ toFake: ["Date"] });
+  vi.setSystemTime(SWITCHED_AT);
   const fake = createFakeChrome({ captured: [], services });
   fake.session.delete("oid");
   const worker = await loadWorker(fake);
@@ -368,34 +364,35 @@ describe("#77: a post that waits out Teams' throttling", () => {
         return reply(429, { message: "Too many requests" }, { headers: { "retry-after": "1" } });
       },
     });
-    const { fake, worker } = await switchedToSam(services, { clock: false }); // the gate's wait ends on the real clock
+    // The clock stands still, so the gate a 429 shuts stays shut until the test moves the clock on.
+    const { fake, worker } = await switchedToSam(services);
     const result = worker.handlers.requestSend({ conversation: "Alpha launch", text: "Hi all" });
     await windowOpened(fake);
-    // A read is throttled: chatsvc's gate shuts for a second.
-    const read = worker.handlers.readMessages({ conversation: ALPHA });
-    await vi.waitFor(() => expect(fake.count("chatsvc")).toBe(1));
+    // A read is throttled: chatsvc's gate shuts for a second. Its deadline leaves no time to wait
+    // that out, so it fails at once as busy, and the post is the only one to wait at the gate.
+    const replies: { ok: boolean; error?: string }[] = [];
+    await worker.dispatch({ type: "request", id: "r1", method: "readMessages", params: { conversation: ALPHA }, timeoutMs: 60_000, deadline: Date.now() + 1_100 }, (r) =>
+      replies.push(r as (typeof replies)[number]),
+    );
+    expect(replies).toEqual([expect.objectContaining({ ok: false, error: expect.stringMatching(/Teams is busy \(throttled\)/) })]);
 
-    // The post's own check before the wait finds the account sure; the drop lands right after it,
-    // while the post waits for the gate (its only read of the switch record before then).
-    const get = vi.mocked(fake.chrome.storage.session.get);
-    const realGet = get.getMockImplementation() as (keys?: string | string[] | null) => Promise<Record<string, unknown>>;
-    let armed = true;
-    let dropped: Promise<unknown> | null = null;
-    get.mockImplementation(async (keys) => {
-      const r = await realGet(keys);
-      if (armed && keys === "accountSwitch") {
-        armed = false;
-        dropped = teamsRetries(fake, "alex", OLD);
-      }
-      return r;
-    });
-    await clickSend(fake);
+    // The post's own check before the gate finds the account sure; the drop lands once it waits
+    // there: it sleeps for the gate's second (again each second while the clock stands still).
+    // Not vi.waitFor, which moves a fake clock on as it polls. (until's own timeout counts on that
+    // clock too, so a post that never waits fails on the test's timeout.)
+    const sleeps = vi.spyOn(globalThis, "setTimeout");
+    try {
+      const clicked = clickSend(fake); // answered once the send is done
+      await until(() => sleeps.mock.calls.some(([, ms]) => ms === 1_000), undefined, "the post to wait at the gate");
+      await teamsRetries(fake, "alex", OLD);
+      vi.setSystemTime(Date.now() + 1_000); // the gate opens
 
-    await expect(result).resolves.toEqual({ sent: false, reason: expect.stringMatching(/Teams switched accounts moments ago; try again after \d\d:\d\d:\d\d/) });
-    expect(dropped).not.toBeNull();
-    await dropped;
+      await expect(result).resolves.toEqual({ sent: false, reason: expect.stringMatching(RETRY_AT) });
+      await clicked;
+    } finally {
+      sleeps.mockRestore();
+    }
     expect(posts(fake)).toEqual([]);
-    await read;
   });
 });
 
