@@ -96,12 +96,16 @@ function nativeExtension(b: ExtensionBridge, hello: object = { type: "hello", ve
   return { port, received };
 }
 
-/** A program that holds a TCP port and drops every connection (not an mcp-teams hub). */
-async function rawHolder(): Promise<{ server: Server; port: number }> {
-  const s = createServer((c) => c.destroy());
+/**
+ * A program that holds a TCP port and drops every connection (not an mcp-teams hub). `connections`
+ * counts them: the native host tries the port again by connecting to whatever holds it.
+ */
+async function rawHolder(): Promise<{ server: Server; port: number; connections: () => number }> {
+  let n = 0;
+  const s = createServer((c) => (n++, c.destroy()));
   await new Promise<void>((r) => s.listen(0, "127.0.0.1", () => r()));
   cleanups.push(() => (s.listening ? new Promise((r) => s.close(r)) : undefined));
-  return { server: s, port: (s.address() as { port: number }).port };
+  return { server: s, port: (s.address() as { port: number }).port, connections: () => n };
 }
 
 describe("#123: the native host's hub socket", () => {
@@ -242,11 +246,16 @@ describe("#123: the native host on the TCP port, for peers only (ADR decision 4)
   });
 
   it("#123 decision 7: while another program holds the port, tries again every tcpRetryMs and takes it once it is free", async () => {
-    const { server: holder, port } = await rawHolder();
+    // An exception to "never free a port and bind it again" (docs/testing.md, #23): the host taking
+    // a port the moment it is freed is what this shows. The port is the holder's own (port 0),
+    // and the host binds it within one retry (300 ms) of its release, so the window for another
+    // test to be handed this very port by the OS is that short; transport.test.ts does the same.
+    const { server: holder, port, connections } = await rawHolder();
     const path = tempSocket();
     const hub = await host(path, { tcpRetryMs: 300 }, port);
     expect(hub.role).toBe("hub"); // the hub on its socket at once, whatever holds the port
-    await new Promise((r) => setTimeout(r, 400));
+    // Each try finds the port held and connects to the holder: wait for a retry after the first.
+    await until(() => connections() >= 2, 3_000, "the host's second try for the held port");
     await new Promise<void>((r) => holder.close(() => r()));
     const freed = Date.now();
     await until(async_(() => tcpListening(port)), 3_000, "the host on the freed port");
