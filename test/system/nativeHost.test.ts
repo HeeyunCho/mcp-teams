@@ -146,6 +146,15 @@ describe("#123: the native host", { timeout: 30_000 }, () => {
     expect(edge.requests().some((r) => r.method === "readMessages")).toBe(true);
   });
 
+  it("#123: the welcome proves the extension's own nonce, served directly and relayed (the relay keeps the extension's nonce)", async () => {
+    h = await nativeHarness();
+    const chrome = await h.host({ browser: "Chrome", instance: "profile-1", nonce: "chrome-nonce" });
+    expect(chrome.welcome.proof).toBe(proof(TOKEN, "server", "chrome-nonce"));
+    const edge = await h.host({ browser: "Edge", instance: "profile-2", nonce: "edge-nonce" });
+    expect(h.logText()).toMatch(new RegExp(` pid=${edge.child.pid} relay version=`));
+    expect(edge.welcome.proof).toBe(proof(TOKEN, "server", "edge-nonce"));
+  });
+
   it("#123: when the serving host goes away, the relaying host takes over the hub socket", async () => {
     h = await nativeHarness();
     const chrome = await h.host({ browser: "Chrome", instance: "profile-1" });

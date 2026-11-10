@@ -27,6 +27,8 @@ export interface NativeExtensionOptions {
   lingerMs?: number;
   /** Don't send hello (to look at a host before the extension says anything). */
   noHello?: boolean;
+  /** The nonce its hello carries, as the real extension's does, for the welcome's proof (left out: none). */
+  nonce?: string;
   /** Env on top of the harness's. */
   env?: Record<string, string>;
 }
@@ -114,7 +116,7 @@ export function nativeExtension(home: string, socket: string, opts: NativeExtens
     }
   });
 
-  if (!opts.noHello) write({ type: "hello", version, browser, instance, capabilities: { maxMessageBytes: 256 * 1024 * 1024, features: [] } });
+  if (!opts.noHello) write({ type: "hello", ...(opts.nonce === undefined ? {} : { nonce: opts.nonce }), version, browser, instance, capabilities: { maxMessageBytes: 256 * 1024 * 1024, features: [] } });
 
   return {
     child,
