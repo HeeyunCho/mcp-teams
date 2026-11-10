@@ -1,5 +1,8 @@
 import { createHmac, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
-import type { IncomingMessage } from "node:http";
+import { chmodSync, mkdirSync, unlinkSync } from "node:fs";
+import { createServer as createHttpServer, type IncomingMessage } from "node:http";
+import { connect } from "node:net";
+import { dirname } from "node:path";
 import { WebSocketServer, WebSocket } from "ws";
 import { EXTENSION_ORIGIN as TRUSTED_EXTENSION_ORIGIN } from "./extension.js";
 import { FairQueue } from "./fairqueue.js";
@@ -114,7 +117,7 @@ const EXTENSION_ORIGIN = /^(chrome-extension|extension):\/\/[a-z0-9]+$/i;
 export const MAX_MESSAGE_BYTES = 256 * 1024 * 1024;
 
 /** Sizes and timings of the bridge. Tests shorten them; the server uses the defaults. */
-export interface BridgeOptions {
+export interface BridgeTimings {
   /** Largest message accepted on the bridge. */
   maxMessageBytes?: number;
   /** How often the hub pings each extension (also keeps the MV3 service worker alive) and each peer. */
@@ -141,9 +144,47 @@ export interface BridgeOptions {
    * between sessions (the hub's own calls are one session, each peer another; see FairQueue).
    */
   maxConcurrentCalls?: number;
+  /** A server on TCP with a hubSocket: how often it checks the hub socket for the native host (watchHost). */
+  hubPollMs?: number;
+  /** The native host: how often it tries again to get the TCP port while another server holds it (#123 decision 7). */
+  tcpRetryMs?: number;
 }
 
-export const DEFAULT_BRIDGE_OPTIONS: Readonly<Required<BridgeOptions>> = Object.freeze({
+/**
+ * Where a bridge meets the native host (#123, ADR 0001). None of these set: TCP only, as before.
+ * Ported from mcp-newoutlook src/bridge.ts BridgeOptions (listenPath, hubSocket, socketNeedsToken,
+ * features, onExtensionsChange; commit 7ef8ac9).
+ */
+export interface NativeHostOptions {
+  /**
+   * A server whose config enables the native host: the host's hub socket. start() joins the host
+   * there first, and otherwise runs the TCP logic as before; a server on TCP then checks the
+   * socket every hubPollMs and moves to the host once the host has the extension (watchHost).
+   */
+  hubSocket?: string;
+  /**
+   * The native host (dist/hub.js): the hub on this hub socket (Unix socket path or Windows named
+   * pipe), with the extension's native port attached (attachExtension). It also listens on the TCP
+   * port, for peers only (ADR decision 4): servers from before the host know only the port. It
+   * never joins another hub and never steps down to a newer server.
+   */
+  hostSocket?: string;
+  /** Peers on the hub socket must prove the pairing token (default: on Windows, see socketNeedsProof in native.ts). */
+  socketNeedsProof?: boolean;
+  /** Protocol features declared besides SERVER_FEATURES (the host: "native"). */
+  features?: string[];
+  /** Called whenever the connected extensions change (the host's linger timer). */
+  onExtensionsChange?: (extensions: ExtensionInfo[]) => void;
+  /** Metadata about the hub's connections, for the host's hub.log: never message text. */
+  onEvent?: (event: string, fields?: Record<string, string | number | undefined>) => void;
+}
+
+type Timings = Required<BridgeTimings>;
+
+/** Sizes and timings, and where it meets the native host. */
+export interface BridgeOptions extends BridgeTimings, NativeHostOptions {}
+
+export const DEFAULT_BRIDGE_OPTIONS: Readonly<Timings> = Object.freeze({
   maxMessageBytes: MAX_MESSAGE_BYTES,
   keepAliveMs: 20_000,
   retryMs: 2_000,
@@ -154,6 +195,8 @@ export const DEFAULT_BRIDGE_OPTIONS: Readonly<Required<BridgeOptions>> = Object.
   cancelGraceMs: 2_000,
   maxPeerBufferedBytes: 64 * 1024 * 1024,
   maxConcurrentCalls: 4,
+  hubPollMs: 5_000,
+  tcpRetryMs: 5_000,
 });
 
 /**
@@ -316,6 +359,13 @@ export interface BridgeSocket {
 /** BridgeSocket.readyState of an open connection (as WebSocket.OPEN). */
 export const OPEN = WebSocket.OPEN;
 
+/**
+ * Where a connection came from (#123): the TCP port, the native host's hub socket, or the
+ * extension's native-messaging port. The hub decides on it who must prove the token, and that an
+ * extension on the native host's TCP port is refused.
+ */
+export type Via = "tcp" | "socket" | "native";
+
 /** Where a hub listens, once it listens. */
 export interface BridgeListener {
   /** The TCP port it got (the free one, when asked for port 0); none for a listener without a port. */
@@ -326,14 +376,19 @@ export interface BridgeListener {
 
 /** What a listener tells the hub. */
 export interface ListenHandlers {
-  /** A new connection, not yet authenticated. `origin`: the Origin it sent (none: a local process). */
-  connection(conn: BridgeSocket, origin?: string): void;
+  /**
+   * A new connection, not yet authenticated. `via`: the kind of listener that took it. `origin`:
+   * the Origin it sent (none: a local process).
+   */
+  connection(conn: BridgeSocket, from: { via: Via; origin?: string }): void;
   /** The listener failed after it started listening. */
   error(err: Error): void;
 }
 
 /** How a bridge listens as the hub and connects as a peer. */
 export interface BridgeTransport {
+  /** "tcp": the WebSocket on the port; "socket": the native host's hub socket. */
+  readonly kind: "tcp" | "socket";
   /** Starts listening. Rejects with the listen error, whose code is EADDRINUSE when another server holds the address. */
   listen(handlers: ListenHandlers): Promise<BridgeListener>;
   /** Connects to the hub listening there. */
@@ -347,6 +402,7 @@ export interface BridgeTransport {
  */
 export function webSocketTransport({ port, maxMessageBytes }: { port: number; maxMessageBytes: number }): BridgeTransport {
   return {
+    kind: "tcp",
     listen: (handlers) =>
       new Promise((resolve, reject) => {
         const wss = new WebSocketServer({
@@ -368,9 +424,88 @@ export function webSocketTransport({ port, maxMessageBytes }: { port: number; ma
           wss.close();
           reject(err);
         });
-        wss.on("connection", (ws, req) => handlers.connection(ws, req.headers.origin));
+        wss.on("connection", (ws, req) => handlers.connection(ws, { via: "tcp", origin: req.headers.origin }));
       }),
     connect: () => new WebSocket(`ws://127.0.0.1:${port}`, { maxPayload: maxMessageBytes }),
+  };
+}
+
+/** True when something accepts connections on a local socket path. */
+function socketAlive(path: string): Promise<boolean> {
+  return new Promise((resolve) => {
+    const s = connect(path);
+    const done = (alive: boolean) => (s.destroy(), resolve(alive));
+    s.setTimeout(1_000, () => done(false));
+    s.once("connect", () => done(true));
+    s.once("error", () => done(false));
+  });
+}
+
+/**
+ * The native host's hub socket (#123): the same WebSocket protocol on a local socket, a Unix socket
+ * file or a Windows named pipe. On macOS and Linux the socket is 0600 in a 0700 folder, and a
+ * socket file that a crashed host left (nobody listens on it) is replaced. Only local processes
+ * connect: any Origin header (a browser page) is refused. Ported from mcp-newoutlook src/bridge.ts
+ * listenOnPath, socketAlive and join({ path }) (commit 7ef8ac9).
+ */
+export function socketTransport({ path, maxMessageBytes }: { path: string; maxMessageBytes: number }): BridgeTransport {
+  const unix = process.platform !== "win32";
+  const listen = (handlers: ListenHandlers, retried: boolean): Promise<BridgeListener> => {
+    if (unix) {
+      try {
+        mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+        chmodSync(dirname(path), 0o700);
+      } catch (err) {
+        return Promise.reject(err);
+      }
+    }
+    return new Promise((resolve, reject) => {
+      const server = createHttpServer((_req, res) => res.writeHead(426).end());
+      const wss = new WebSocketServer({
+        server,
+        maxPayload: maxMessageBytes,
+        verifyClient: ({ origin }: { origin?: string; req: IncomingMessage }) => !origin,
+      });
+      let listening = false;
+      server.once("listening", () => {
+        listening = true;
+        try {
+          if (unix) chmodSync(path, 0o600);
+        } catch {
+          // gone again already; the folder is owner-only either way
+        }
+        const closeWss = () => new Promise<void>((r) => wss.close(() => r()));
+        const closeServer = () =>
+          new Promise<void>((r) => {
+            server.closeAllConnections();
+            server.close(() => r());
+          });
+        resolve({ close: () => closeWss().then(closeServer) });
+      });
+      server.on("error", async (err: NodeJS.ErrnoException) => {
+        if (listening) return handlers.error(err);
+        wss.close();
+        server.close();
+        if (err.code === "EADDRINUSE" && unix && !retried && !(await socketAlive(path))) {
+          // A socket file nobody listens on (a host that crashed): take it over.
+          try {
+            unlinkSync(path);
+          } catch {
+            // another host was quicker
+          }
+          return listen(handlers, true).then(resolve, reject);
+        }
+        reject(err);
+      });
+      wss.on("error", () => {}); // the server's own errors come through `server`
+      wss.on("connection", (ws, req) => handlers.connection(ws, { via: "socket", origin: req.headers.origin }));
+      server.listen(path);
+    });
+  };
+  return {
+    kind: "socket",
+    listen: (handlers) => listen(handlers, false),
+    connect: () => new WebSocket("ws://localhost/", { maxPayload: maxMessageBytes, createConnection: () => connect(path) }),
   };
 }
 
@@ -395,7 +530,14 @@ export class ExtensionBridge {
    */
   hubChecksSend = false;
 
-  private listener?: BridgeListener; // hub: where extensions and peers connect
+  /** Hub: where extensions and peers connect; the native host has its hub socket and its TCP listener (#123). */
+  private listeners: BridgeListener[] = [];
+  private tcpListener?: BridgeListener; // the native host: its TCP listener, for peers only
+  private tcpRetry?: NodeJS.Timeout; // the native host: its next try for the TCP port
+  private nudging?: BridgeSocket; // the native host: its connection to an older TCP hub, which steps down to it
+  private hubOnSocket = false; // peer: the hub is the native host, reached on its hub socket
+  private hostWatch?: NodeJS.Timeout; // a server on TCP with a hubSocket: checks it for the host
+  private checkingHost = false;
   private sockets = new Map<BridgeSocket, ExtensionInfo>(); // hub: the extensions
   private preferred?: BridgeSocket; // hub: the extension that last answered a call
   private hub?: BridgeSocket; // peer: the hub
@@ -416,7 +558,8 @@ export class ExtensionBridge {
   private alive = new WeakSet<BridgeSocket>(); // hub: extensions and peers that answered the last ping
   private backlogged = new WeakSet<BridgeSocket>(); // hub: peers over maxPeerBufferedBytes at the last tick
   private legacyReloaded = false; // hub: an extension of 0.2.0 or older was told to reload
-  private readonly opts: Required<BridgeOptions>;
+  private readonly opts: Timings;
+  private readonly native: NativeHostOptions;
   private boundPort?: number; // the port it got when it first listened (port 0 picks a free one); kept for later takeovers
 
   /** The 4th argument is the options, or (as before) just the largest message size. */
@@ -427,9 +570,30 @@ export class ExtensionBridge {
     options: BridgeOptions | number = {},
   ) {
     const given: BridgeOptions = typeof options === "number" ? { maxMessageBytes: options } : options;
+    const { hubSocket, hostSocket, socketNeedsProof, features, onExtensionsChange, onEvent, ...timings } = given;
     // A key given as undefined keeps its default (spreading it would overwrite the default).
-    const defined = Object.fromEntries(Object.entries(given).filter(([, v]) => v !== undefined));
+    const defined = Object.fromEntries(Object.entries(timings).filter(([, v]) => v !== undefined));
     this.opts = { ...DEFAULT_BRIDGE_OPTIONS, ...defined };
+    this.native = { hubSocket: hostSocket ? undefined : hubSocket, hostSocket, socketNeedsProof, features, onExtensionsChange, onEvent };
+  }
+
+  /** The native host (#123): the hub on its hub socket, never a peer. */
+  private get isHost(): boolean {
+    return !!this.native.hostSocket;
+  }
+
+  /** Peer only: true when the hub is the native host, reached on its hub socket; false for another session's TCP hub. */
+  get hubIsHost(): boolean {
+    return this.role === "peer" && this.hubOnSocket;
+  }
+
+  /**
+   * The native host: takes the extension's native-messaging port as an extension connection.
+   * Chrome only starts the host for the extension ids in its manifest's allowed_origins, and
+   * dist/hub.js checks the origin it was given, so it is trusted as our extension (no proof).
+   */
+  attachExtension(conn: BridgeSocket) {
+    this.onConnection(conn, { via: "native", origin: TRUSTED_EXTENSION_ORIGIN });
   }
 
   /**
@@ -446,7 +610,8 @@ export class ExtensionBridge {
 
   /** What this server tells extensions, peers and the hub it can do (#115). */
   get capabilities(): Capabilities {
-    return { features: [...SERVER_FEATURES], maxMessageBytes: this.maxMessageBytes };
+    const extra = (this.native.features ?? []).filter((f) => !SERVER_FEATURES.includes(f));
+    return { features: [...SERVER_FEATURES, ...extra], maxMessageBytes: this.maxMessageBytes };
   }
 
   /** Read-only, for tests: calls waiting for an answer, and (hub) peers' calls being run. */
@@ -472,8 +637,21 @@ export class ExtensionBridge {
   /** Becomes the hub, or a peer of the existing hub. Keeps retrying in the background if neither works. */
   async start(): Promise<void> {
     if (this.closed) return;
-    if (await this.listen()) return this.setRole("hub");
-    if (await this.join()) return this.setRole("peer");
+    const socket = this.socketTransport;
+    if (this.isHost) {
+      // The native host: the hub on its socket, or nothing (dist/hub.js then relays to the host there).
+      if (await this.listen(socket!)) {
+        this.setRole("hub");
+        this.native.onEvent?.("host", { socket: "listening" });
+        return void this.holdTcp();
+      }
+      this.role = "none";
+      return;
+    }
+    // The native host serves the extension: join it (#123). Otherwise TCP, as before.
+    if (socket && (await this.join(socket))) return this.setRole("peer");
+    if (await this.listen(this.tcpTransport)) return (this.setRole("hub"), this.watchHost());
+    if (await this.join(this.tcpTransport)) return (this.setRole("peer"), this.watchHost());
     this.role = "none";
     clearTimeout(this.retry);
     this.retry = setTimeout(() => void this.start(), this.opts.retryMs);
@@ -493,31 +671,126 @@ export class ExtensionBridge {
 
   // ------------------------------------------------------------------ hub
 
-  /** How it listens and joins: the WebSocket on its port, the only transport so far (#123). */
-  private get transport(): BridgeTransport {
+  /** The WebSocket on its port. */
+  private get tcpTransport(): BridgeTransport {
     return webSocketTransport({ port: this.port, maxMessageBytes: this.maxMessageBytes });
   }
 
-  private listen(): Promise<boolean> {
-    return this.transport
-      .listen({
-        connection: (conn, origin) => this.onConnection(conn, origin),
-        error: (err) => this.restartHub(LOST_CALL.serverError(err.message)),
-      })
-      .then(
-        (listener) => {
-          this.listener = listener;
-          this.boundPort = listener.port ?? this.boundPort;
-          return true;
-        },
-        (err: NodeJS.ErrnoException) => {
-          if (err.code !== "EADDRINUSE") this.listenError = err.message;
-          return false;
-        },
-      );
+  /** The native host's hub socket (#123): where the host listens, or where a server looks for it. */
+  private get socketTransport(): BridgeTransport | undefined {
+    const path = this.native.hostSocket ?? this.native.hubSocket;
+    return path ? socketTransport({ path, maxMessageBytes: this.maxMessageBytes }) : undefined;
   }
 
-  private onConnection(ws: BridgeSocket, origin?: string) {
+  /** Peers on the hub socket must prove the token only where the socket isn't owner-only (a Windows pipe). */
+  private get socketNeedsProof(): boolean {
+    return this.native.socketNeedsProof ?? process.platform === "win32";
+  }
+
+  /** Listens on `transport` as the hub; false when the address is taken (or failed: listenError). */
+  private listen(transport: BridgeTransport): Promise<boolean> {
+    return this.listenOn(transport, (err) => this.restartHub(LOST_CALL.serverError(err.message))).then(
+      (listener) => !!listener,
+      (err: NodeJS.ErrnoException) => {
+        if (err.code !== "EADDRINUSE") this.listenError = err.message;
+        return false;
+      },
+    );
+  }
+
+  private async listenOn(transport: BridgeTransport, onError: (err: Error) => void): Promise<BridgeListener> {
+    const listener = await transport.listen({
+      connection: (conn, from) => this.onConnection(conn, from),
+      error: onError,
+    });
+    this.listeners.push(listener);
+    if (transport.kind === "tcp") this.boundPort = listener.port ?? this.boundPort;
+    return listener;
+  }
+
+  /**
+   * The native host: listens on the TCP port too, for peers only (ADR decision 4). While another
+   * server holds the port it tries again every tcpRetryMs (#123 decision 7). A TCP hub older than
+   * this host is joined as a newer peer, so its stepDown hands the port over (decision 8); one as
+   * new or newer moves to the host itself once the host has the extension (watchHost).
+   */
+  private async holdTcp() {
+    clearTimeout(this.tcpRetry);
+    if (this.closed || this.role !== "hub" || this.tcpListener) return;
+    let again = this.opts.tcpRetryMs;
+    try {
+      const listener = await this.listenOn(this.tcpTransport, (err) => {
+        // The TCP listener failed: the host stays the hub on its socket and listens again later.
+        this.native.onEvent?.("tcp", { error: err.message.slice(0, 200) });
+        this.listeners = this.listeners.filter((l) => l !== listener);
+        if (this.tcpListener === listener) this.tcpListener = undefined;
+        void listener.close();
+        this.scheduleTcp(this.opts.tcpRetryMs);
+      });
+      if (this.closed || this.role !== "hub") return void this.closeListener(listener);
+      this.tcpListener = listener;
+      this.native.onEvent?.("tcp", { port: listener.port });
+      return;
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === "EADDRINUSE" && (await this.nudgeTcpHub())) again = 20;
+    }
+    this.scheduleTcp(again);
+  }
+
+  private scheduleTcp(ms: number) {
+    if (this.closed || this.role !== "hub") return;
+    clearTimeout(this.tcpRetry);
+    this.tcpRetry = setTimeout(() => void this.holdTcp(), ms);
+    this.tcpRetry.unref();
+  }
+
+  private closeListener(listener: BridgeListener) {
+    this.listeners = this.listeners.filter((l) => l !== listener);
+    return listener.close();
+  }
+
+  /**
+   * The native host: joins the TCP hub on the port as a peer of its own version. A hub older than
+   * that steps down to it (its existing stepDown, #123 decision 8); this waits until that hub has
+   * closed and resolves true, so the port is tried again at once. Any other answer (a hub as new or
+   * newer, another program, no answer) resolves false: try again later.
+   */
+  private nudgeTcpHub(): Promise<boolean> {
+    return new Promise((resolve) => {
+      const ws = this.tcpTransport.connect();
+      this.nudging = ws;
+      const nonce = newNonce();
+      let challenged = false;
+      let older = false;
+      const timer = setTimeout(() => ws.terminate(), this.opts.joinTimeoutMs);
+      ws.on("message", (raw) => {
+        let msg: any;
+        try {
+          msg = JSON.parse(raw.toString());
+        } catch {
+          return;
+        }
+        if (msg?.type === "challenge" && !challenged && typeof msg.nonce === "string") {
+          challenged = true;
+          ws.send(JSON.stringify({ type: "peer-hello", proof: proof(this.token, "client", msg.nonce), nonce, version: this.serverVersion, capabilities: this.capabilities }));
+        } else if (msg?.type === "peer-welcome" && !older) {
+          clearTimeout(timer);
+          if (!challenged || !sameProof(msg.proof, proof(this.token, "server", nonce)) || !isNewer(this.serverVersion, msg.serverVersion)) return void ws.close(1000, "not now");
+          // It hands over once its own calls are done; until then this stays its (idle) peer.
+          older = true;
+          this.native.onEvent?.("tcp", { stepDown: String(msg.serverVersion).slice(0, 32) });
+        }
+      });
+      ws.on("error", () => {});
+      ws.on("close", () => {
+        clearTimeout(timer);
+        if (this.nudging === ws) this.nudging = undefined;
+        resolve(older);
+      });
+    });
+  }
+
+  private onConnection(ws: BridgeSocket, { via, origin }: { via: Via; origin?: string }) {
     let authed = false;
     const authTimer = setTimeout(() => !authed && ws.close(4401, "auth timeout"), this.opts.authTimeoutMs);
     const challenge = newNonce();
@@ -533,18 +806,29 @@ export class ExtensionBridge {
       if (!msg || typeof msg !== "object") return;
       if (!authed) {
         if (msg.type !== "hello" && msg.type !== "peer-hello") return void ws.close(4401, "bad token");
+        // The native host takes extensions only on native messaging (or relayed on its socket): on
+        // its TCP port it serves peers only (ADR decision 4, #123 decision 9).
+        if (via === "tcp" && this.isHost && msg.type === "hello") {
+          this.native.onEvent?.("refused", { reason: "extension on the TCP port" });
+          return void ws.close(4403, "extensions connect to the native host by native messaging");
+        }
+        if (via === "native" && msg.type !== "hello") return void ws.close(4401, "bad token");
         // Clients up to 0.2.0 send the token itself (peers, or an extension paired by hand).
         const proven = sameProof(msg.proof, proof(this.token, "client", challenge)) || (typeof msg.token === "string" && msg.token === this.token);
-        if (!proven) {
+        // The native port is our extension (Chrome checked it); the hub socket is owner-only except on Windows.
+        const trusted = via === "native" || (via === "socket" && !this.socketNeedsProof);
+        if (!proven && !trusted) {
           // Our extension up to 0.2.0 says hello with neither; it is only told to reload.
-          if (msg.type === "hello" && origin === TRUSTED_EXTENSION_ORIGIN && msg.token == null && msg.proof == null) return this.reloadLegacy(ws);
+          if (via === "tcp" && msg.type === "hello" && origin === TRUSTED_EXTENSION_ORIGIN && msg.token == null && msg.proof == null) return this.reloadLegacy(ws);
           return void ws.close(4401, "bad token");
         }
         authed = true;
         clearTimeout(authTimer);
         const welcome = typeof msg.nonce === "string" ? { proof: proof(this.token, "server", msg.nonce) } : {};
-        if (msg.type === "hello") this.acceptExtension(ws, msg, welcome, origin);
-        else this.acceptPeer(ws, msg.version, welcome);
+        // A hello on the hub socket is another browser's host relaying its extension, which that
+        // host checked: ours, on native messaging.
+        if (msg.type === "hello") this.acceptExtension(ws, msg, welcome, via === "tcp" ? origin : TRUSTED_EXTENSION_ORIGIN);
+        else this.acceptPeer(ws, msg.version, welcome, via);
         return;
       }
       if (this.sockets.has(ws)) this.onExtensionMessage(ws, msg);
@@ -629,6 +913,7 @@ export class ExtensionBridge {
     this.extensions = [...this.sockets.values()];
     this.extension = (this.preferred && this.sockets.get(this.preferred)) ?? this.extensions.at(-1);
     this.broadcastState();
+    this.native.onExtensionsChange?.(this.extensions);
   }
 
   /**
@@ -677,8 +962,10 @@ export class ExtensionBridge {
     setTimeout(() => ws.close(4426, "extension update required"), 1_000).unref();
   }
 
-  private acceptPeer(ws: BridgeSocket, peerVersion: unknown, welcome: object) {
+  private acceptPeer(ws: BridgeSocket, peerVersion: unknown, welcome: object, via: Via) {
     this.peers.add(ws);
+    this.native.onEvent?.("peer", { version: String(peerVersion ?? "unknown").replace(/[^\w.-]/g, "").slice(0, 32), via });
+    ws.on("close", () => this.native.onEvent?.("peer-left", { via }));
     // heartbeatMs: this hub pings the peer that often, so the peer can tell when it stops.
     ws.send(
       JSON.stringify({
@@ -696,7 +983,8 @@ export class ExtensionBridge {
     this.startPeerBeat(ws);
     // A newer server joined: hand the port to it, so its fixes (and what the newer
     // extension expects) take effect without restarting this AI session.
-    if (isNewer(peerVersion, this.serverVersion)) void this.stepDown(String(peerVersion));
+    // The native host stays the hub: Chrome connects the extension to it, not to a server.
+    if (!this.isHost && isNewer(peerVersion, this.serverVersion)) void this.stepDown(String(peerVersion));
   }
 
   /**
@@ -718,8 +1006,19 @@ export class ExtensionBridge {
 
   /** Hub: closes the server and every connection, then becomes a hub or peer again. */
   private restartHub(reason: string, delayMs = 100 + Math.random() * 400) {
-    const listener = this.listener;
-    this.listener = undefined;
+    this.stopServing(reason);
+    if (this.closed) return;
+    clearTimeout(this.retry);
+    this.retry = setTimeout(() => void this.start(), delayMs);
+    this.retry.unref();
+  }
+
+  /** Hub: closes its listeners and every connection; their calls fail with `reason`. */
+  private stopServing(reason: string) {
+    const listeners = this.listeners;
+    this.listeners = [];
+    this.tcpListener = undefined;
+    clearTimeout(this.tcpRetry);
     this.role = "none";
     clearInterval(this.keepAlive);
     this.stopPeerBeat();
@@ -732,11 +1031,8 @@ export class ExtensionBridge {
     this.preferred = undefined;
     this.extension = undefined;
     this.extensions = [];
-    void listener?.close();
-    if (this.closed) return;
-    clearTimeout(this.retry);
-    this.retry = setTimeout(() => void this.start(), delayMs);
-    this.retry.unref();
+    this.native.onExtensionsChange?.(this.extensions);
+    for (const l of listeners) void l.close();
   }
 
   private onExtensionMessage(ws: BridgeSocket, msg: any) {
@@ -897,9 +1193,17 @@ export class ExtensionBridge {
 
   // ------------------------------------------------------------------ peer
 
-  private join(): Promise<boolean> {
+  /**
+   * Joins the hub on `transport` as a peer: the TCP hub, or the native host on its hub socket.
+   * adopt (a server on TCP checking for the host): decides on the peer-welcome whether to stay; when
+   * it says yes, this server first leaves the TCP bridge (leaveTcp). Ported from mcp-newoutlook
+   * src/bridge.ts join(target, adopt) (commit 7ef8ac9).
+   */
+  private join(transport: BridgeTransport, adopt?: (welcome: any) => boolean): Promise<boolean> {
     return new Promise((resolve) => {
-      const ws = this.transport.connect();
+      const ws = transport.connect();
+      const onSocket = transport.kind === "socket";
+      let discarded = false;
       let joined = false;
       let challenged = false;
       let forged = false;
@@ -942,15 +1246,24 @@ export class ExtensionBridge {
           ws.send(
             JSON.stringify({ type: "peer-hello", proof: proof(this.token, "client", msg.nonce), nonce, version: this.serverVersion, capabilities: this.capabilities }),
           );
-        } else if (msg.type === "peer-welcome" && !joined) {
+        } else if (msg.type === "peer-welcome" && !joined && !discarded) {
           // Only the real hub can answer our nonce; never forward calls to anything else.
           if (!challenged || !sameProof(msg.proof, proof(this.token, "server", nonce))) {
             forged = true;
             return void ws.terminate();
           }
+          if (adopt && (this.closed || !adopt(msg))) {
+            discarded = true;
+            clearTimeout(timer);
+            ws.close(1000, "not now");
+            return resolve(false);
+          }
+          if (adopt) this.leaveTcp();
           joined = true;
           clearTimeout(timer);
           this.hub = ws;
+          this.hubOnSocket = onSocket;
+          if (adopt) this.setRole("peer");
           this.hubVersion = String(msg.serverVersion ?? "unknown");
           this.hubCapabilities = capabilitiesOf(msg);
           this.hubChecksSend = this.hubCapabilities.features.includes("checksSend") || msg.checksSend === true;
@@ -974,7 +1287,13 @@ export class ExtensionBridge {
       ws.on("close", (code) => {
         clearTimeout(timer);
         clearTimeout(watchdog);
+        if (discarded) return;
         if (!joined) {
+          if (onSocket) {
+            // No native host there (or not ours): the TCP logic runs next. Only a refused proof is worth saying.
+            if (code === 4401) this.listenError = "The mcp-teams native host on the hub socket rejected this server's token (run `npx mcp-teams setup` again).";
+            return resolve(false);
+          }
           this.listenError =
             code === 4401
               ? `The mcp-teams server on port ${this.port} rejected this server's token.`
@@ -986,6 +1305,7 @@ export class ExtensionBridge {
         if (this.hub !== ws) return;
         // The hub went away: take over the port or join whoever did.
         this.hub = undefined;
+        this.hubOnSocket = false;
         this.hubVersion = undefined;
         this.hubCapabilities = undefined;
         this.hubChecksSend = false;
@@ -1000,6 +1320,51 @@ export class ExtensionBridge {
         }
       });
     });
+  }
+
+  /**
+   * A server on TCP whose config enables the native host (#123 decision 7): checks the hub socket
+   * every hubPollMs. When the host serves the extension there and this server's TCP bridge has none,
+   * it moves to the host. Ported from mcp-newoutlook src/bridge.ts watchHost (commit 7ef8ac9).
+   */
+  private watchHost() {
+    if (!this.native.hubSocket || this.hostWatch) return;
+    this.hostWatch = setInterval(() => void this.checkHost(), this.opts.hubPollMs);
+    this.hostWatch.unref();
+  }
+
+  private async checkHost() {
+    const socket = this.socketTransport;
+    const onTcp = () => !this.closed && !this.hubOnSocket && (this.role === "hub" || this.role === "peer") && !this.connected && !this.steppingDown && !this.draining;
+    if (this.checkingHost || !socket || !onTcp()) return;
+    this.checkingHost = true;
+    try {
+      await this.join(socket, (welcome) => onTcp() && !!welcome.extension);
+    } finally {
+      this.checkingHost = false;
+    }
+  }
+
+  /**
+   * Leaves the TCP bridge to join the native host, which has the extension. As the hub it closes
+   * the port and its peers, which join the host too (or, servers that don't look for it, the host's
+   * TCP listener once it has the port). Nothing reached an extension here (this server had none),
+   * so whatever waits fails with "try again". Ported from mcp-newoutlook src/bridge.ts leaveTcp
+   * (commit 7ef8ac9), without its handover note, which Teams' peers don't know.
+   */
+  private leaveTcp() {
+    if (this.role === "hub") {
+      console.error(`[mcp-teams ${this.serverVersion}] the extension is on the native host; joining it`);
+      this.stopServing(LOST_CALL.hubRestarted);
+    } else if (this.hub) {
+      const old = this.hub;
+      this.hub = undefined;
+      this.extension = undefined;
+      this.extensions = [];
+      this.rejectAll(LOST_CALL.hubRestarted);
+      old.close(1000, "moving to the native host");
+    }
+    this.role = "none";
   }
 
   // ------------------------------------------------------------------ calls
@@ -1261,6 +1626,9 @@ export class ExtensionBridge {
   async close() {
     this.closed = true;
     clearTimeout(this.retry);
+    clearTimeout(this.tcpRetry);
+    clearInterval(this.hostWatch);
+    this.nudging?.terminate();
     clearInterval(this.keepAlive);
     this.stopPeerBeat();
     this.dropTurns();
@@ -1268,6 +1636,9 @@ export class ExtensionBridge {
     this.hub?.close();
     for (const s of this.sockets.keys()) s.close();
     for (const peer of this.peers) peer.close();
-    await this.listener?.close();
+    const listeners = this.listeners;
+    this.listeners = [];
+    this.tcpListener = undefined;
+    await Promise.all(listeners.map((l) => l.close()));
   }
 }

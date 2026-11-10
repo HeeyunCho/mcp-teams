@@ -46,7 +46,10 @@ describe("lost calls", () => {
     expect(src).not.toMatch(/withdraw\([^)]*new Error\(\s*["'`]/);
     expect(src).toMatch(/const cancelledError = \(\) => new Error\(LOST_CALL\./);
     // Socket errors too (they fail every pending call on that connection).
-    const socketErrors = src.slice(src.indexOf("function describeSocketError"), src.indexOf("export class ExtensionBridge"));
+    // From the function to its end (the first line that closes a top-level block), so code placed after it doesn't count.
+    const from = src.indexOf("function describeSocketError");
+    const socketErrors = src.slice(from, src.indexOf("\n}\n", from));
+    expect(socketErrors).toMatch(/^function describeSocketError/);
     // (It may compare an error code with a string, but builds no message of its own.)
     expect(socketErrors).not.toMatch(/`/);
     expect(socketErrors).toMatch(/LOST_CALL\.tooLarge\(/);

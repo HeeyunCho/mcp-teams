@@ -246,6 +246,8 @@ describe("ExtensionBridge options", () => {
       cancelGraceMs: 2_000, // 1.2: how long a withdrawn call's answer still counts
       maxPeerBufferedBytes: 64 * 1024 * 1024, // 2.3: a peer's backlog that closes it at two ticks in a row
       maxConcurrentCalls: 4, // 2.4: calls that run at once on each extension (as in mcp-newoutlook)
+      hubPollMs: 5_000, // #123 decision 7: a TCP server checks the hub socket for the native host
+      tcpRetryMs: 5_000, // #123 decision 7: the native host tries the held TCP port again
     });
   });
 
