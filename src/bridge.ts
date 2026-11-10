@@ -847,9 +847,7 @@ export class ExtensionBridge {
         authed = true;
         clearTimeout(authTimer);
         const welcome = typeof msg.nonce === "string" ? { proof: proof(this.token, proofRole("server", via), msg.nonce) } : {};
-        // A hello on the hub socket is another browser's host relaying its extension, which that
-        // host checked: ours, on native messaging.
-        if (msg.type === "hello") this.acceptExtension(ws, msg, welcome, via === "tcp" ? origin : TRUSTED_EXTENSION_ORIGIN, via === "tcp" ? "websocket" : "native");
+        if (msg.type === "hello") this.acceptExtension(ws, msg, welcome, via, origin);
         else this.acceptPeer(ws, msg.version, welcome, via);
         return;
       }
@@ -886,7 +884,12 @@ export class ExtensionBridge {
    * connected, copies with another id (e.g. an older one loaded from another folder) are
    * turned away, and connecting ours replaces them.
    */
-  private acceptExtension(ws: BridgeSocket, msg: any, welcome: object, origin: string | undefined, transport: NonNullable<ExtensionInfo["transport"]>) {
+  private acceptExtension(ws: BridgeSocket, msg: any, welcome: object, via: Via, tcpOrigin?: string) {
+    // Not on TCP: native messaging, where Chrome checked it is ours, or a hello on the hub socket,
+    // which is another browser's host relaying its extension (that host checked it).
+    const onTcp = via === "tcp";
+    const origin = onTcp ? tcpOrigin : TRUSTED_EXTENSION_ORIGIN;
+    const transport = onTcp ? "websocket" : "native";
     const info: ExtensionInfo = {
       version: String(msg.version ?? "unknown"),
       browser: msg.browser,

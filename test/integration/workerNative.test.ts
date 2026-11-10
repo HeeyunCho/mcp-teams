@@ -7,6 +7,7 @@ import { WebSocketServer, type WebSocket } from "ws";
 import { proof } from "../../src/bridge.js";
 import { toExtensionFrames } from "../../src/native.js";
 import { createFakeChrome, loadWorker, NativeWebSocket, openedSockets, stopWorkers, type FakeChrome, type FakeNativeHost } from "../helpers/fakeChrome.js";
+import { until } from "../helpers/timing.js";
 
 const TOKEN = "worker-native-token";
 
@@ -181,13 +182,23 @@ describe("#123: the worker connects to the native host first, and falls back to 
   it("after a 4403, a native host that still fails sends it back to TCP, and native is tried again with backoff (no tight loop)", async () => {
     pairing({ token: TOKEN });
     const hub = await tcpHub({ refuseWith: 4403 });
-    const f = createFakeChrome({ local: { port: hub.port }, nativeHost: (host) => host.disconnect("Native host has exited.") });
+    const tried: number[] = [];
+    const f = createFakeChrome({
+      local: { port: hub.port },
+      nativeHost: (host) => {
+        tried.push(Date.now());
+        host.disconnect("Native host has exited.");
+      },
+    });
     await start(f);
-    await vi.waitFor(() => expect(f.connectNative).toHaveBeenCalledTimes(2), { timeout: 3_000 });
-    // Retries back off from 0.5 s (0.5, 1, 2, …): within 2.5 s at most 3 native tries, each followed by TCP.
-    await new Promise((r) => setTimeout(r, 1_000));
-    expect(f.connectNative!.mock.calls.length).toBeLessThanOrEqual(3);
-    expect(hub.received.filter((m) => m.type === "hello").length).toBeLessThanOrEqual(f.connectNative!.mock.calls.length + 1);
+    await until(() => tried.length >= 2, 3_000, "a second native try");
+    // Each failed native try goes to TCP once (whose 4403 sends the next one back), and the retries
+    // back off (0.5 s, then 1 s, …): the second native try came a backoff after the first.
+    expect(tried[1] - tried[0]).toBeGreaterThanOrEqual(900);
+    const hellos = () => hub.received.filter((m) => m.type === "hello").length;
+    await until(() => hellos() >= 3, 3_000, "TCP after the second native try");
+    // The third native try waits 2 s more: TCP once per native try, no loop.
+    expect([tried.length, hellos()]).toEqual([2, 3]);
     expect((await status(f)).lastError).toMatch(/native/i);
   });
 });

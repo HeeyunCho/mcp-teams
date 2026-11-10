@@ -19,8 +19,10 @@
  * (src/hubLog.ts): metadata only.
  *
  * Ported from mcp-newoutlook src/hub.ts (commit 127715c). Teams' relaying host answers the serving
- * host's challenge with a proof of the pairing token (Outlook sends the token itself), and there
- * is no late-answer log or build-mismatch line yet.
+ * host's challenge with a proof of the pairing token (Outlook sends the token itself) and checks
+ * the holder by its own nonce, then gives the extension a welcome whose proof is for the
+ * extension's own nonce (Outlook passes the welcome on as it came); and there is no late-answer log
+ * or build-mismatch line yet.
  */
 import { randomBytes, timingSafeEqual } from "node:crypto";
 import { join } from "node:path";
