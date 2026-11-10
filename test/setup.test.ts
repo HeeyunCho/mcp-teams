@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -148,7 +148,8 @@ describe("#24: quote", () => {
   // backtick stay out: they still expand inside double quotes, which #24 accepted. The
   // command goes in encoded, so nothing between here and PowerShell's parser re-quotes it.
   it.runIf(process.platform === "win32")("#76: PowerShell reads each quoted argument back byte for byte", { timeout: 20_000 }, () => {
-    const script = join(mkdtempSync(join(tmpdir(), "quote-")), "argv.js");
+    const dir = mkdtempSync(join(tmpdir(), "quote-"));
+    const script = join(dir, "argv.js");
     writeFileSync(script, "process.stdout.write(JSON.stringify(process.argv.slice(2)));");
     const args = [
       "C:\\Users\\Alex Doe\\x",
@@ -162,8 +163,12 @@ describe("#24: quote", () => {
     ];
     const command = ["node", script, ...args].map((part) => quote(part, "win32")).join(" ");
     const encoded = Buffer.from(command, "utf16le").toString("base64");
-    const out = execFileSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-EncodedCommand", encoded], { encoding: "utf8" });
-    expect(JSON.parse(out)).toEqual(args);
+    try {
+      const out = execFileSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-EncodedCommand", encoded], { encoding: "utf8" });
+      expect(JSON.parse(out)).toEqual(args);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
 
