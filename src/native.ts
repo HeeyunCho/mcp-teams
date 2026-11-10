@@ -186,6 +186,20 @@ function safeUsername(): string {
   }
 }
 
+/** Node's longest timer: a setTimeout over 2^31-1 ms fires at once (about 24.8 days). */
+const MAX_TIMER_MS = 2 ** 31 - 1;
+
+/**
+ * A timing the host reads from its environment (TEAMS_MCP_HUB_*_MS, for tests): a whole number of
+ * milliseconds above 0, clamped to Node's longest timer. Anything else (missing, 0, negative, not
+ * a number, a fraction) is rejected: undefined, so the default applies.
+ */
+export function msFromEnv(raw: string | undefined): number | undefined {
+  const v = Number(raw);
+  if (!raw?.trim() || !Number.isInteger(v) || v <= 0) return undefined;
+  return Math.min(v, MAX_TIMER_MS);
+}
+
 /**
  * Whether peers must prove the pairing token on the hub socket: only on Windows, where a named
  * pipe's default security lets every user open it and Node can't set a stricter one. A Unix

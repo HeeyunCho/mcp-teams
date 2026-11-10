@@ -251,6 +251,44 @@ describe("#123: the native host", { timeout: 30_000 }, () => {
     }
   });
 
+  it("#123: a relaying host whose holder challenges before the extension's hello, then goes quiet, still exits within the auth timeout", async () => {
+    h = await nativeHarness();
+    let challengedAt = 0;
+    const squatter = await squatOn(h.socket, (conn) => {
+      conn.send(JSON.stringify({ type: "challenge", nonce: "squat" }));
+      challengedAt = Date.now();
+    });
+    try {
+      // The extension holds its hello back: the challenge comes first, and nothing follows.
+      const ext = await h.host({ noHello: true, env: { TEAMS_MCP_HUB_AUTH_TIMEOUT_MS: String(AUTH_MS) } }, false);
+      expect(await ext.exited).toBe(1);
+      expect(challengedAt).toBeGreaterThan(0);
+      expect(Date.now() - challengedAt).toBeLessThan(AUTH_MS + 1_500);
+      expect(ext.received).toEqual([]);
+      expect(squatter.got).toEqual([]);
+      expect(h.logText()).toMatch(/ exit reason=the hub socket's holder sent no proven welcome in time/);
+    } finally {
+      await squatter.close();
+    }
+  });
+
+  it("#123: once the serving host has proved itself, the relay's deadline is off: calls go through long after it", async () => {
+    h = await nativeHarness();
+    const env = { TEAMS_MCP_HUB_AUTH_TIMEOUT_MS: String(AUTH_MS) };
+    await h.host({ env, browser: "Chrome", instance: "profile-1", handle: (r) => (r.method === "status" ? { teamsTabs: 0 } : { from: "chrome" }) });
+    const edge = await h.host({ env, browser: "Edge", instance: "profile-2", handle: (r) => (r.method === "status" ? { teamsTabs: 1, sessions: [{ sessionCaptured: true }] } : { from: "edge" }) });
+    expect(edge.welcome?.capabilities.features).toContain("native");
+    const t0 = Date.now();
+    const server = await h.server();
+    await until(() => server.extensions.length === 2, 3_000, "both browsers");
+    // Well past the deadline (more than three of them) ...
+    await until(() => Date.now() > t0 + 2_000, 5_000, "two seconds after the welcome");
+    // ... the relaying host still runs and passes calls both ways.
+    expect(edge.exitCode).toBeUndefined();
+    await expect(server.call("readMessages", {}, 3_000)).resolves.toEqual({ from: "edge" });
+    expect(edge.requests().some((r) => r.method === "readMessages")).toBe(true);
+  });
+
   it("#123: a relaying host holds at most 64 frames of its extension's before the welcome, then exits rather than grow", async () => {
     h = await nativeHarness();
     const squatter = await squatOn(h.socket, (conn) => conn.send(JSON.stringify({ type: "challenge", nonce: "squat" })));

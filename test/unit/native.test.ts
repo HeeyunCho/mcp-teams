@@ -10,6 +10,7 @@ import {
   FrameDecoder,
   hubSocketPath,
   MAX_TO_EXTENSION_BYTES,
+  msFromEnv,
   socketNeedsProof,
   toExtensionFrames,
 } from "../../src/native.js";
@@ -98,6 +99,23 @@ describe("#123: native framing", () => {
   it("is 1 MB and 512 KB, Chrome's limit and the slice size", () => {
     expect(MAX_TO_EXTENSION_BYTES).toBe(1_048_576);
     expect(CHUNK_DATA_BYTES).toBe(524_288);
+  });
+});
+
+describe("#123: the host's timings from its environment (TEAMS_MCP_HUB_*_MS)", () => {
+  it("takes a whole number of milliseconds above 0", () => {
+    expect(msFromEnv("600")).toBe(600);
+    expect(msFromEnv("30000")).toBe(30_000);
+  });
+
+  it("leaves the default for anything else: missing, empty, 0, negative, not a number, a fraction", () => {
+    for (const v of [undefined, "", " ", "0", "-5", "abc", "Infinity", "NaN", "1.5", "600.0001", "1e-3"]) expect(msFromEnv(v), String(v)).toBeUndefined();
+  });
+
+  it("clamps to Node's longest timer, 2^31-1 ms (about 24.8 days): longer ones would fire at once", () => {
+    expect(msFromEnv("2147483647")).toBe(2_147_483_647);
+    expect(msFromEnv("2147483648")).toBe(2_147_483_647);
+    expect(msFromEnv("1e12")).toBe(2_147_483_647);
   });
 });
 

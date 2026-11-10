@@ -29,12 +29,9 @@ import { DEFAULT_BRIDGE_OPTIONS, ExtensionBridge, MAX_MESSAGE_BYTES, proof, sock
 import { CONFIG_DIR, SERVER_VERSION, loadConfig } from "./config.js";
 import { EXTENSION_ORIGIN } from "./extension.js";
 import { errorFields, hubLog, trafficLogger } from "./hubLog.js";
-import { FrameDecoder, NativePort, hubSocketPath, socketNeedsProof } from "./native.js";
+import { FrameDecoder, NativePort, hubSocketPath, msFromEnv, socketNeedsProof } from "./native.js";
 
-const envMs = (name: string) => {
-  const v = Number(process.env[name]);
-  return Number.isFinite(v) && v > 0 ? v : undefined;
-};
+const envMs = (name: string) => msFromEnv(process.env[name]);
 /** How long the host keeps serving once no extension is connected (tests set it shorter). */
 const LINGER_MS = envMs("TEAMS_MCP_HUB_LINGER_MS") ?? 30_000;
 /** Ping period towards the extension and the peers (tests set it shorter). */
@@ -221,12 +218,16 @@ function relay(pending: Buffer[]): Promise<number> {
     const waiting = [...pending];
     let held = waiting.reduce((n, f) => n + f.length, 0); // bytes in `waiting`
     let helloSent = false;
+    /** From now on the holder has AUTH_TIMEOUT_MS to send its proven welcome. */
+    const awaitWelcome = () => {
+      clearTimeout(deadline);
+      deadline = setTimeout(() => refuse("the hub socket's holder sent no proven welcome in time"), AUTH_TIMEOUT_MS);
+    };
     const sendHello = (f: Buffer) => {
       helloSent = true;
       forward(f);
       // The welcome must come as soon as the serving host has the hello, as it comes to any client.
-      clearTimeout(deadline);
-      deadline = setTimeout(() => refuse("the hub socket's holder sent no proven welcome in time"), AUTH_TIMEOUT_MS);
+      awaitWelcome();
     };
     sink = (f) => {
       if (proven && ws.readyState === WebSocket.OPEN) return forward(f);
@@ -255,11 +256,13 @@ function relay(pending: Buffer[]): Promise<number> {
       if (!challenge) {
         if (msg?.type !== "challenge" || typeof msg.nonce !== "string") return refuse();
         challenge = msg.nonce;
-        clearTimeout(deadline);
         log("relay", { version: SERVER_VERSION });
-        // The hello first, alone: the serving host takes nothing else before it.
+        // The hello first, alone: the serving host takes nothing else before it. With no hello yet
+        // the clock runs from the challenge (an extension that never says hello gets no longer);
+        // a hello that comes later restarts it.
         const first = waiting.filter(isHello).at(-1) ?? hello;
         if (first) sendHello(first);
+        else awaitWelcome();
         return;
       }
       if (msg?.type !== "welcome" || !sameText(msg.proof, proof(config.token, "server:socket", nonce))) return refuse();
