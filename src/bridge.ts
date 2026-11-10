@@ -91,15 +91,15 @@ interface Pending {
   /** A send: after it is withdrawn its answer still counts for cancelGraceMs (the user may have clicked). */
   grace?: boolean;
   /** Hub: the extension connection the request went to. */
-  socket?: WebSocket;
+  socket?: BridgeSocket;
   /** Hub: the turn a queued call holds, given back while it waits out a throttle. */
   turn?: Turn;
 }
 
 /** Hub: a queued call's turn on an extension. */
 interface Turn {
-  queue: FairQueue<WebSocket | null>;
-  session: WebSocket | null;
+  queue: FairQueue<BridgeSocket | null>;
+  session: BridgeSocket | null;
   /** When the call stops waiting (its time limit or deadline). */
   end: number;
   held: boolean;
@@ -288,6 +288,92 @@ export function isNewer(a: unknown, b: unknown): boolean {
   return false;
 }
 
+// ------------------------------------------------------------------ transport
+
+/**
+ * One connection of the bridge: an extension or a peer (seen by the hub), or the hub (seen by a
+ * peer). Shaped like a ws WebSocket, which is the only transport so far; a native-messaging port
+ * or a hub socket (ADR 0001, #123) is wrapped to this shape. Ported from mcp-newoutlook
+ * src/bridge.ts BridgeSocket (commit 7ef8ac9), without its binary sends (Teams has no binary path).
+ *
+ * Events, as the ws WebSocket emits them: "message" (one whole message: Buffer or string),
+ * "close" (code), "error" (err; the connection closes afterwards), "ping" (the other side's
+ * heartbeat, which a peer watches) and "pong" (the answer to ping()).
+ */
+export interface BridgeSocket {
+  /** OPEN while messages can be sent. */
+  readonly readyState: number;
+  /** Bytes sent but not written out yet. */
+  readonly bufferedAmount: number;
+  send(data: string): void;
+  close(code?: number, reason?: string): void;
+  /** Drops the connection at once. */
+  terminate(): void;
+  ping(): void;
+  on(event: string, listener: (...args: any[]) => void): this;
+}
+
+/** BridgeSocket.readyState of an open connection (as WebSocket.OPEN). */
+export const OPEN = WebSocket.OPEN;
+
+/** Where a hub listens, once it listens. */
+export interface BridgeListener {
+  /** The TCP port it got (the free one, when asked for port 0); none for a listener without a port. */
+  readonly port?: number;
+  /** Stops listening; resolves once it has stopped. */
+  close(): Promise<void>;
+}
+
+/** What a listener tells the hub. */
+export interface ListenHandlers {
+  /** A new connection, not yet authenticated. `origin`: the Origin it sent (none: a local process). */
+  connection(conn: BridgeSocket, origin?: string): void;
+  /** The listener failed after it started listening. */
+  error(err: Error): void;
+}
+
+/** How a bridge listens as the hub and connects as a peer. */
+export interface BridgeTransport {
+  /** Starts listening. Rejects with the listen error, whose code is EADDRINUSE when another server holds the address. */
+  listen(handlers: ListenHandlers): Promise<BridgeListener>;
+  /** Connects to the hub listening there. */
+  connect(): BridgeSocket;
+}
+
+/**
+ * The bridge's WebSocket on 127.0.0.1:`port`. Only loopback, and never from a web page: browsers
+ * always send an Origin header, so a connection must come from an extension origin or from a
+ * local process (no Origin).
+ */
+export function webSocketTransport({ port, maxMessageBytes }: { port: number; maxMessageBytes: number }): BridgeTransport {
+  return {
+    listen: (handlers) =>
+      new Promise((resolve, reject) => {
+        const wss = new WebSocketServer({
+          host: "127.0.0.1",
+          port,
+          maxPayload: maxMessageBytes,
+          verifyClient: ({ origin }: { origin?: string; req: IncomingMessage }) => !origin || EXTENSION_ORIGIN.test(origin),
+        });
+        let listening = false;
+        wss.once("listening", () => {
+          listening = true;
+          resolve({
+            port: (wss.address() as { port: number }).port,
+            close: () => new Promise<void>((r) => wss.close(() => r())),
+          });
+        });
+        wss.on("error", (err: NodeJS.ErrnoException) => {
+          if (listening) return handlers.error(err);
+          wss.close();
+          reject(err);
+        });
+        wss.on("connection", (ws, req) => handlers.connection(ws, req.headers.origin));
+      }),
+    connect: () => new WebSocket(`ws://127.0.0.1:${port}`, { maxPayload: maxMessageBytes }),
+  };
+}
+
 function describeSocketError(err: NodeJS.ErrnoException, limit: number): string {
   return err.code === "WS_ERR_UNSUPPORTED_MESSAGE_LENGTH" ? LOST_CALL.tooLarge(Math.round(limit / 1024 / 1024)) : LOST_CALL.socketError(err.message);
 }
@@ -309,14 +395,14 @@ export class ExtensionBridge {
    */
   hubChecksSend = false;
 
-  private wss?: WebSocketServer;
-  private sockets = new Map<WebSocket, ExtensionInfo>(); // hub: the extensions
-  private preferred?: WebSocket; // hub: the extension that last answered a call
-  private hub?: WebSocket; // peer: the hub
-  private peers = new Set<WebSocket>();
-  private peerCalls = new Map<WebSocket, Map<string, AbortController>>(); // hub: each peer's calls, by the peer's id
+  private listener?: BridgeListener; // hub: where extensions and peers connect
+  private sockets = new Map<BridgeSocket, ExtensionInfo>(); // hub: the extensions
+  private preferred?: BridgeSocket; // hub: the extension that last answered a call
+  private hub?: BridgeSocket; // peer: the hub
+  private peers = new Set<BridgeSocket>();
+  private peerCalls = new Map<BridgeSocket, Map<string, AbortController>>(); // hub: each peer's calls, by the peer's id
   /** Hub: per extension connection, its turns (keyed by session: null for the hub's own calls, else the peer) and who waits. */
-  private turns = new Map<WebSocket, { queue: FairQueue<WebSocket | null>; waiting: Set<(err: Error) => void> }>();
+  private turns = new Map<BridgeSocket, { queue: FairQueue<BridgeSocket | null>; waiting: Set<(err: Error) => void> }>();
   private pending = new Map<string, Pending>();
   private keepAlive?: NodeJS.Timeout;
   private peerBeat?: NodeJS.Timeout; // hub: pings the peers
@@ -327,8 +413,8 @@ export class ExtensionBridge {
   private draining = false;
   /** Hub: calls being run (from run() until they settle), the hub's own and its peers'. */
   private active = 0;
-  private alive = new WeakSet<WebSocket>(); // hub: extensions and peers that answered the last ping
-  private backlogged = new WeakSet<WebSocket>(); // hub: peers over maxPeerBufferedBytes at the last tick
+  private alive = new WeakSet<BridgeSocket>(); // hub: extensions and peers that answered the last ping
+  private backlogged = new WeakSet<BridgeSocket>(); // hub: peers over maxPeerBufferedBytes at the last tick
   private legacyReloaded = false; // hub: an extension of 0.2.0 or older was told to reload
   private readonly opts: Required<BridgeOptions>;
   private boundPort?: number; // the port it got when it first listened (port 0 picks a free one); kept for later takeovers
@@ -395,8 +481,8 @@ export class ExtensionBridge {
   }
 
   get connected(): boolean {
-    if (this.role === "hub") return [...this.sockets.keys()].some((s) => s.readyState === WebSocket.OPEN);
-    if (this.role === "peer") return this.hub?.readyState === WebSocket.OPEN && !!this.extension;
+    if (this.role === "hub") return [...this.sockets.keys()].some((s) => s.readyState === OPEN);
+    if (this.role === "peer") return this.hub?.readyState === OPEN && !!this.extension;
     return false;
   }
 
@@ -407,32 +493,31 @@ export class ExtensionBridge {
 
   // ------------------------------------------------------------------ hub
 
-  private listen(): Promise<boolean> {
-    return new Promise((resolve) => {
-      const wss = new WebSocketServer({
-        host: "127.0.0.1",
-        port: this.port,
-        maxPayload: this.maxMessageBytes,
-        verifyClient: ({ origin }: { origin?: string; req: IncomingMessage }) => !origin || EXTENSION_ORIGIN.test(origin),
-      });
-      let listening = false;
-      wss.once("listening", () => {
-        listening = true;
-        this.wss = wss;
-        this.boundPort = (wss.address() as { port: number }).port;
-        resolve(true);
-      });
-      wss.on("error", (err: NodeJS.ErrnoException) => {
-        if (listening) return this.restartHub(LOST_CALL.serverError(err.message));
-        if (err.code !== "EADDRINUSE") this.listenError = err.message;
-        wss.close();
-        resolve(false);
-      });
-      wss.on("connection", (ws, req) => this.onConnection(ws, req.headers.origin));
-    });
+  /** How it listens and joins: the WebSocket on its port, the only transport so far (#123). */
+  private get transport(): BridgeTransport {
+    return webSocketTransport({ port: this.port, maxMessageBytes: this.maxMessageBytes });
   }
 
-  private onConnection(ws: WebSocket, origin?: string) {
+  private listen(): Promise<boolean> {
+    return this.transport
+      .listen({
+        connection: (conn, origin) => this.onConnection(conn, origin),
+        error: (err) => this.restartHub(LOST_CALL.serverError(err.message)),
+      })
+      .then(
+        (listener) => {
+          this.listener = listener;
+          this.boundPort = listener.port ?? this.boundPort;
+          return true;
+        },
+        (err: NodeJS.ErrnoException) => {
+          if (err.code !== "EADDRINUSE") this.listenError = err.message;
+          return false;
+        },
+      );
+  }
+
+  private onConnection(ws: BridgeSocket, origin?: string) {
     let authed = false;
     const authTimer = setTimeout(() => !authed && ws.close(4401, "auth timeout"), this.opts.authTimeoutMs);
     const challenge = newNonce();
@@ -495,7 +580,7 @@ export class ExtensionBridge {
    * connected, copies with another id (e.g. an older one loaded from another folder) are
    * turned away, and connecting ours replaces them.
    */
-  private acceptExtension(ws: WebSocket, msg: any, welcome: object, origin?: string) {
+  private acceptExtension(ws: BridgeSocket, msg: any, welcome: object, origin?: string) {
     const info: ExtensionInfo = {
       version: String(msg.version ?? "unknown"),
       browser: msg.browser,
@@ -515,7 +600,7 @@ export class ExtensionBridge {
         // Its calls fail now (below), before it sees the close: have it drop them first, so an
         // open confirmation window closes instead of posting on a click in between.
         for (const [id, p] of this.pending) {
-          if (p.socket !== s || s.readyState !== WebSocket.OPEN) continue;
+          if (p.socket !== s || s.readyState !== OPEN) continue;
           try {
             s.send(JSON.stringify({ type: "cancel", id }));
           } catch {
@@ -557,11 +642,11 @@ export class ExtensionBridge {
    * Every browser is asked at once, so one that doesn't answer delays the call by one status
    * wait (pickStatusTimeoutMs) at most.
    */
-  private async pickExtension(method: string): Promise<WebSocket | undefined> {
-    const open = [...this.sockets.keys()].filter((s) => s.readyState === WebSocket.OPEN);
+  private async pickExtension(method: string): Promise<BridgeSocket | undefined> {
+    const open = [...this.sockets.keys()].filter((s) => s.readyState === OPEN);
     if (open.length <= 1) return open[0];
     type Status = { teamsTabs?: number; sessions?: { sessionCaptured?: boolean }[] };
-    const status = (s: WebSocket) => this.send<Status>(s, "status", {}, this.opts.pickStatusTimeoutMs).catch(() => null);
+    const status = (s: BridgeSocket) => this.send<Status>(s, "status", {}, this.opts.pickStatusTimeoutMs).catch(() => null);
     const hasTab = (st: Status | null) => (st?.teamsTabs ?? 0) > 0;
     const needsTab = NEEDS_TEAMS_TAB.has(method);
     const preferred = this.preferred && open.includes(this.preferred) ? this.preferred : undefined;
@@ -584,7 +669,7 @@ export class ExtensionBridge {
    * origin, so it gets no calls. It is asked once to reload, which loads the update this
    * server put in its folder, and the new version connects with a proof.
    */
-  private reloadLegacy(ws: WebSocket) {
+  private reloadLegacy(ws: BridgeSocket) {
     if (!this.legacyReloaded) {
       this.legacyReloaded = true;
       ws.send(JSON.stringify({ type: "request", id: randomUUID(), method: "reload", params: {}, timeoutMs: 10_000 }));
@@ -592,7 +677,7 @@ export class ExtensionBridge {
     setTimeout(() => ws.close(4426, "extension update required"), 1_000).unref();
   }
 
-  private acceptPeer(ws: WebSocket, peerVersion: unknown, welcome: object) {
+  private acceptPeer(ws: BridgeSocket, peerVersion: unknown, welcome: object) {
     this.peers.add(ws);
     // heartbeatMs: this hub pings the peer that often, so the peer can tell when it stops.
     ws.send(
@@ -633,8 +718,8 @@ export class ExtensionBridge {
 
   /** Hub: closes the server and every connection, then becomes a hub or peer again. */
   private restartHub(reason: string, delayMs = 100 + Math.random() * 400) {
-    const wss = this.wss;
-    this.wss = undefined;
+    const listener = this.listener;
+    this.listener = undefined;
     this.role = "none";
     clearInterval(this.keepAlive);
     this.stopPeerBeat();
@@ -647,14 +732,14 @@ export class ExtensionBridge {
     this.preferred = undefined;
     this.extension = undefined;
     this.extensions = [];
-    wss?.close();
+    void listener?.close();
     if (this.closed) return;
     clearTimeout(this.retry);
     this.retry = setTimeout(() => void this.start(), delayMs);
     this.retry.unref();
   }
 
-  private onExtensionMessage(ws: WebSocket, msg: any) {
+  private onExtensionMessage(ws: BridgeSocket, msg: any) {
     if (typeof msg.id !== "string") return;
     if (msg.type === "response") return this.settle(msg);
     // A queued call waiting out a throttle (35): {type:"gate-wait"} gives its turn back to the
@@ -673,7 +758,7 @@ export class ExtensionBridge {
           turn.rejoin = undefined;
           if (turn.done) return turn.queue.release(turn.session);
           turn.held = true;
-          if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: "turn", id: msg.id }));
+          if (ws.readyState === OPEN) ws.send(JSON.stringify({ type: "turn", id: msg.id }));
         },
         () => (turn.rejoin = undefined),
       );
@@ -681,7 +766,7 @@ export class ExtensionBridge {
   }
 
   /** Runs a peer's call against the extension and sends back the outcome; {type:"cancel", id} withdraws it. */
-  private onPeerMessage(ws: WebSocket, msg: any) {
+  private onPeerMessage(ws: BridgeSocket, msg: any) {
     if (msg.type === "cancel" && typeof msg.id === "string") return void this.peerCalls.get(ws)?.get(msg.id)?.abort();
     if (msg.type !== "request" || typeof msg.id !== "string") return;
     const reply = (body: object) => {
@@ -716,14 +801,14 @@ export class ExtensionBridge {
    * waiting is closed instead; a smaller backlog only when it lasts (see startPeerBeat), so a
    * burst of large answers doesn't drop a healthy peer.
    */
-  private sendToPeer(ws: WebSocket, text: string) {
-    if (ws.readyState !== WebSocket.OPEN) return;
+  private sendToPeer(ws: BridgeSocket, text: string) {
+    if (ws.readyState !== OPEN) return;
     if (ws.bufferedAmount > this.opts.maxPeerBufferedBytes * PEER_BUFFER_HARD_CAP) return this.closeSlowPeer(ws);
     ws.send(text);
   }
 
   /** Hub: closes a peer that isn't reading its answers (1013); its calls are withdrawn and it connects again. */
-  private closeSlowPeer(ws: WebSocket) {
+  private closeSlowPeer(ws: BridgeSocket) {
     console.error(`[mcp-teams] closing a peer that doesn't read its answers (${Math.round(ws.bufferedAmount / 1024 / 1024)} MB waiting)`);
     this.peers.delete(ws);
     // Its close may wait for the backlog; its calls are withdrawn now (as on close).
@@ -736,7 +821,7 @@ export class ExtensionBridge {
    * Pings keep the MV3 service worker alive while connected. A connection that didn't
    * answer the previous WebSocket ping (a suspended or crashed browser) is dropped.
    */
-  private startKeepAlive(ws?: WebSocket) {
+  private startKeepAlive(ws?: BridgeSocket) {
     if (ws) {
       this.alive.add(ws);
       ws.on("pong", () => this.alive.add(ws));
@@ -747,7 +832,7 @@ export class ExtensionBridge {
       // After a stall a pong may wait unread: no drops at this tick (see STALL_SLACK).
       const stalled = late();
       for (const s of this.sockets.keys()) {
-        if (s.readyState !== WebSocket.OPEN) continue;
+        if (s.readyState !== OPEN) continue;
         if (!stalled && !this.alive.has(s)) {
           s.terminate();
           continue;
@@ -766,7 +851,7 @@ export class ExtensionBridge {
    * that stops pinging them (see join). A peer over maxPeerBufferedBytes at this tick and the
    * previous one isn't draining its answers and is closed (1013).
    */
-  private startPeerBeat(ws: WebSocket) {
+  private startPeerBeat(ws: BridgeSocket) {
     this.alive.add(ws);
     ws.on("pong", () => this.alive.add(ws));
     if (this.peerBeat) return;
@@ -775,7 +860,7 @@ export class ExtensionBridge {
       if (!this.peers.size) return this.stopPeerBeat();
       const stalled = late();
       for (const p of this.peers) {
-        if (p.readyState !== WebSocket.OPEN) continue;
+        if (p.readyState !== OPEN) continue;
         if (stalled) {
           // This hub stalled: a pong may wait unread, and its own writes didn't drain. Judge
           // nothing at this tick (see STALL_SLACK), and leave the backlog as the last tick saw
@@ -814,7 +899,7 @@ export class ExtensionBridge {
 
   private join(): Promise<boolean> {
     return new Promise((resolve) => {
-      const ws = new WebSocket(`ws://127.0.0.1:${this.port}`, { maxPayload: this.maxMessageBytes });
+      const ws = this.transport.connect();
       let joined = false;
       let challenged = false;
       let forged = false;
@@ -928,7 +1013,7 @@ export class ExtensionBridge {
   }
 
   /** A call from `session` (null: this server's own, else the peer it came from). */
-  private async run<T>(session: WebSocket | null, method: string, params: unknown = {}, timeoutMs = 60_000, signal?: AbortSignal, deadline?: number): Promise<T> {
+  private async run<T>(session: BridgeSocket | null, method: string, params: unknown = {}, timeoutMs = 60_000, signal?: AbortSignal, deadline?: number): Promise<T> {
     // A hub that drains before it closes starts no new call (#112), its own session's included.
     if (this.draining) throw new Error(NOT_SENT.hubClosing);
     const counted = this.role === "hub";
@@ -940,7 +1025,7 @@ export class ExtensionBridge {
     }
   }
 
-  private async runCall<T>(session: WebSocket | null, method: string, params: unknown, timeoutMs: number, signal?: AbortSignal, deadline?: number): Promise<T> {
+  private async runCall<T>(session: BridgeSocket | null, method: string, params: unknown, timeoutMs: number, signal?: AbortSignal, deadline?: number): Promise<T> {
     if (method === "reloadAll" && this.role === "hub") return this.reloadAll(timeoutMs) as Promise<T>;
     const target = this.role === "hub" ? await this.pickExtension(method) : this.role === "peer" ? this.hub : undefined;
     if (!this.connected || !target) {
@@ -992,7 +1077,7 @@ export class ExtensionBridge {
    * Hub: waits for one of the extension's maxConcurrentCalls turns, fairly between sessions.
    * Cancelling or reaching `end` first leaves the line, and the call is never sent.
    */
-  private takeTurn(target: WebSocket, session: WebSocket | null, end: number, signal?: AbortSignal): Promise<FairQueue<WebSocket | null>> {
+  private takeTurn(target: BridgeSocket, session: BridgeSocket | null, end: number, signal?: AbortSignal): Promise<FairQueue<BridgeSocket | null>> {
     let turns = this.turns.get(target);
     if (!turns) this.turns.set(target, (turns = { queue: new FairQueue(this.opts.maxConcurrentCalls), waiting: new Set() }));
     const { queue, waiting } = turns;
@@ -1018,7 +1103,7 @@ export class ExtensionBridge {
   }
 
   /** Hub: fails the calls still waiting for a turn on `socket` (every socket when not given); they were never sent. */
-  private dropTurns(socket?: WebSocket) {
+  private dropTurns(socket?: BridgeSocket) {
     for (const [s, { waiting }] of this.turns) {
       if (socket && s !== socket) continue;
       this.turns.delete(s);
@@ -1028,7 +1113,7 @@ export class ExtensionBridge {
 
   /** Hub: asks every connected browser's extension to reload itself. */
   private async reloadAll(timeoutMs: number) {
-    const open = [...this.sockets.keys()].filter((s) => s.readyState === WebSocket.OPEN);
+    const open = [...this.sockets.keys()].filter((s) => s.readyState === OPEN);
     if (!open.length) throw new Error("Browser extension is not connected.");
     const results = await Promise.allSettled(open.map((s) => this.send(s, "reload", {}, timeoutMs)));
     const failed = results.filter((r): r is PromiseRejectedResult => r.status === "rejected");
@@ -1037,7 +1122,7 @@ export class ExtensionBridge {
   }
 
   /** Sends one request on a connection (an extension for the hub, the hub for a peer). */
-  private send<T>(target: WebSocket, method: string, params: unknown, timeoutMs: number, signal?: AbortSignal, deadline?: number, turn?: Turn): Promise<T> {
+  private send<T>(target: BridgeSocket, method: string, params: unknown, timeoutMs: number, signal?: AbortSignal, deadline?: number, turn?: Turn): Promise<T> {
     if (signal?.aborted) return Promise.reject(cancelledError());
     const id = randomUUID();
     const now = Date.now();
@@ -1072,7 +1157,7 @@ export class ExtensionBridge {
    * outcome, and a confirmation window that closed reports "nothing was sent". Without an
    * answer by then, the call fails with `err`.
    */
-  private withdraw(id: string, target: WebSocket, err: Error) {
+  private withdraw(id: string, target: BridgeSocket, err: Error) {
     const p = this.pending.get(id);
     if (!p || p.withdrawn) return;
     p.withdrawn = true;
@@ -1082,7 +1167,7 @@ export class ExtensionBridge {
       this.pending.delete(id);
       p.reject(err);
     };
-    if (target.readyState !== WebSocket.OPEN) return fail();
+    if (target.readyState !== OPEN) return fail();
     try {
       target.send(JSON.stringify({ type: "cancel", id }));
     } catch {
@@ -1124,7 +1209,7 @@ export class ExtensionBridge {
   }
 
   /** Fails the pending calls (only those sent on `socket`, when given). */
-  private rejectAll(reason: string, socket?: WebSocket) {
+  private rejectAll(reason: string, socket?: BridgeSocket) {
     for (const [id, p] of this.pending) {
       if (socket && p.socket !== socket) continue;
       clearTimeout(p.timer);
@@ -1160,7 +1245,7 @@ export class ExtensionBridge {
           // The bound ran out: have the extension drop what is still running first, so an open
           // confirmation window closes rather than posting on a click before it sees the close.
           for (const [id, p] of this.pending) {
-            if (p.socket?.readyState !== WebSocket.OPEN) continue;
+            if (p.socket?.readyState !== OPEN) continue;
             try {
               p.socket.send(JSON.stringify({ type: "cancel", id }));
             } catch {
@@ -1183,6 +1268,6 @@ export class ExtensionBridge {
     this.hub?.close();
     for (const s of this.sockets.keys()) s.close();
     for (const peer of this.peers) peer.close();
-    await new Promise<void>((r) => (this.wss ? this.wss.close(() => r()) : r()));
+    await this.listener?.close();
   }
 }
