@@ -53,3 +53,9 @@ _Avoid_: old server, outdated server
 **Handover**:
 One hub giving its place to a newer one without failing the calls it has in flight.
 _Avoid_: takeover, failover, step-down
+
+### Teams accounts
+
+**Unsure account**:
+The state of the signed-in account when it isn't certain which account Teams shows: the previous account showed again within 30 s of a switch (its request ignored, or switching back). It lasts until that switch's 30 s are over; meanwhile sends are refused and reads go on, with a note.
+_Avoid_: ambiguous account, account conflict
