@@ -4,10 +4,10 @@
 // peers only, and the old server comes back as its peer there.
 //
 // It installs mcp-teams@0.3.52 from npm into a temporary folder (with --ignore-scripts), so it
-// needs the network. Offline it skips: when registry.npmjs.org doesn't resolve within 5 s, or when
-// npm fails with a network error (ENOTFOUND, EAI_AGAIN, ETIMEDOUT, ECONNREFUSED, ECONNRESET).
+// needs the network. Offline it skips (npmVerdict, test/helpers/offline.ts): when registry.npmjs.org
+// doesn't resolve within 5 s, when npm fails with ENOTFOUND, EAI_AGAIN or ECONNREFUSED, or with
+// ECONNRESET or ETIMEDOUT once the registry no longer resolves either. With CI set it fails instead.
 import { spawn, spawnSync, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { lookup } from "node:dns/promises";
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -15,29 +15,27 @@ import { afterEach, describe, expect, it } from "vitest";
 import { SERVER_VERSION } from "../../src/config.js";
 import { fakeExtension, TOKEN } from "../helpers/bridgeHarness.js";
 import { nativeHarness } from "../helpers/nativeHost.js";
+import { npmVerdict, registryResolves, type Verdict } from "../helpers/offline.js";
 import { until } from "../helpers/timing.js";
 
 const OLD = "0.3.52";
-const NETWORK_ERROR = /ENOTFOUND|EAI_AGAIN|ETIMEDOUT|ECONNREFUSED|ECONNRESET|network/i;
 
 const cleanups: (() => unknown)[] = [];
 afterEach(async () => {
   for (const c of cleanups.splice(0).reverse()) await c();
 });
 
-/** Why this machine can't reach npm, or undefined when it can. */
-async function offline(): Promise<string | undefined> {
-  const timeout = new Promise<string>((r) => setTimeout(() => r("registry.npmjs.org did not resolve within 5 s"), 5_000).unref());
-  return Promise.race([lookup("registry.npmjs.org").then(() => undefined, (err: Error) => `registry.npmjs.org does not resolve (${err.message})`), timeout]);
-}
-
 describe("#123 decision 8: an old TCP hub hands over to the native host", () => {
   it(`#123: the real mcp-teams@${OLD} on the port hands it to the host and joins it as a peer`, { timeout: 540_000 }, async (ctx) => {
-    const why = await offline();
-    if (why) {
-      console.warn(`skipped: ${why}`);
-      return ctx.skip(`offline: ${why}`);
-    }
+    const ci = !!process.env.CI;
+    const decide = (v: Verdict) => {
+      if (v.verdict === "fail") throw new Error(v.reason);
+      if (v.verdict === "skip") {
+        console.warn(`skipped: ${v.reason}`);
+        ctx.skip(v.reason);
+      }
+    };
+    if (!(await registryResolves())) decide(npmVerdict(undefined, { ci, resolves: false }));
     const dir = mkdtempSync(join(tmpdir(), "mt-old-"));
     cleanups.push(() => rmSync(dir, { recursive: true, force: true }));
     // npm's own script next to this node when it is there (no shell needed for npm.cmd on Windows).
@@ -46,16 +44,8 @@ describe("#123 decision 8: an old TCP hub hands over to the native host", () => 
     const install = existsSync(npmCli)
       ? spawnSync(process.execPath, [npmCli, ...args], { encoding: "utf8", timeout: 420_000 })
       : spawnSync(process.platform === "win32" ? "npm.cmd" : "npm", args, { encoding: "utf8", timeout: 420_000, shell: process.platform === "win32" });
-    if (install.status !== 0) {
-      const out = `${install.stderr ?? ""}${install.error?.message ?? ""}`;
-      // Its own time limit is a failure, not a sign of being offline (the lookup above worked).
-      if (install.signal) throw new Error(`npm install mcp-teams@${OLD} took over 420 s (${install.signal}):\n${out}`);
-      if (NETWORK_ERROR.test(out)) {
-        console.warn(`skipped: npm install failed with a network error: ${out.trim().split("\n").at(-1)}`);
-        return ctx.skip(`offline: npm install failed (${out.trim().split("\n").at(-1)})`);
-      }
-      throw new Error(`npm install mcp-teams@${OLD} failed:\n${out}`);
-    }
+    const run = { status: install.status, signal: install.signal, stderr: `${install.stderr ?? ""}${install.error?.message ?? ""}` };
+    if (run.status !== 0) decide(npmVerdict(run, { ci, resolves: await registryResolves() }));
 
     // The old server, as an AI app starts it: its own home (pairing token, port 0), stdin open.
     const oldHome = join(dir, "home");
