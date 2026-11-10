@@ -47,8 +47,11 @@ describe("lost calls", () => {
     expect(src).toMatch(/const cancelledError = \(\) => new Error\(LOST_CALL\./);
     // Socket errors too (they fail every pending call on that connection).
     // From the function to its end (the first line that closes a top-level block), so code placed after it doesn't count.
+    // Either line ending: a Windows checkout without .gitattributes has CRLF.
     const from = src.indexOf("function describeSocketError");
-    const socketErrors = src.slice(from, src.indexOf("\n}\n", from));
+    const end = src.slice(from).search(/\r?\n\}\r?\n/);
+    expect(end).toBeGreaterThan(0);
+    const socketErrors = src.slice(from, from + end);
     expect(socketErrors).toMatch(/^function describeSocketError/);
     // (It may compare an error code with a string, but builds no message of its own.)
     expect(socketErrors).not.toMatch(/`/);
