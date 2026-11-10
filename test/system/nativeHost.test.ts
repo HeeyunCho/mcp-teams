@@ -4,9 +4,9 @@
 // Ported from mcp-newoutlook test/system/nativehost.test.ts (commit c18139c).
 import { statSync } from "node:fs";
 import { afterEach, describe, expect, it } from "vitest";
-import { socketTransport } from "../../src/bridge.js";
+import { proof, socketTransport } from "../../src/bridge.js";
 import { SERVER_VERSION } from "../../src/config.js";
-import { fakeExtension } from "../helpers/bridgeHarness.js";
+import { fakeExtension, TOKEN } from "../helpers/bridgeHarness.js";
 import { nativeHarness } from "../helpers/nativeHost.js";
 import { until } from "../helpers/timing.js";
 
@@ -158,6 +158,50 @@ describe("#123: the native host", { timeout: 30_000 }, () => {
     await expect(server.call("readMessages", {}, 3_000)).resolves.toEqual({ from: "edge" });
     expect(edge.exitCode).toBeUndefined();
   });
+
+  // Another local user can create the Windows pipe while no host runs; the next host then relays to it.
+  const squatters: Record<string, (hello: any) => object[]> = {
+    "sends a request at once, with no welcome": () => [{ type: "request", id: "r1", method: "requestSend", params: { chatId: "19:x", text: "posted by a squatter" } }],
+    "welcomes without a proof": () => [{ type: "welcome", serverVersion: "9.9.9" }, { type: "request", id: "r2", method: "readMessages", params: {} }],
+    "welcomes with a wrong proof": (hello) => [
+      { type: "welcome", serverVersion: "9.9.9", proof: proof("not-the-token", "server:socket", String(hello.nonce)) },
+      { type: "request", id: "r3", method: "readMessages", params: {} },
+    ],
+    "welcomes with a proof made for the TCP port": (hello) => [
+      { type: "welcome", serverVersion: "9.9.9", proof: proof(TOKEN, "server", String(hello.nonce)) },
+      { type: "request", id: "r4", method: "readMessages", params: {} },
+    ],
+  };
+  for (const [what, answer] of Object.entries(squatters)) {
+    it(`#123: a relaying host checks the pipe holder is the serving host: one that ${what} gets nothing through, and the host exits`, async () => {
+      h = await nativeHarness();
+      const hellos: any[] = [];
+      const squatter = await socketTransport({ path: h.socket, maxMessageBytes: 1 << 20 }).listen({
+        connection: (conn) => {
+          conn.send(JSON.stringify({ type: "challenge", nonce: "squat" }));
+          conn.on("message", (raw: Buffer) => {
+            const msg = JSON.parse(raw.toString());
+            if (msg.type !== "hello") return;
+            hellos.push(msg);
+            for (const m of answer(msg)) conn.send(JSON.stringify(m));
+          });
+        },
+        error: () => {},
+      });
+      try {
+        const ext = await h.host({}, false);
+        expect(await ext.exited).toBe(1);
+        expect(hellos).toHaveLength(1);
+        // It asked the holder to prove itself ...
+        expect(typeof hellos[0].nonce).toBe("string");
+        // ... and passed nothing of the holder's to the extension.
+        expect(ext.received.filter((m) => m.type === "request" || m.type === "welcome")).toEqual([]);
+        expect(h.logText()).toMatch(/ exit reason=the hub socket's holder failed its proof/);
+      } finally {
+        await squatter.close();
+      }
+    });
+  }
 
   for (const code of [4401, 4409]) {
     it(`#123: a relaying host the serving host refuses (${code}) exits, so the extension connects again`, async () => {

@@ -22,6 +22,7 @@
  * host's challenge with a proof of the pairing token (Outlook sends the token itself), and there
  * is no late-answer log or build-mismatch line yet.
  */
+import { randomBytes, timingSafeEqual } from "node:crypto";
 import { join } from "node:path";
 import WebSocket from "ws";
 import { ExtensionBridge, MAX_MESSAGE_BYTES, proof, socketTransport, type BridgeSocket } from "./bridge.js";
@@ -164,47 +165,81 @@ async function becomeHost(replay: Buffer[]): Promise<boolean> {
 
 // ------------------------------------------------------------------ relaying host
 
+/** Compares a proof in constant time; false for anything but a string of the same length. */
+function sameText(a: unknown, b: string): boolean {
+  if (typeof a !== "string") return false;
+  const x = Buffer.from(a);
+  const y = Buffer.from(b);
+  return x.length === y.length && timingSafeEqual(x, y);
+}
+
 let relaySocket: BridgeSocket | undefined;
 
 /**
  * Passes the extension's messages to the serving host on the hub socket and back; resolves with
- * the close code. The serving host's challenge is answered here: the extension's hello goes on
- * with a proof of the pairing token (the serving host checks it where the socket is a Windows
- * pipe), and every other message passes through unchanged.
+ * the close code. Both sides prove the pairing token here, as a peer and its hub do:
+ * - the serving host's challenge is answered with the extension's hello, a proof of the token
+ *   ("client:socket") and this host's own nonce;
+ * - nothing from the hub socket reaches the extension, and nothing of the extension's but that
+ *   hello goes there, until the welcome carries proof(token, "server:socket", nonce). Anything
+ *   else first (another user's program holding the Windows pipe while no host ran) ends this
+ *   host: the extension's port closes and it connects again.
+ * After that every message passes through unchanged.
  */
 function relay(pending: Buffer[]): Promise<number> {
   return new Promise((resolve) => {
     const ws = socketTransport({ path: socketPath, maxMessageBytes: MAX_MESSAGE_BYTES }).connect();
     relaySocket = ws;
+    const nonce = randomBytes(24).toString("base64url");
     let challenge: string | undefined;
+    let proven = false;
     const prepare = (f: Buffer) =>
-      isHello(f) && challenge ? JSON.stringify({ ...JSON.parse(f.toString("utf8")), proof: proof(config.token, "client:socket", challenge) }) : f.toString("utf8");
+      isHello(f) && challenge
+        ? JSON.stringify({ ...JSON.parse(f.toString("utf8")), proof: proof(config.token, "client:socket", challenge), nonce })
+        : f.toString("utf8");
     // Logged as the serving host's NativePort logs what it receives (the frame as the extension sent it, without the proof).
     const forward = (f: Buffer) => {
       traffic("in", f);
       ws.send(prepare(f));
     };
     const waiting = [...pending];
-    sink = (f) => (challenge && ws.readyState === WebSocket.OPEN ? forward(f) : waiting.push(f));
+    let helloSent = false;
+    const sendHello = (f: Buffer) => {
+      helloSent = true;
+      forward(f);
+    };
+    sink = (f) => {
+      if (proven && ws.readyState === WebSocket.OPEN) return forward(f);
+      // A hello that comes after the challenge goes on at once; the rest waits for the welcome's proof.
+      if (challenge && !helloSent && isHello(f)) return sendHello(f);
+      waiting.push(f);
+    };
+    const refuse = () => {
+      log("exit", { reason: "the hub socket's holder failed its proof" });
+      ws.terminate();
+      process.exit(1);
+    };
     ws.on("message", (raw: Buffer) => {
+      if (proven) return port.send(raw.toString("utf8"));
+      let msg: any;
+      try {
+        msg = JSON.parse(raw.toString("utf8"));
+      } catch {
+        return refuse();
+      }
       if (!challenge) {
-        let msg: any;
-        try {
-          msg = JSON.parse(raw.toString("utf8"));
-        } catch {
-          return;
-        }
-        if (msg?.type !== "challenge" || typeof msg.nonce !== "string") return;
+        if (msg?.type !== "challenge" || typeof msg.nonce !== "string") return refuse();
         challenge = msg.nonce;
         log("relay", { version: SERVER_VERSION });
-        // The hello first: the serving host takes nothing else before it.
-        const hellos = waiting.filter(isHello);
-        const first = hellos.at(-1) ?? hello;
-        if (first) forward(first);
-        for (const f of waiting.splice(0)) if (!isHello(f)) forward(f);
+        // The hello first, alone: the serving host takes nothing else before it.
+        const first = waiting.filter(isHello).at(-1) ?? hello;
+        if (first) sendHello(first);
         return;
       }
+      if (msg?.type !== "welcome" || !sameText(msg.proof, proof(config.token, "server:socket", nonce))) return refuse();
+      proven = true;
       port.send(raw.toString("utf8"));
+      for (const f of waiting.splice(0)) if (!isHello(f)) forward(f);
     });
     ws.on("error", () => {});
     ws.on("close", (code: number) => {
