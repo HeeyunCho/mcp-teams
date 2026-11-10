@@ -62,4 +62,17 @@ describe("loadConfig", () => {
     const loadConfig = await load({ autoSendTo: "not an address" });
     expect(() => loadConfig()).toThrow(/autoSendTo .* is not an email address/);
   });
+
+  // #123 decision 2: the native host stays off until PR 5 turns the default on; "nativeHost": false stays the way back.
+  it("#123: nativeHost is off unless config.json says true", async () => {
+    const nativeHost = async (stored: object) => {
+      const value = (await load(stored))().nativeHost;
+      rmSync(home!, { recursive: true, force: true });
+      return value;
+    };
+    expect(await nativeHost({})).toBe(false);
+    expect(await nativeHost({ nativeHost: false })).toBe(false);
+    expect(await nativeHost({ nativeHost: "yes" })).toBe(false);
+    expect(await nativeHost({ nativeHost: true })).toBe(true);
+  });
 });
