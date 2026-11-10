@@ -9,6 +9,7 @@ import { setup } from "./setup.js";
 import { installedVersion, PACKAGED_EXTENSION_DIR, syncExtension, writePairing } from "./extension.js";
 import { isNewer } from "./bridge.js";
 import { reloadUntilUpdated } from "./extensionUpdate.js";
+import { hubSocketPath } from "./native.js";
 
 // A stray error in a socket callback must not end the server (the AI app would show it
 // as "failed"); log it on stderr, which isn't the MCP channel.
@@ -44,7 +45,10 @@ if (installed !== null && !["token", "version", "--version"].includes(command)) 
   }
 }
 
-const bridge = new ExtensionBridge(config.port, config.token, SERVER_VERSION);
+// With "nativeHost": true in config.json (off by default until #123's PR 5), the server first
+// looks for the native host on its hub socket and moves to it from TCP once it has the extension.
+// Off, it never touches the socket: TCP only, as before.
+const bridge = new ExtensionBridge(config.port, config.token, SERVER_VERSION, config.nativeHost ? { hubSocket: hubSocketPath() } : {});
 await bridge.start();
 
 if (command === "setup") {

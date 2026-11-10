@@ -26,6 +26,12 @@ export interface Config {
    * every send.
    */
   autoSendTo: string[];
+  /**
+   * Whether this server looks for the native host on the hub socket, and whether the native host
+   * (dist/hub.js) runs at all (#123, ADR 0001). Off unless config.json says `"nativeHost": true`;
+   * PR 5 of #123 turns the default on, and `"nativeHost": false` stays the way back to TCP only.
+   */
+  nativeHost: boolean;
 }
 
 export const CONFIG_DIR = process.env.TEAMS_MCP_HOME ?? join(homedir(), ".mcp-teams");
@@ -66,6 +72,7 @@ export function loadConfig(): Config {
     port: Number(process.env.TEAMS_MCP_PORT ?? stored.port ?? 47393),
     token: stored.token,
     autoSendTo: parseAutoSendTo(stored.autoSendTo),
+    nativeHost: stored.nativeHost === true,
   };
 }
 

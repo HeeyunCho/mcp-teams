@@ -73,7 +73,7 @@ function capText<T extends Message>(messages: T[], maxLength: number): T[] {
 }
 
 /** What the tools use from the config; autoSendTo may be left out (no auto-send). */
-export type ToolsConfig = Omit<Config, "autoSendTo"> & { autoSendTo?: string[] };
+export type ToolsConfig = Omit<Config, "autoSendTo" | "nativeHost"> & { autoSendTo?: string[] };
 
 /**
  * For tests. build: a dist/ folder whose build.json is taken as the running build (read now) and as the
