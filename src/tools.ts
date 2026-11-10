@@ -153,8 +153,9 @@ export function registerTools(server: McpServer, bridge: ExtensionBridge, config
           ...(bridge.role === "peer" && bridge.hubCapabilities ? { hub: bridge.hubCapabilities } : {}),
           ...(bridge.extension ? { extension: declaredBy(bridge.extension) } : {}),
         },
-        // How the extension reaches the hub: only the WebSocket until the native host (ADR 0001) ships.
-        transport: "websocket",
+        // How the extension that calls go to reaches the hub (#123): native messaging or the WebSocket;
+        // null without one. A hub from before #123 doesn't say, and had only the WebSocket.
+        transport: bridge.extension ? (bridge.extension.transport ?? "websocket") : null,
         // The port the bridge uses (with port 0 configured, the free one it got).
         port: bridge.port,
         teams,

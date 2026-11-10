@@ -45,7 +45,7 @@ describe("ExtensionBridge", () => {
       }
     });
     await until(() => bridge!.connected, 3_000, "the extension to connect");
-    expect(bridge.extension).toEqual({ version: "0.1.0", browser: "Edge", origin: ORIGIN, capabilities: { features: [], maxMessageBytes: null } });
+    expect(bridge.extension).toEqual({ version: "0.1.0", browser: "Edge", origin: ORIGIN, capabilities: { features: [], maxMessageBytes: null }, transport: "websocket" });
     await expect(bridge.call("ping", { a: 1 })).resolves.toEqual({ echo: "ping", p: { a: 1 } });
     ws.close();
   });
@@ -180,7 +180,7 @@ describe("ExtensionBridge with several sessions", () => {
     fakeExtension();
     await until(() => peer.connected, 3_000, "the peer to see the extension"); // the hub tells peers when the extension connects
     // Peers learn where the extension connected from too (setup checks it is ours).
-    expect(peer.extension).toEqual({ version: "0.1.0", browser: "Edge", origin: ORIGIN, capabilities: { features: [], maxMessageBytes: null } });
+    expect(peer.extension).toEqual({ version: "0.1.0", browser: "Edge", origin: ORIGIN, capabilities: { features: [], maxMessageBytes: null }, transport: "websocket" });
     await expect(peer.call("search", { q: 1 })).resolves.toEqual({ echo: "search", p: { q: 1 } });
     await expect(hub.call("read")).resolves.toEqual({ echo: "read", p: {} });
   });

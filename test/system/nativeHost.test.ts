@@ -3,9 +3,13 @@
 // built file, so it lives with the system tests (`npm run build` first).
 // Ported from mcp-newoutlook test/system/nativehost.test.ts (commit c18139c).
 import { statSync } from "node:fs";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { afterEach, describe, expect, it } from "vitest";
-import { proof, socketTransport, type BridgeSocket } from "../../src/bridge.js";
+import { proof, socketTransport, type BridgeSocket, type ExtensionBridge } from "../../src/bridge.js";
 import { SERVER_VERSION } from "../../src/config.js";
+import { registerTools } from "../../src/tools.js";
 import { fakeExtension, TOKEN } from "../helpers/bridgeHarness.js";
 import { nativeHarness } from "../helpers/nativeHost.js";
 import { until } from "../helpers/timing.js";
@@ -15,6 +19,18 @@ afterEach(async () => {
   await h?.cleanup();
   h = undefined;
 });
+
+/** get_version through `bridge`'s tools, parsed. */
+async function getVersion(bridge: ExtensionBridge) {
+  const server = new McpServer({ name: "mcp-teams", version: "0.0.0" });
+  registerTools(server, bridge, { port: bridge.port, token: TOKEN });
+  const client = new Client({ name: "test", version: "0.0.0" });
+  const [a, b] = InMemoryTransport.createLinkedPair();
+  await Promise.all([server.connect(a), client.connect(b)]);
+  const r = (await client.callTool({ name: "get_version", arguments: {} })) as { content: { text: string }[] };
+  await client.close();
+  return JSON.parse(r.content[0].text);
+}
 
 const unixOnly = it.skipIf(process.platform === "win32");
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -153,6 +169,17 @@ describe("#123: the native host", { timeout: 30_000 }, () => {
     const edge = await h.host({ browser: "Edge", instance: "profile-2", nonce: "edge-nonce" });
     expect(h.logText()).toMatch(new RegExp(` pid=${edge.child.pid} relay version=`));
     expect(edge.welcome.proof).toBe(proof(TOKEN, "server", "edge-nonce"));
+  });
+
+  it("#123: get_version on a server of the host says the extension came by native messaging, served directly and relayed", async () => {
+    h = await nativeHarness();
+    await h.host({ browser: "Chrome", instance: "profile-1" });
+    const server = await h.server();
+    await until(() => server.connected);
+    expect((await getVersion(server)).transport).toBe("native");
+    await h.host({ browser: "Edge", instance: "profile-2" });
+    await until(() => server.extensions.length === 2, 3_000, "both browsers");
+    expect(server.extensions.map((e) => e.transport)).toEqual(["native", "native"]);
   });
 
   it("#123: when the serving host goes away, the relaying host takes over the hub socket", async () => {
