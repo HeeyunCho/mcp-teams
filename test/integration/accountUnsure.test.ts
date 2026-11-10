@@ -396,12 +396,12 @@ describe("#77: a post that waits out Teams' throttling", () => {
 
     // The post's own check before the gate finds the account sure; the drop lands once it waits
     // there: it sleeps for the gate's second (again each second while the clock stands still).
-    // Not vi.waitFor, which moves a fake clock on as it polls. (until's own timeout counts on that
-    // clock too, so a post that never waits fails on the test's timeout.)
+    // Not vi.waitFor, which moves a fake clock on as it polls. (until's own timeout runs on
+    // performance.now(), so a post that never waits fails with until's message.)
     const sleeps = vi.spyOn(globalThis, "setTimeout");
     try {
       const clicked = clickSend(fake); // answered once the send is done
-      await until(() => sleeps.mock.calls.some(([, ms]) => ms === 1_000), undefined, "the post to wait at the gate");
+      await until(() => sleeps.mock.calls.some(([, ms]) => ms === 1_000), 5_000, "the post to wait at the gate");
       await teamsRetries(fake, "alex", OLD);
       vi.setSystemTime(Date.now() + 1_000); // the gate opens
 
