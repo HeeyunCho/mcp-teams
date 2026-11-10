@@ -4,6 +4,7 @@
 // Ported from mcp-newoutlook test/system/nativehost.test.ts (commit c18139c).
 import { statSync } from "node:fs";
 import { afterEach, describe, expect, it } from "vitest";
+import { socketTransport } from "../../src/bridge.js";
 import { SERVER_VERSION } from "../../src/config.js";
 import { fakeExtension } from "../helpers/bridgeHarness.js";
 import { nativeHarness } from "../helpers/nativeHost.js";
@@ -156,6 +157,40 @@ describe("#123: the native host", { timeout: 30_000 }, () => {
     expect(server.hubIsHost).toBe(true);
     await expect(server.call("readMessages", {}, 3_000)).resolves.toEqual({ from: "edge" });
     expect(edge.exitCode).toBeUndefined();
+  });
+
+  for (const code of [4401, 4409]) {
+    it(`#123: a relaying host the serving host refuses (${code}) exits, so the extension connects again`, async () => {
+      h = await nativeHarness();
+      // Something holding the hub socket that refuses the relayed hello.
+      const refusing = await socketTransport({ path: h.socket, maxMessageBytes: 1 << 20 }).listen({
+        connection: (conn) => {
+          conn.send(JSON.stringify({ type: "challenge", nonce: "n" }));
+          conn.on("message", () => conn.close(code, "refused"));
+        },
+        error: () => {},
+      });
+      try {
+        const ext = await h.host({}, false);
+        expect(await ext.exited).toBe(1);
+        expect(h.logText()).toMatch(new RegExp(` exit reason=refused by the host code=${code}`));
+      } finally {
+        await refusing.close();
+      }
+    });
+  }
+
+  it("#123: a frame from the extension over the size limit is skipped unread, logged by its size, and the port stays open", async () => {
+    h = await nativeHarness();
+    const ext = await h.host({ handle: () => ({ fine: true }) });
+    const server = await h.server();
+    await until(() => server.connected);
+    // A 300 MB frame's header and its first bytes: the host must not wait for (or keep) the rest.
+    const head = Buffer.alloc(4);
+    head.writeUInt32LE(300 * 1024 * 1024, 0);
+    ext.child.stdin.write(Buffer.concat([head, Buffer.alloc(64 * 1024, 0x61)]));
+    await until(() => / oversize bytes=314572800/.test(h!.logText()), 3_000, "the oversize line");
+    expect(ext.exitCode).toBeUndefined();
   });
 
   unixOnly("#123: the hub socket and hub.log are owner-only (folder 0700, socket and log 0600)", async () => {
