@@ -84,6 +84,12 @@ export interface ToolsOptions {
   build?: { dir: string; now?: () => number };
 }
 
+/**
+ * How long a failed call waits for the status its note is made from (#103). The call has failed
+ * already, so a stuck worker mustn't hold its error back for the bridge's default minute.
+ */
+const NOTE_STATUS_TIMEOUT_MS = 3_000;
+
 /** What an extension declared (#115); one from before #115, or seen through a hub from before it, has no features. */
 const declaredBy = (e: ExtensionInfo): Capabilities => e.capabilities ?? { features: [], maxMessageBytes: null };
 
@@ -99,7 +105,7 @@ export function registerTools(server: McpServer, bridge: ExtensionBridge, config
   const explain = async (err: unknown, extra: Extra) => {
     const message = err instanceof Error ? err.message : String(err);
     if (!isMissingSession(message) || !bridge.connected) return null;
-    const status = await bridge.call("status", {}, undefined, extra.signal);
+    const status = await bridge.call("status", {}, NOTE_STATUS_TIMEOUT_MS, extra.signal);
     return failedCallNote(message, status as TeamsStatus | null, now());
   };
   const safe = safeWith(() => restartHint(running, onDisk()), explain);
