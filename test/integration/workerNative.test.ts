@@ -1,0 +1,177 @@
+// #123 (ADR 0001): the worker's native-first connect (extension/background.js connect()). Under a
+// fake chrome whose connectNative hands each port to a scripted native host, and a scripted TCP
+// hub, so the test decides what each side does. pairing.json (a stubbed fetch) says whether
+// config.json turns the native host on.
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { WebSocketServer, type WebSocket } from "ws";
+import { proof } from "../../src/bridge.js";
+import { toExtensionFrames } from "../../src/native.js";
+import { createFakeChrome, loadWorker, NativeWebSocket, openedSockets, stopWorkers, type FakeChrome, type FakeNativeHost } from "../helpers/fakeChrome.js";
+
+const TOKEN = "worker-native-token";
+
+let wss: WebSocketServer | undefined;
+let fake: FakeChrome | undefined;
+
+afterEach(async () => {
+  stopWorkers();
+  for (const h of fake?.nativePorts ?? []) h.disconnect();
+  fake = undefined;
+  for (const c of wss?.clients ?? []) c.terminate();
+  await new Promise<void>((r) => (wss ? wss.close(() => r()) : r()));
+  wss = undefined;
+  vi.unstubAllGlobals();
+  openedSockets.length = 0;
+});
+
+/** The installed folder's pairing.json, as the server writes it (nativeHost: config.json's switch). */
+function pairing(file: object | null) {
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (url: string) => {
+      if (url !== "chrome-extension://fake-extension-id/pairing.json" || file === null) throw new TypeError("Failed to fetch");
+      return new Response(JSON.stringify(file), { status: 200 });
+    }),
+  );
+}
+
+/**
+ * A native host that serves like dist/hub.js: a challenge the extension needn't answer (Chrome
+ * vouches for it), then a welcome proving the hello's nonce. `then` runs on it after the welcome.
+ */
+function servingHost({ then }: { then?: (host: FakeNativeHost) => void } = {}) {
+  return (host: FakeNativeHost) => {
+    host.send({ type: "challenge", nonce: "host-challenge" });
+    host.onPost = (msg) => {
+      if (msg.type !== "hello") return;
+      host.send({ type: "welcome", serverVersion: "0.0.0", heartbeatMs: 20_000, capabilities: { features: ["native"], maxMessageBytes: 1024 }, proof: proof(TOKEN, "server", msg.nonce) });
+      then?.(host);
+    };
+  };
+}
+
+/** A TCP hub that welcomes the worker like the real one, or refuses it with `refuseWith`. */
+async function tcpHub({ refuseWith }: { refuseWith?: number } = {}) {
+  const received: any[] = [];
+  const server = new WebSocketServer({ host: "127.0.0.1", port: 0 });
+  wss = server;
+  server.on("connection", (ws: WebSocket) => {
+    ws.send(JSON.stringify({ type: "challenge", nonce: "tcp-challenge" }));
+    ws.on("message", (raw) => {
+      const msg = JSON.parse(raw.toString());
+      received.push(msg);
+      if (msg.type !== "hello") return;
+      if (refuseWith) return void ws.close(refuseWith, "refused");
+      ws.send(JSON.stringify({ type: "welcome", serverVersion: "0.0.0", proof: proof(TOKEN, "server", msg.nonce) }));
+    });
+  });
+  await new Promise<void>((r) => server.once("listening", () => r()));
+  return { port: (server.address() as { port: number }).port, received };
+}
+
+/** Loads the worker and starts it as the browser does. */
+async function start(f: FakeChrome) {
+  fake = f;
+  const worker = await loadWorker(f);
+  worker.registerListeners();
+  vi.stubGlobal("WebSocket", NativeWebSocket);
+  for (const l of f.chrome.runtime.onStartup.listeners) l();
+  return worker;
+}
+
+const status = (f: FakeChrome) => f.pageMessage("popup.html", { type: "popup:status" }) as Promise<{ state: string; lastError: string | null }>;
+const connected = async (f: FakeChrome) => vi.waitFor(async () => expect(await status(f)).toMatchObject({ state: "connected" }), { timeout: 3_000 });
+
+describe("#123: the worker connects to the native host first, and falls back to TCP", () => {
+  it("with nativeHost off (pairing.json without it) it never tries native messaging: TCP as before", async () => {
+    pairing({ token: TOKEN });
+    const hub = await tcpHub();
+    const f = createFakeChrome({ local: { token: TOKEN, port: hub.port }, nativeHost: servingHost() });
+    await start(f);
+    await connected(f);
+    expect(hub.received.some((m) => m.type === "hello")).toBe(true);
+    expect(f.connectNative).not.toHaveBeenCalled();
+  });
+
+  it("with nativeHost on it connects by native messaging: hello at once with its nonce, the welcome's proof checked, requests answered", async () => {
+    pairing({ token: TOKEN, nativeHost: true });
+    const f = createFakeChrome({ nativeHost: servingHost() });
+    await start(f);
+    await connected(f);
+    expect(f.connectNative).toHaveBeenCalledWith("com.mcp_teams.hub");
+    expect(openedSockets).toEqual([]);
+    const host = f.nativePorts[0];
+    const hello = host.received.find((m) => m.type === "hello");
+    expect(hello).toMatchObject({ nonce: expect.any(String), browser: "Chrome", capabilities: { maxMessageBytes: 256 * 1024 * 1024 } });
+    // Only one hello: the host's challenge needs no answer on the native port.
+    expect(host.received.filter((m) => m.type === "hello")).toHaveLength(1);
+    host.send({ type: "request", id: "r1", method: "noSuchMethod", params: {}, timeoutMs: 5_000 });
+    await vi.waitFor(() => expect(host.received).toContainEqual({ type: "response", id: "r1", ok: false, error: "Unknown method noSuchMethod" }), { timeout: 2_000 });
+  });
+
+  it("with nativeHost on, a welcome that doesn't prove its nonce isn't trusted: the worker leaves for TCP", async () => {
+    pairing({ token: TOKEN, nativeHost: true });
+    const hub = await tcpHub();
+    const f = createFakeChrome({
+      local: { port: hub.port },
+      nativeHost: (host) => {
+        host.onPost = (msg) => {
+          if (msg.type !== "hello") return;
+          host.send({ type: "welcome", serverVersion: "0.0.0", proof: proof("not-the-token", "server", msg.nonce) });
+          host.send({ type: "request", id: "r1", method: "noSuchMethod", params: {} });
+        };
+      },
+    });
+    await start(f);
+    await connected(f);
+    expect(hub.received.some((m) => m.type === "hello")).toBe(true);
+    expect(f.nativePorts[0].received.filter((m) => m.type === "response")).toEqual([]);
+  });
+
+  it("with no native host installed (Chrome closes the port before any welcome) it connects over TCP at once", async () => {
+    pairing({ token: TOKEN, nativeHost: true });
+    const hub = await tcpHub();
+    const f = createFakeChrome({ local: { port: hub.port }, nativeHost: (host) => host.disconnect("Specified native messaging host not found.") });
+    await start(f);
+    await connected(f);
+    expect(f.connectNative).toHaveBeenCalledTimes(1);
+    expect(hub.received.some((m) => m.type === "hello")).toBe(true);
+  });
+
+  it("joins a message the host split into chunks (over Chrome's 1 MB) before handling it", async () => {
+    pairing({ token: TOKEN, nativeHost: true });
+    const f = createFakeChrome({ nativeHost: servingHost() });
+    await start(f);
+    await connected(f);
+    const host = f.nativePorts[0];
+    const request = { type: "request", id: "big-1", method: "noSuchMethod", params: { text: "Hallo Sam, 안녕하세요! ".repeat(80_000) }, timeoutMs: 5_000 };
+    // Split by the host's own code: each frame's payload is one message to the extension.
+    const frames = toExtensionFrames(JSON.stringify(request)).map((b) => JSON.parse(b.subarray(4).toString("utf8")));
+    expect(frames.length).toBeGreaterThan(1);
+    for (const chunk of frames) host.send(chunk);
+    await vi.waitFor(() => expect(host.received).toContainEqual({ type: "response", id: "big-1", ok: false, error: "Unknown method noSuchMethod" }), { timeout: 3_000 });
+  });
+
+  it("a TCP hub that refuses it with 4403 (the native host holds the port) sends it back to native messaging, even before pairing.json says so", async () => {
+    pairing({ token: TOKEN });
+    const hub = await tcpHub({ refuseWith: 4403 });
+    const f = createFakeChrome({ local: { port: hub.port }, nativeHost: servingHost() });
+    await start(f);
+    await vi.waitFor(() => expect(f.connectNative).toHaveBeenCalledTimes(1), { timeout: 3_000 });
+    await connected(f);
+    expect(hub.received.filter((m) => m.type === "hello")).toHaveLength(1);
+  });
+
+  it("after a 4403, a native host that still fails sends it back to TCP, and native is tried again with backoff (no tight loop)", async () => {
+    pairing({ token: TOKEN });
+    const hub = await tcpHub({ refuseWith: 4403 });
+    const f = createFakeChrome({ local: { port: hub.port }, nativeHost: (host) => host.disconnect("Native host has exited.") });
+    await start(f);
+    await vi.waitFor(() => expect(f.connectNative).toHaveBeenCalledTimes(2), { timeout: 3_000 });
+    // Retries back off from 0.5 s (0.5, 1, 2, …): within 2.5 s at most 3 native tries, each followed by TCP.
+    await new Promise((r) => setTimeout(r, 1_000));
+    expect(f.connectNative!.mock.calls.length).toBeLessThanOrEqual(3);
+    expect(hub.received.filter((m) => m.type === "hello").length).toBeLessThanOrEqual(f.connectNative!.mock.calls.length + 1);
+    expect((await status(f)).lastError).toMatch(/native/i);
+  });
+});

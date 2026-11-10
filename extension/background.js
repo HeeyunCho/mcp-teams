@@ -1,6 +1,8 @@
-// Service worker: connects to the local MCP server over WebSocket and runs Teams
-// requests inside an open Teams tab, with the session Teams itself uses.
+// Service worker: connects to the local MCP server (through the native host while config.json
+// turns it on, else over WebSocket) and runs Teams requests inside an open Teams tab, with the
+// session Teams itself uses.
 
+import { Reassembler } from "./chunks.js";
 import * as teams from "./teams.js";
 
 const VERSION = chrome.runtime.getManifest().version;
@@ -2062,17 +2064,87 @@ export function stopReconnecting() {
 }
 
 /**
- * The pairing token: one saved under Advanced, else the one setup wrote into this
- * folder (pairing.json, only in the installed copy). Null when there is none.
+ * This folder's pairing.json ({ token, nativeHost }), which servers and setup write into the
+ * installed copy; null without one. The pairing token is one saved under Advanced, else its
+ * token. `nativeHost: true` while config.json turns the native host on (#123).
  */
-async function pairingToken(saved) {
-  if (saved) return saved;
+async function pairingFile() {
   try {
     const res = await fetch(chrome.runtime.getURL("pairing.json"), { cache: "no-store" });
-    return res.ok ? ((await res.json()).token ?? null) : null;
+    return res.ok ? await res.json() : null;
   } catch {
     return null;
   }
+}
+
+/** The native-messaging host (#123, ADR 0001), dist/hub.js, which setup registers. */
+const NATIVE_HOST = "com.mcp_teams.hub";
+/** WebSocket readyState values, which a native connection uses too. */
+const OPEN = 1;
+const CLOSED = 3;
+
+/**
+ * A connection to the native host over chrome.runtime.connectNative, shaped like the WebSocket
+ * connect() uses: readyState, send(text), close(), and onmessage({ data }) and onclose({ code })
+ * (code null). It is open at once. Messages the host split into chunks (over Chrome's 1 MB) are
+ * joined first. Throws when Chrome refuses at once. Ported from mcp-newoutlook
+ * extension/background.js (openNative; commit df54b52).
+ */
+function openNative() {
+  const port = chrome.runtime.connectNative(NATIVE_HOST);
+  const chunks = new Reassembler();
+  const conn = {
+    transport: "native",
+    readyState: OPEN,
+    onmessage: null,
+    onclose: null,
+    send(text) {
+      if (conn.readyState !== OPEN) return;
+      try {
+        port.postMessage(JSON.parse(text));
+      } catch {
+        // The port closed meanwhile; its onDisconnect follows.
+      }
+    },
+    close() {
+      if (conn.readyState === CLOSED) return;
+      port.disconnect();
+      closed();
+    },
+  };
+  // Later, as a WebSocket's close event: the caller may still be setting the connection up.
+  const closed = () => {
+    conn.readyState = CLOSED;
+    chunks.clear();
+    setTimeout(() => conn.onclose?.({ code: null }), 0);
+  };
+  port.onMessage.addListener((msg) => {
+    if (conn.readyState !== OPEN) return;
+    if (msg?.type !== "chunk") return conn.onmessage?.({ data: JSON.stringify(msg) });
+    const text = chunks.add(msg);
+    if (text !== null) conn.onmessage?.({ data: text });
+  });
+  port.onDisconnect.addListener(() => {
+    // Read even when unused: Chrome warns about an unchecked lastError otherwise.
+    void chrome.runtime.lastError;
+    if (conn.readyState !== CLOSED) closed();
+  });
+  return conn;
+}
+
+let tcpRefused = false; // a TCP hub said 4403 (use native messaging), until a TCP hub welcomes us
+let skipNative = false; // native just failed before its welcome: the next connect() uses TCP
+
+/**
+ * Whether connect() goes to the native host: pairing.json says config.json turns it on, or a TCP
+ * hub refused this extension with 4403 (only the native host does: ADR decision 4, #123 decision
+ * 9). Not right after native failed before its welcome (that connect goes to TCP), and never
+ * without connectNative (no nativeMessaging permission). Off, everything stays on TCP.
+ */
+function nativeFirst(pairing) {
+  const skip = skipNative;
+  skipNative = false;
+  return !skip && (pairing?.nativeHost === true || tcpRefused) && typeof chrome.runtime.connectNative === "function";
 }
 
 /**
@@ -2080,15 +2152,21 @@ async function pairingToken(saved) {
  * sending it (see src/bridge.ts): the extension answers the server's challenge, and acts
  * on requests only after the server answered its own nonce. Any other program that holds
  * the port gets nothing.
+ *
+ * While config.json turns the native host on (#123, see nativeFirst), it connects by native
+ * messaging instead: Chrome starts the host for this extension only, so hello goes at once with
+ * no proof, and the welcome still has to prove the nonce. A native port that closes before its
+ * welcome (no host registered, the host off or failing) falls back to the TCP port at once.
  */
 async function connect() {
   if (!reconnecting || starting || (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING))) return;
   clearTimeout(retryTimer);
   retryTimer = null;
   starting = true;
-  let token, port, instance;
+  let token, port, instance, pairing;
   try {
     ({ token, port, instance } = await chrome.storage.local.get(["token", "port", "instance"]));
+    pairing = await pairingFile();
     // Identifies this browser profile to the server across reconnects (Chrome and Edge,
     // or two profiles, can be connected at the same time).
     if (!instance) {
@@ -2101,10 +2179,20 @@ async function connect() {
   // stopReconnecting() may have run while the storage read was waiting.
   if (ws || !reconnecting) return;
   state = "connecting";
-  const socket = new WebSocket(`ws://127.0.0.1:${port || DEFAULT_PORT}`);
+  let socket = null;
+  if (nativeFirst(pairing)) {
+    try {
+      socket = openNative();
+    } catch {
+      // Chrome refused at once: the TCP port.
+    }
+  }
+  const native = socket !== null;
+  socket ??= new WebSocket(`ws://127.0.0.1:${port || DEFAULT_PORT}`);
   ws = socket;
   const nonce = crypto.randomUUID();
-  let secret = null;
+  const secret = token || pairing?.token || null;
+  const noPairing = "This copy of the extension has no pairing file. Run `npx mcp-teams setup` and load the extension from the folder it shows.";
   let challenged = false;
   let authed = false;
   let opened = false;
@@ -2132,12 +2220,12 @@ async function connect() {
     if (!authed) {
       if (msg.type === "challenge" && !challenged && typeof msg.nonce === "string") {
         challenged = true;
-        secret = await pairingToken(token);
-        if (!secret) return refuse("This copy of the extension has no pairing file. Run `npx mcp-teams setup` and load the extension from the folder it shows.");
+        if (!secret) return refuse(noPairing);
         const proof = await teams.pairingProof(secret, "client", msg.nonce);
         socket.send(JSON.stringify({ type: "hello", proof, nonce, version: VERSION, browser: browserName(), instance, capabilities: CAPABILITIES }));
       } else if (msg.type === "welcome" && !checking) {
-        const notProven = () => refuse(`The program on port ${port || DEFAULT_PORT} could not prove it is your mcp-teams server, so the extension doesn't answer it.`);
+        const who = native ? "The native host" : `The program on port ${port || DEFAULT_PORT}`;
+        const notProven = () => refuse(`${who} could not prove it is your mcp-teams server, so the extension doesn't answer it.`);
         checking = (async () => {
           if (!secret || msg.proof !== (await teams.pairingProof(secret, "server", nonce))) return notProven();
           if (ws !== socket || socket.readyState !== WebSocket.OPEN) return; // a newer connection's state stays
@@ -2145,6 +2233,7 @@ async function connect() {
           state = "connected";
           lastError = null;
           retryMs = RETRY_MIN_MS;
+          if (!native) tcpRefused = false;
           const heartbeatMs = Number(msg.heartbeatMs);
           watchHeartbeat(socket, heartbeatMs > 0 ? Math.max(MIN_HEARTBEAT_TIMEOUT_MS, Math.round(2.25 * heartbeatMs)) : HEARTBEAT_TIMEOUT_MS);
         })().catch(notProven);
@@ -2165,12 +2254,29 @@ async function connect() {
     stopWatchdog(socket);
     if (ws && ws !== socket) return; // replaced by a newer connection (reconnectNow)
     ws = null;
+    if (native && !authed) {
+      // No native host here, or it failed before its welcome: the TCP port, at once (native is
+      // tried again on the next connect).
+      skipNative = true;
+      clearTimeout(retryTimer);
+      retryTimer = null;
+      return void connect();
+    }
     // When a server session ends, another one takes over the port within a second:
     // retry soon, backing off to the alarm's pace.
     clearTimeout(retryTimer);
     retryTimer = reconnecting ? setTimeout(connect, retryMs) : null;
     retryMs = Math.min(retryMs * 2, RETRY_MAX_MS);
-    if (state === "unauthorized" && !authed && lastError) {
+    if (ev.code === 4403) {
+      // The native host holds the port and takes extensions only by native messaging (#123
+      // decision 9): the retry goes there, backing off as above.
+      tcpRefused = true;
+      state = "disconnected";
+      lastError =
+        typeof chrome.runtime.connectNative === "function"
+          ? "The mcp-teams native host holds the port and refuses extensions there; connecting to it by native messaging."
+          : "The mcp-teams native host holds the port and refuses extensions there, and this copy of the extension can't use native messaging (no nativeMessaging permission).";
+    } else if (state === "unauthorized" && !authed && lastError) {
       // refuse() said why.
     } else if (opened && !challenged) {
       state = "unauthorized";
@@ -2185,6 +2291,13 @@ async function connect() {
   socket.onerror = () => {
     lastError = "MCP server not reachable (is your AI client running mcp-teams?)";
   };
+  if (native) {
+    // Chrome vouches for this extension to its native host (allowed_origins): hello goes at once,
+    // without waiting for (or answering) a challenge. A relaying host adds its own proof.
+    challenged = true;
+    if (!secret) refuse(noPairing);
+    else socket.send(JSON.stringify({ type: "hello", nonce, version: VERSION, browser: browserName(), instance, capabilities: CAPABILITIES }));
+  }
 }
 
 /** Requests being run, by id, so they can be withdrawn (a cancel from the server, or their connection closed). */
