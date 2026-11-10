@@ -147,6 +147,8 @@ function fakeNativePort(runtime: { lastError?: { message: string } }, name: stri
     onDisconnect,
     postMessage(msg: unknown) {
       if (!open) throw new Error("Attempting to use a disconnected port object");
+      // As Chrome: a message to a native host over 64 MiB is refused, and the port stays open.
+      if (Buffer.byteLength(JSON.stringify(msg)) > 64 * 1024 * 1024) throw new Error("Message length exceeded maximum allowed length.");
       const copy = structuredClone(msg);
       later(() => {
         host.received.push(copy);

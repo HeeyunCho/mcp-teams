@@ -152,6 +152,22 @@ describe("#123: the worker connects to the native host first, and falls back to 
     await vi.waitFor(() => expect(host.received).toContainEqual({ type: "response", id: "big-1", ok: false, error: "Unknown method noSuchMethod" }), { timeout: 3_000 });
   });
 
+  it("an answer over what the native connection takes (the host's maxMessageBytes, at most Chrome's 64 MB) is answered with a short error at once, and the port stays open", async () => {
+    pairing({ token: TOKEN, nativeHost: true });
+    // servingHost declares maxMessageBytes: 1024; this answer ("Unknown method …") is over 2 KB.
+    const f = createFakeChrome({ nativeHost: servingHost() });
+    await start(f);
+    await connected(f);
+    const host = f.nativePorts[0];
+    host.send({ type: "request", id: "huge-1", method: "x".repeat(2_000), params: {}, timeoutMs: 60_000 });
+    await vi.waitFor(() => expect(host.received).toContainEqual({ type: "response", id: "huge-1", ok: false, error: expect.stringMatching(/too large .*native connection/) }), {
+      timeout: 2_000,
+    });
+    expect(host.open).toBe(true);
+    host.send({ type: "request", id: "small-1", method: "noSuchMethod", params: {}, timeoutMs: 5_000 });
+    await vi.waitFor(() => expect(host.received).toContainEqual({ type: "response", id: "small-1", ok: false, error: "Unknown method noSuchMethod" }), { timeout: 2_000 });
+  });
+
   it("a TCP hub that refuses it with 4403 (the native host holds the port) sends it back to native messaging, even before pairing.json says so", async () => {
     pairing({ token: TOKEN });
     const hub = await tcpHub({ refuseWith: 4403 });

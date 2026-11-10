@@ -11,7 +11,9 @@ const DEFAULT_PORT = 47393;
  * What hello declares to the hub (#115), as mcp-newoutlook's extension does (EXTENSION_FEATURES in
  * its extension/background.js). No features yet: "native" is only for a native host's port.
  * maxMessageBytes: the largest message it takes, the server's own MAX_MESSAGE_BYTES (Chrome's
- * WebSocket sets no lower limit of its own).
+ * WebSocket sets no lower limit of its own). It is what the extension receives, on native messaging
+ * too (the host's chunks are joined up to it); what it sends there is capped at Chrome's 64 MB
+ * (NATIVE_MAX_MESSAGE_BYTES).
  */
 const CAPABILITIES = Object.freeze({ features: Object.freeze([]), maxMessageBytes: 256 * 1024 * 1024 });
 const CONFIRM_TIMEOUT_MS = 5 * 60_000;
@@ -2082,13 +2084,34 @@ const NATIVE_HOST = "com.mcp_teams.hub";
 /** WebSocket readyState values, which a native connection uses too. */
 const OPEN = 1;
 const CLOSED = 3;
+/** Chrome's limit for one message from the extension to its native host. */
+export const NATIVE_MAX_MESSAGE_BYTES = 64 * 1024 * 1024;
+
+const formatSize = (n) => (n >= 1024 * 1024 ? `${(n / 1024 / 1024).toFixed(1)} MB` : `${Math.ceil(n / 1024)} KB`);
+/** `text`'s UTF-8 size, or its length when even 3 bytes a character stay within `max` (no need to count). */
+const utf8Bytes = (text, max) => (text.length * 3 <= max ? text.length : new TextEncoder().encode(text).length);
+
+/**
+ * The answer that goes instead of one too large for the native connection: the hub would drop the
+ * whole connection on it (or Chrome refuse it), and the call would wait for its time limit.
+ * Wording as mcp-newoutlook's dispatch (commit cf8cc72).
+ */
+const tooLarge = (id, detail) => ({
+  type: "response",
+  id,
+  ok: false,
+  error: `The answer was too large to pass on over the native connection (${detail}). Nothing else was affected. Ask for less at once (fewer messages, a shorter range), or open it in Teams.`,
+});
 
 /**
  * A connection to the native host over chrome.runtime.connectNative, shaped like the WebSocket
- * connect() uses: readyState, send(text), close(), and onmessage({ data }) and onclose({ code })
+ * connect() uses: readyState, send(text, msg), close(), and onmessage({ data }) and onclose({ code })
  * (code null). It is open at once. Messages the host split into chunks (over Chrome's 1 MB) are
  * joined first. Throws when Chrome refuses at once. Ported from mcp-newoutlook
  * extension/background.js (openNative; commit df54b52).
+ *
+ * A response larger than the host takes (maxMessageBytes: Chrome's 64 MB, or less when the host's
+ * welcome declares less) goes as a short error instead, as does one Chrome refuses to post.
  */
 function openNative() {
   const port = chrome.runtime.connectNative(NATIVE_HOST);
@@ -2096,14 +2119,30 @@ function openNative() {
   const conn = {
     transport: "native",
     readyState: OPEN,
+    maxMessageBytes: NATIVE_MAX_MESSAGE_BYTES,
     onmessage: null,
     onclose: null,
-    send(text) {
+    /** `msg`: the message `text` is, when the caller has it (saves parsing it again). */
+    send(text, msg = JSON.parse(text)) {
       if (conn.readyState !== OPEN) return;
+      const bytes = utf8Bytes(text, conn.maxMessageBytes);
+      const answer = msg?.type === "response";
+      const over = bytes > conn.maxMessageBytes;
+      if (over) {
+        if (!answer) return;
+        msg = tooLarge(msg.id, `${formatSize(bytes)}; the limit is ${formatSize(conn.maxMessageBytes)}`);
+      }
       try {
-        port.postMessage(JSON.parse(text));
-      } catch {
-        // The port closed meanwhile; its onDisconnect follows.
+        port.postMessage(msg);
+      } catch (err) {
+        // Chrome refused it (a disconnected port's onDisconnect follows, and the hub fails the call
+        // then); on an open port, an answer still goes, short, so the call doesn't wait for nothing.
+        if (!answer || over) return;
+        try {
+          port.postMessage(tooLarge(msg.id, err?.message ?? String(err)));
+        } catch {
+          // closed meanwhile
+        }
       }
     },
     close() {
@@ -2234,6 +2273,9 @@ async function connect() {
           lastError = null;
           retryMs = RETRY_MIN_MS;
           if (!native) tcpRefused = false;
+          // The native host takes no more than it declares, and Chrome passes it no more than 64 MB.
+          const hostMax = Number(msg.capabilities?.maxMessageBytes);
+          if (native && hostMax > 0) socket.maxMessageBytes = Math.min(NATIVE_MAX_MESSAGE_BYTES, hostMax);
           const heartbeatMs = Number(msg.heartbeatMs);
           watchHeartbeat(socket, heartbeatMs > 0 ? Math.max(MIN_HEARTBEAT_TIMEOUT_MS, Math.round(2.25 * heartbeatMs)) : HEARTBEAT_TIMEOUT_MS);
         })().catch(notProven);
@@ -2245,7 +2287,8 @@ async function connect() {
       if (watchdog?.socket === socket) watchHeartbeat(socket, watchdog.ms);
       return;
     }
-    await dispatch(msg, (reply) => socket.readyState === WebSocket.OPEN && socket.send(JSON.stringify(reply)), socket);
+    // The reply object goes along for a native connection (a WebSocket ignores it).
+    await dispatch(msg, (reply) => socket.readyState === WebSocket.OPEN && socket.send(JSON.stringify(reply), reply), socket);
   };
   socket.onclose = (ev) => {
     // Nobody can be told the outcome of what came on this connection: withdraw it
