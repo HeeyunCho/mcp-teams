@@ -1,6 +1,6 @@
-# Handoff: mcp-teams after 0.3.55 (updated 2026-11-10 on the Windows PC)
+# Handoff: mcp-teams after 0.3.56 (updated 2026-11-10 on the Windows PC)
 
-Repo: GitHub `HeeyunCho/mcp-teams`. Branch `main`: **0.3.55** is the latest release (`525aadd chore(release): v0.3.55`). Two work branches are in progress (#122 and #123 PR 2, see below).
+Repo: GitHub `HeeyunCho/mcp-teams`. Branch `main`: **0.3.56** is the latest release (`5908395 chore(release): v0.3.56`). One PR is open: **#130**, PR 2 of #123, the native host.
 
 ## Merged on 2026-11-09/10
 
@@ -11,41 +11,68 @@ Each had a fresh-subagent review with no blockers and passed CI on Linux and Win
 | #121 | The failed-call note's status read waits 3 s, not 60 s; tests for its `connected`/`signal` branches; `failedCallNote`/`isMissingSession` unit-tested (Part of #103) | 0.3.53 |
 | #125 | **Unsure account** (#77): any capture of the previous account within 30 s of a switch marks the account unsure, and sends are refused. Reads carry `accountNote`, `get_version` shows `accountUnsure`, and `tokenIssuedAt` reads the same token as `tokenOid` | 0.3.54 |
 | #127 | PR 1 of #123: a transport interface in `src/bridge.ts` (`BridgeSocket`, `BridgeTransport`, `webSocketTransport`), a refactor with no change in behaviour | 0.3.55 |
+| #129 | #122 item 1: `captureSession` stores or refreshes a session only from the Teams page (`isTeamsOrigin`), so an Outlook tab's `substrate.office.com` requests no longer move `services.substrate` or replace Teams' capture | 0.3.56 |
 
-## In progress
+**After #129, check once in real Chrome:**
+1. Run `api_traffic` with `record: true` and use Teams search.
+2. Confirm that `substrate` and `chatsvc` are still captured.
 
-- **#122 item 1:**
-  - **The first hypothesis was wrong** (tested 2026-11-10). The worker's own requests move `services.substrate` and `lastSignedInCall` together, so they can't cause the gap.
-  - **What reproduces it:** `captureSession` (`extension/background.js` ~:33) doesn't check where a request came from, unlike `recordRequest` (`isTeamsOrigin`). So a `substrate.office.com` request from outside the Teams page (most likely an Outlook web tab) moves `services.substrate`. With a different token, it even replaces Teams' substrate capture.
-  - **The revised fix:** `captureSession` requires a Teams origin. It is in progress on branch `fix/122-capture-teams-origin`, with tests for the three rows in the [#122 comment](https://github.com/HeeyunCho/mcp-teams/issues/122#issuecomment-6765067953).
-  - **Out of scope:** whether the worker's own requests should count as Teams' sends.
-- **#123 PR 2** (the native host) is in progress on branch `feat/123-native-host`.
+If Teams ever sent a captured-service request from another origin, it would no longer be captured.
+
+## Open: PR #130, the native host (#123 PR 2)
+
+- **Where:** branch `feat/123-native-host`, worktree `.claude/worktrees/agent-a04b8591bbb86674e`.
+- **What:**
+  - `dist/hub.js`, with Chrome's 4-byte framing and the 1 MB split;
+  - the serving and relaying host, with the 30 s linger and `~/.mcp-teams/hub.log` (metadata only);
+  - the peer-only TCP listener on 47393, which refuses extensions with 4403;
+  - the Windows pipe `\\.\pipe\mcp-teams-<ASCII>-<sha256 8 hex>`;
+  - the interface additions.
+- **Off by default:** `nativeHost` is off, so with it off every server path runs as on `main` (the reviews' gate).
+- **The 0.3.52 test:** it installs the real `mcp-teams@0.3.52` from npm. The old hub hands port 47393 over to the host and passes on both Node versions.
+- **Reviews:** three, which found two security problems; both are fixed.
+  1. Proofs are bound to their channel: TCP `client`/`server`, socket `client:socket`/`server:socket`.
+  2. A relaying host verifies the pipe's holder: its own nonce, and nothing passes until a `server:socket` proof.
+- **The relay deadline** (`569f39a`, reviewed, no blockers):
+  - the holder gets the serving host's `authTimeoutMs` (5 s) for its challenge and again for a proven welcome;
+  - at most 64 frames and 1 MB are held before the welcome;
+  - `TEAMS_MCP_HUB_AUTH_TIMEOUT_MS` shortens it for tests.
+- **Follow-ups in progress on the same branch, before the push:**
+  - start the welcome deadline at the challenge when the extension's hello hasn't come yet;
+  - a test that a proven relay with a 600 ms deadline still answers well past it;
+  - clamp the env var to 2^31−1.
+- **Testing:** the full `npm test` on Node 26 was green (62 files, 768 passed) before the deadline commits. The full Node 20 run was stopped for low memory, so **CI is the full run**.
+- **Not blocking, posted on #123 and in the PR:**
+  - the relay is a signing oracle for `client:socket` (not exploitable as far as the review saw);
+  - the relay overwrites the extension's `nonce` (matters for PR 3);
+  - `sameText` duplicates `sameProof`, and the `proofRole` strings are written out in `relay()`;
+  - the handshake exists three times;
+  - commit messages `f32d2f3`, `eedcd82` and `6b66869` cite some wrong Outlook commits (the code comments are right);
+  - during takeover, a waiting response over 1 MB can trip the cap (the host exits; the extension reconnects).
+- **Next PRs:**
+  - **PR 3:** the extension's `connectNative` with the TCP fallback, retrying native after a 4403, chunk joining, `transport` in `get_version`, and the nonce point.
+  - **PR 4:** setup registration, `batPath`, and moved-node reporting.
+  - **PR 5:** the version switch, default on, `feat!:` → 0.4.0. It waits for the manual checks on Windows and the Mac.
 
 ## Open issues and decisions (2026-11-09/10)
 
-- **#123, the native-messaging host (0.4.0, ADR 0001 step 3):**
-  - Grilled with the user; it has 13 decisions, five PRs in order, and acceptance checkboxes, including manual checks on Windows and the Mac.
-  - PR 1 is merged (#127).
-  - **Next is PR 2:** `dist/hub.js`, the 4-byte framing with the 1 MB split, the relaying host, the peer-only TCP listener, and a test against the real `mcp-teams@0.3.52` stepping down.
-  - What PR 2 must add to the transport interface is posted on #123: several listeners, a label for where a connection came from, `join()` taking a transport, and a synthetic `pong` for a native port.
-  - PR 5 (default on, `feat!:` → 0.4.0) waits for both manual checks.
-  - Outlook's pipe-name collision for non-ASCII usernames is filed as mcp-newoutlook#178.
-- **#77:** the switch-back decision is implemented (#125). The leftovers are posted on #77:
+- **#77:** implemented in #125. The leftovers are posted on #77:
   - test 2b uses the real clock;
   - no test checks `accountUnsure: null` after A → B → C;
   - the unsure guard is copied at four send paths;
   - the hand-kept `READS` list;
   - fixed delays in tests 7/7c.
 - **#103:** #121 is merged. Still open:
-  - "the extension's own recovery" wording (follow-up comment of 2026-11-09);
+  - "the extension's own recovery" wording;
   - the `api_traffic({ clear: true })` wording in docs/testing.md;
   - `{ timeout: 2000 }` in `traffic.test.ts`.
-- **#122** (`ready-for-agent`, with #103/#104):
-  - item 1, revised to `captureSession` requiring a Teams origin, is in progress (above);
-  - "the extension lists no features" is by design (`CAPABILITIES.features` is `[]` until #123).
+- **#122:** item 1 is merged (#129). Still open:
+  - whether the worker's own requests should count as Teams' sends;
+  - "the extension lists no features" is by design until #123 PR 3.
 - **#124** (`needs-info`, with #111/#96): the extension stayed disconnected about half an hour while a hub was listening, right after a rebuild.
   - Next time, before reloading anything, capture the service worker's state and console in `chrome://extensions`, and run `Get-NetTCPConnection -LocalPort 47393`.
-- **#111/#96** (`bug`, `ready-for-human`): close with the native host and launcher (#123, ADR 0002). #111 was triaged on 2026-11-09.
+- **#111/#96** (`bug`, `ready-for-human`): close with the native host and launcher (#123, ADR 0002).
+- **Outlook:** the pipe-name collision for non-ASCII usernames is filed as mcp-newoutlook#178.
 
 ## Earlier (2026-11-08)
 
@@ -82,12 +109,12 @@ Each had a fresh-subagent review with no blockers and passed CI on Linux and Win
 ## This Windows PC (checked 2026-11-09)
 
 - **Live install:** `C:\Orca_Project\mcp-teams` is the live install. Every session's `teams` server runs its `dist/index.js`, and Chrome's Teams extension loads its `extension/` folder.
-  - On 2026-11-10 it was rebuilt on **0.3.55** (build id `12cf2b1c15b6`), after #127 merged. The extension copy in `~/.mcp-teams/extension` is on 0.3.55.
+  - On 2026-11-10 it was rebuilt on **0.3.56** (build id `554f46ce7222`), after #129 merged. The extension copy in `~/.mcp-teams/extension` is on 0.3.56.
   - **Chrome loads the extension from `~/.mcp-teams/extension`,** a copy that a *starting* server syncs from the checkout (`src/index.ts:41`, `syncExtension`). A rebuild alone doesn't update it.
     - `node dist/index.js reload-extension` syncs it, but on this PC it answers "hub restarted" every time. The extension then reloads itself and reconnects within about 5 s.
     - The `reload_extension` tool only reloads from that copy.
-  - **The hub** is Claude Desktop's server (0.3.53).
-  - **Running servers keep their old code** (0.3.46–0.3.54) until each session reconnects with `/mcp`. Run the process check under "Useful checks" or ask the agent for the list.
+  - **The hub** moves between sessions. On 2026-11-10 after the 0.3.56 rebuild it was the system-manager session's server; reconnect the hub's session last.
+  - **Running servers keep their old code** until each session reconnects with `/mcp`. After the 0.3.56 rebuild, 12 were on older code: mcp-teams, mcp-newoutlook, PM-HUB, MD-Editor, mcp-atlassian, system-manager (hub), NAVERWORKS, MeetNotes, one Claude Code session with no recorded folder, two Claude Desktop servers, and one started by the NAVER WORKS app. To list them, compare each `node … mcp-teams/dist/index.js` process's start time with `dist/index.js`'s write time; `~/.claude/sessions/<parent pid>.json` gives a Claude Code session's folder.
 - **Right after the reload:** no Teams session was captured (all four services null, `signedInAs: null`).
   - The Teams tab has to load chats again to capture one.
   - Sessions that use the Teams tools need `/mcp` → teams → Reconnect.
