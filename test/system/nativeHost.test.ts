@@ -263,9 +263,39 @@ describe("#123: the native host", { timeout: 30_000 }, () => {
       const ext = await h.host({ noHello: true, env: { TEAMS_MCP_HUB_AUTH_TIMEOUT_MS: String(AUTH_MS) } }, false);
       expect(await ext.exited).toBe(1);
       expect(challengedAt).toBeGreaterThan(0);
+      // From the challenge: not sooner (the deadline starts there), and not much later.
+      expect(Date.now() - challengedAt).toBeGreaterThanOrEqual(AUTH_MS - 50);
       expect(Date.now() - challengedAt).toBeLessThan(AUTH_MS + 1_500);
       expect(ext.received).toEqual([]);
       expect(squatter.got).toEqual([]);
+      expect(h.logText()).toMatch(/ exit reason=the hub socket's holder sent no proven welcome in time/);
+    } finally {
+      await squatter.close();
+    }
+  });
+
+  it("#123: a hello that comes after the holder's challenge restarts the relay's deadline from the hello", async () => {
+    h = await nativeHarness();
+    // Longer here, so the restart is easy to tell from a deadline still running from the challenge.
+    const AUTH = 1_500;
+    let challengedAt = 0;
+    const squatter = await squatOn(h.socket, (conn) => {
+      conn.send(JSON.stringify({ type: "challenge", nonce: "squat" }));
+      challengedAt = Date.now();
+    });
+    try {
+      const ext = await h.host({ noHello: true, env: { TEAMS_MCP_HUB_AUTH_TIMEOUT_MS: String(AUTH) } }, false);
+      await until(() => challengedAt > 0, 8_000, "the holder's challenge");
+      // A third of the deadline after the challenge, the extension's hello comes.
+      await sleep(AUTH / 3 - (Date.now() - challengedAt));
+      ext.send({ type: "hello", version: SERVER_VERSION, browser: "Chrome", instance: "late", capabilities: { maxMessageBytes: 256 * 1024 * 1024, features: [] } });
+      await until(() => squatter.got.some((m) => m.type === "hello"), 5_000, "the relayed hello");
+      const helloAt = Date.now();
+      expect(await ext.exited).toBe(1);
+      // A deadline still running from the challenge would end about AUTH / 3 sooner.
+      expect(Date.now() - helloAt).toBeGreaterThanOrEqual(AUTH - 250);
+      expect(Date.now() - helloAt).toBeLessThan(AUTH + 1_500);
+      expect(ext.received).toEqual([]);
       expect(h.logText()).toMatch(/ exit reason=the hub socket's holder sent no proven welcome in time/);
     } finally {
       await squatter.close();
