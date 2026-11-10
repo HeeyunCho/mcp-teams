@@ -735,7 +735,8 @@ export class ExtensionBridge {
     try {
       const listener = await this.listenOn(this.tcpTransport, (err) => {
         // The TCP listener failed: the host stays the hub on its socket and listens again later.
-        this.native.onEvent?.("tcp", { error: errorFields(err).name, code: errorFields(err).code });
+        const { name, code } = errorFields(err);
+        this.native.onEvent?.("tcp", { error: name, code });
         this.listeners = this.listeners.filter((l) => l !== listener);
         if (this.tcpListener === listener) this.tcpListener = undefined;
         void listener.close();

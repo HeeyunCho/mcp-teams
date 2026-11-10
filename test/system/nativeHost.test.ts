@@ -235,7 +235,14 @@ describe("#123: the native host", { timeout: 30_000 }, () => {
     ext.child.stdin.write(Buffer.concat([head, Buffer.alloc(64 * 1024, 0x61)]));
     await until(() => / oversize bytes=314572800/.test(h!.logText()), 3_000, "the oversize line");
     expect(ext.exitCode).toBeUndefined();
-  });
+    // The rest of that frame (one reused 1 MB buffer, written as the pipe drains), then calls go on.
+    const slab = Buffer.alloc(1024 * 1024, 0x61);
+    for (let left = 300 * 1024 * 1024 - 64 * 1024; left > 0; left -= slab.length) {
+      const piece = left >= slab.length ? slab : slab.subarray(0, left);
+      if (!ext.child.stdin.write(piece)) await new Promise((r) => ext.child.stdin.once("drain", r));
+    }
+    await expect(server.call("listChats", {}, 10_000)).resolves.toEqual({ fine: true });
+  }, 60_000);
 
   unixOnly("#123: the hub socket and hub.log are owner-only (folder 0700, socket and log 0600)", async () => {
     h = await nativeHarness();
