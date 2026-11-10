@@ -4,7 +4,7 @@
 // Ported from mcp-newoutlook test/system/nativehost.test.ts (commit c18139c).
 import { statSync } from "node:fs";
 import { afterEach, describe, expect, it } from "vitest";
-import { proof, socketTransport } from "../../src/bridge.js";
+import { proof, socketTransport, type BridgeSocket } from "../../src/bridge.js";
 import { SERVER_VERSION } from "../../src/config.js";
 import { fakeExtension, TOKEN } from "../helpers/bridgeHarness.js";
 import { nativeHarness } from "../helpers/nativeHost.js";
@@ -202,6 +202,103 @@ describe("#123: the native host", { timeout: 30_000 }, () => {
       }
     });
   }
+
+  /** A holder of the hub socket that does what `onConnection` says and records what it got. */
+  const squatOn = async (socket: string, onConnection: (conn: BridgeSocket, got: any[]) => void) => {
+    const got: any[] = [];
+    const listener = await socketTransport({ path: socket, maxMessageBytes: 1 << 20 }).listen({
+      connection: (conn) => {
+        conn.on("message", (raw: Buffer) => got.push(JSON.parse(raw.toString())));
+        onConnection(conn, got);
+      },
+      error: () => {},
+    });
+    return { got, close: () => listener.close() };
+  };
+  // Short for the test; the host uses the serving host's authTimeoutMs (5 s) otherwise.
+  const AUTH_MS = 600;
+
+  it("#123: a relaying host whose hub socket holder never sends a challenge exits within the auth timeout", async () => {
+    h = await nativeHarness();
+    const squatter = await squatOn(h.socket, () => {});
+    try {
+      const ext = await h.host({ env: { TEAMS_MCP_HUB_AUTH_TIMEOUT_MS: String(AUTH_MS) } }, false);
+      const started = Date.now();
+      expect(await ext.exited).toBe(1);
+      expect(Date.now() - started).toBeLessThan(AUTH_MS + 4_000); // the deadline, plus a node start on a busy machine
+      expect(ext.received).toEqual([]);
+      expect(squatter.got).toEqual([]);
+      expect(h.logText()).toMatch(/ exit reason=the hub socket's holder sent no challenge in time/);
+    } finally {
+      await squatter.close();
+    }
+  });
+
+  it("#123: a relaying host whose hub socket holder sends a challenge, then no welcome, exits within the auth timeout", async () => {
+    h = await nativeHarness();
+    const squatter = await squatOn(h.socket, (conn) => conn.send(JSON.stringify({ type: "challenge", nonce: "squat" })));
+    try {
+      const ext = await h.host({ env: { TEAMS_MCP_HUB_AUTH_TIMEOUT_MS: String(AUTH_MS) } }, false);
+      // The hello reached the holder (with this host's nonce): the deadline runs from then.
+      await until(() => squatter.got.some((m) => m.type === "hello"), 8_000, "the relayed hello");
+      const helloAt = Date.now();
+      expect(await ext.exited).toBe(1);
+      expect(Date.now() - helloAt).toBeLessThan(AUTH_MS + 1_500);
+      expect(ext.received).toEqual([]);
+      expect(h.logText()).toMatch(/ exit reason=the hub socket's holder sent no proven welcome in time/);
+    } finally {
+      await squatter.close();
+    }
+  });
+
+  it("#123: a relaying host holds at most 64 frames of its extension's before the welcome, then exits rather than grow", async () => {
+    h = await nativeHarness();
+    const squatter = await squatOn(h.socket, (conn) => conn.send(JSON.stringify({ type: "challenge", nonce: "squat" })));
+    try {
+      // A long deadline, so only the cap can end it.
+      const ext = await h.host({ env: { TEAMS_MCP_HUB_AUTH_TIMEOUT_MS: "60000" } }, false);
+      await until(() => squatter.got.some((m) => m.type === "hello"), 8_000, "the relayed hello");
+      // An extension that keeps sending (200 frames) before any welcome: the host ends it at the cap,
+      // long before the 60 s deadline would.
+      const sent = Date.now();
+      for (let i = 0; i < 200; i++) ext.send({ type: "response", id: `held-${i}`, ok: true, result: {} });
+      expect(await ext.exited).toBe(1);
+      expect(Date.now() - sent).toBeLessThan(10_000);
+      expect(h.logText()).toMatch(/ exit reason=the extension sent too much before the hub socket's holder proved itself/);
+      // Nothing but the hello went to the holder.
+      expect(squatter.got.map((m) => m.type)).toEqual(["hello"]);
+      expect(ext.received).toEqual([]);
+    } finally {
+      await squatter.close();
+    }
+  });
+
+  it("#123: a relaying host whose hub socket holder starts with anything but a challenge exits", async () => {
+    h = await nativeHarness();
+    const squatter = await squatOn(h.socket, (conn) => conn.send(JSON.stringify({ type: "welcome", serverVersion: "9.9.9" })));
+    try {
+      const ext = await h.host({ env: { TEAMS_MCP_HUB_AUTH_TIMEOUT_MS: "60000" } }, false);
+      expect(await ext.exited).toBe(1);
+      expect(ext.received).toEqual([]);
+      expect(squatter.got).toEqual([]);
+      expect(h.logText()).toMatch(/ exit reason=the hub socket's holder failed its proof/);
+    } finally {
+      await squatter.close();
+    }
+  });
+
+  it("#123: a relaying host whose hub socket holder sends something that isn't JSON exits", async () => {
+    h = await nativeHarness();
+    const squatter = await squatOn(h.socket, (conn) => conn.send("not json"));
+    try {
+      const ext = await h.host({ env: { TEAMS_MCP_HUB_AUTH_TIMEOUT_MS: "60000" } }, false);
+      expect(await ext.exited).toBe(1);
+      expect(ext.received).toEqual([]);
+      expect(h.logText()).toMatch(/ exit reason=the hub socket's holder failed its proof/);
+    } finally {
+      await squatter.close();
+    }
+  });
 
   for (const code of [4401, 4409]) {
     it(`#123: a relaying host the serving host refuses (${code}) exits, so the extension connects again`, async () => {

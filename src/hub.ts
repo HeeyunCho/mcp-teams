@@ -25,7 +25,7 @@
 import { randomBytes, timingSafeEqual } from "node:crypto";
 import { join } from "node:path";
 import WebSocket from "ws";
-import { ExtensionBridge, MAX_MESSAGE_BYTES, proof, socketTransport, type BridgeSocket } from "./bridge.js";
+import { DEFAULT_BRIDGE_OPTIONS, ExtensionBridge, MAX_MESSAGE_BYTES, proof, socketTransport, type BridgeSocket } from "./bridge.js";
 import { CONFIG_DIR, SERVER_VERSION, loadConfig } from "./config.js";
 import { EXTENSION_ORIGIN } from "./extension.js";
 import { errorFields, hubLog, trafficLogger } from "./hubLog.js";
@@ -39,6 +39,21 @@ const envMs = (name: string) => {
 const LINGER_MS = envMs("TEAMS_MCP_HUB_LINGER_MS") ?? 30_000;
 /** Ping period towards the extension and the peers (tests set it shorter). */
 const KEEP_ALIVE_MS = envMs("TEAMS_MCP_HUB_KEEPALIVE_MS");
+/**
+ * How long a connection has to prove the token: the serving host's authTimeoutMs, and a relaying
+ * host's limit for the hub socket's holder to send its challenge and then its proven welcome
+ * (tests set it shorter).
+ */
+const AUTH_TIMEOUT_MS = envMs("TEAMS_MCP_HUB_AUTH_TIMEOUT_MS") ?? DEFAULT_BRIDGE_OPTIONS.authTimeoutMs;
+/**
+ * The most of the extension's frames a relaying host holds before the hub socket's holder has
+ * proved itself, and their bytes. The extension sends its hello and waits for the welcome (it
+ * answers requests, and none can come before), so a handful is already generous; past this the
+ * host exits rather than grow its memory, and the extension connects again. Dropping instead would
+ * lose answers without a word. 1 MB is Chrome's own limit for one message to the extension.
+ */
+const MAX_HELD_FRAMES = 64;
+const MAX_HELD_BYTES = 1024 * 1024;
 
 const log = hubLog(join(CONFIG_DIR, "hub.log"));
 const traffic = trafficLogger(log);
@@ -138,6 +153,7 @@ async function becomeHost(replay: Buffer[]): Promise<boolean> {
     features: ["native"],
     onExtensionsChange: (list) => linger(list.length),
     onEvent: (event, fields) => log(event, fields),
+    authTimeoutMs: AUTH_TIMEOUT_MS,
     ...(KEEP_ALIVE_MS ? { keepAliveMs: KEEP_ALIVE_MS } : {}),
   });
   await bridge.start();
@@ -203,22 +219,31 @@ function relay(pending: Buffer[]): Promise<number> {
       ws.send(prepare(f));
     };
     const waiting = [...pending];
+    let held = waiting.reduce((n, f) => n + f.length, 0); // bytes in `waiting`
     let helloSent = false;
     const sendHello = (f: Buffer) => {
       helloSent = true;
       forward(f);
+      // The welcome must come as soon as the serving host has the hello, as it comes to any client.
+      clearTimeout(deadline);
+      deadline = setTimeout(() => refuse("the hub socket's holder sent no proven welcome in time"), AUTH_TIMEOUT_MS);
     };
     sink = (f) => {
       if (proven && ws.readyState === WebSocket.OPEN) return forward(f);
       // A hello that comes after the challenge goes on at once; the rest waits for the welcome's proof.
       if (challenge && !helloSent && isHello(f)) return sendHello(f);
       waiting.push(f);
+      held += f.length;
+      // Not one buffer more for a holder that never proves itself (see MAX_HELD_FRAMES).
+      if (waiting.length > MAX_HELD_FRAMES || held > MAX_HELD_BYTES) refuse("the extension sent too much before the hub socket's holder proved itself");
     };
-    const refuse = () => {
-      log("exit", { reason: "the hub socket's holder failed its proof" });
+    const refuse = (reason = "the hub socket's holder failed its proof") => {
+      log("exit", { reason });
       ws.terminate();
       process.exit(1);
     };
+    // A holder that keeps quiet gets no longer than a client gets from the serving host to prove itself.
+    let deadline = setTimeout(() => refuse("the hub socket's holder sent no challenge in time"), AUTH_TIMEOUT_MS);
     ws.on("message", (raw: Buffer) => {
       if (proven) return port.send(raw.toString("utf8"));
       let msg: any;
@@ -230,6 +255,7 @@ function relay(pending: Buffer[]): Promise<number> {
       if (!challenge) {
         if (msg?.type !== "challenge" || typeof msg.nonce !== "string") return refuse();
         challenge = msg.nonce;
+        clearTimeout(deadline);
         log("relay", { version: SERVER_VERSION });
         // The hello first, alone: the serving host takes nothing else before it.
         const first = waiting.filter(isHello).at(-1) ?? hello;
@@ -238,11 +264,13 @@ function relay(pending: Buffer[]): Promise<number> {
       }
       if (msg?.type !== "welcome" || !sameText(msg.proof, proof(config.token, "server:socket", nonce))) return refuse();
       proven = true;
+      clearTimeout(deadline);
       port.send(raw.toString("utf8"));
       for (const f of waiting.splice(0)) if (!isHello(f)) forward(f);
     });
     ws.on("error", () => {});
     ws.on("close", (code: number) => {
+      clearTimeout(deadline);
       relaySocket = undefined;
       sink = (f) => queue.push(f);
       resolve(code);
