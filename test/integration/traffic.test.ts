@@ -2,6 +2,7 @@
 // AI has turned recording on with api_traffic({ record: true }).
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createFakeChrome, loadWorker, openedSockets, type FakeChrome } from "../helpers/fakeChrome.js";
+import { until } from "../helpers/timing.js";
 
 afterEach(() => {
   vi.useRealTimers();
@@ -87,7 +88,9 @@ describe("3.4: the traffic log records only while api_traffic turned it on", () 
     await worker.handlers.apiTraffic({}); // the log's queued updates (the request and its status) have run
     const next = createFakeChrome();
     await loadWorker(next);
-    await vi.waitFor(async () => expect((await first.chrome.storage.session.get("traffic")).traffic).toHaveLength(1));
+    // The save's timer fires about half a second later; until's 3 s leaves a busy machine room for that.
+    await until(() => trafficWrites(first) > 0, 3_000, "the pending save of the log");
+    expect((await first.chrome.storage.session.get("traffic")).traffic).toHaveLength(1);
     expect(await next.chrome.storage.session.get("traffic")).toEqual({});
   });
 });

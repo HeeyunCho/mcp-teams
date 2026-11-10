@@ -26,7 +26,8 @@ export const IDLE_MS = 5 * 60_000;
 
 /**
  * Where the note goes: get_version's output, or the error of a call that found no session. The worker
- * fails such a call only after its own recovery (a background Teams tab) failed for it.
+ * fails such a call only after it waited for the session: for the user's Teams tab while that is
+ * still loading, else (after a few seconds) for its own recovery, a background Teams tab.
  */
 export type NoteFor = "get_version" | "failed call";
 
