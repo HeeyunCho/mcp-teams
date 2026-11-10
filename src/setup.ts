@@ -28,7 +28,7 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
  * PowerShell: inside the quotes, %VAR% still expands in cmd and $x in PowerShell.
  */
 export function quote(arg: string, platform: NodeJS.Platform = process.platform): string {
-  if (platform === "win32") return /[\s&%$`]/.test(arg) ? `"${arg}"` : arg;
+  if (platform === "win32") return /[\s&%$`';]/.test(arg) ? `"${arg}"` : arg;
   return /[^A-Za-z0-9_@%+=:,./-]/.test(arg) ? `'${arg.replace(/'/g, "'\\''")}'` : arg;
 }
 
