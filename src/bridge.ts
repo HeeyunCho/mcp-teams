@@ -68,8 +68,8 @@ export interface Capabilities {
 /**
  * Protocol features this server supports, sent in welcome, peer-hello and peer-welcome.
  * - "checksSend": as the hub, it checks the browser it picks for a send (#22).
- * Reserved, declared once they ship (ADR 0001): "native" (sent only by a native host) and
- * "hostSwitch" (the hub can hand over to a newer build).
+ * The native host adds "native" (NativeHostOptions.features, #123). Reserved, declared once it
+ * ships (ADR 0001): "hostSwitch" (the hub can hand over to a newer build).
  */
 export const SERVER_FEATURES: readonly string[] = Object.freeze(["checksSend"]);
 
