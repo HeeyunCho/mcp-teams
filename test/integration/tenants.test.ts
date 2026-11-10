@@ -536,8 +536,8 @@ describe("77.3: what a 401 and an account switch make the worker read again", ()
   const autoSendToSelf = (worker: Worker, t: Tenant) =>
     expect(worker.handlers.requestSend({ conversation: "48:notes", text: "Remember the slides", autoSendTo: [myEmail(t)] })).resolves.toMatchObject({ sent: true, autoSent: true });
   /**
-   * #77: back as a within 30 s of the switch to b, a capture of the account it switched from: the
-   * account is unsure, so the auto-send is refused; once the switch's 30 s are over, it goes through.
+   * #77: back to tenant a within 30 s of the switch to b. a is the account that switch was from, so
+   * the account is unsure and the auto-send is refused; once the switch's 30 s are over, it goes through.
    */
   const autoSendToSelfOnceSure = async (worker: Worker, t: Tenant) => {
     await expect(worker.handlers.requestSend({ conversation: "48:notes", text: "Remember the slides", autoSendTo: [myEmail(t)] })).resolves.toEqual({

@@ -1,11 +1,14 @@
 // Timing helpers for tests that wait on real timers: polling for a condition and stalling the
 // whole process.
 
-/** Polls until cond holds (default 3 s). */
+/**
+ * Polls until cond holds (default 3 s). The timeout runs on performance.now(), not Date, so it
+ * still ends under a frozen fake Date (vi.useFakeTimers with toFake: ["Date"]).
+ */
 export async function until(cond: () => boolean, timeoutMs = 3_000, what = "condition"): Promise<void> {
-  const t0 = Date.now();
+  const t0 = performance.now();
   while (!cond()) {
-    if (Date.now() - t0 > timeoutMs) throw new Error(`timed out waiting for ${what}`);
+    if (performance.now() - t0 > timeoutMs) throw new Error(`timed out waiting for ${what}`);
     await new Promise((r) => setTimeout(r, 10));
   }
 }

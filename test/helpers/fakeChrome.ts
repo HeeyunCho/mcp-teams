@@ -352,8 +352,8 @@ export type FakeChrome = ReturnType<typeof createFakeChrome>;
 export interface Worker {
   /** Each handler; the bridge's requests also pass a request context (see dispatch). */
   handlers: Record<string, (params: any, ctx?: unknown) => Promise<any>>;
-  /** Runs a request as the bridge sends it ({ timeoutMs, deadline }), or a { type: "cancel", id }. */
-  dispatch: (msg: { type: string; id?: string; method?: string; params?: unknown; timeoutMs?: number; deadline?: number }, send: (reply: object) => void) => Promise<void>;
+  /** Runs a request as the bridge sends it ({ timeoutMs, deadline, turn }), or a { type: "cancel" | "turn", id }. */
+  dispatch: (msg: { type: string; id?: string; method?: string; params?: unknown; timeoutMs?: number; deadline?: number; turn?: boolean }, send: (reply: object) => void) => Promise<void>;
   registerListeners: () => void;
   /** How many confirmation windows wait for the user's decision. */
   pendingSendCount: () => number;
@@ -427,6 +427,33 @@ export async function loadWorker(fake: FakeChrome): Promise<Worker> {
   const worker: Worker = await import("../../extension/background.js");
   loadedWorkers.push(worker);
   return worker;
+}
+
+/** A worker's answer to a request (see dispatch). */
+export interface WorkerResponse {
+  ok: boolean;
+  result?: any;
+  error?: string;
+}
+
+/**
+ * Runs `method` as a hub that hands out turns sends it (`turn: true`, #35), so a test sees when it
+ * waits at a throttle gate: `atGate` resolves once the request gives its turn back to wait (the
+ * gate is shut, and it hasn't sent since). Its turn is given back as soon as it asks.
+ * `response` is its answer.
+ */
+export function requestWithTurn(worker: Worker, id: string, method: string, params: unknown = {}) {
+  let waiting!: () => void;
+  const atGate = new Promise<void>((r) => (waiting = r));
+  const response = new Promise<WorkerResponse>((resolve) => {
+    void worker.dispatch({ type: "request", id, method, params, timeoutMs: 60_000, turn: true }, (m) => {
+      const msg = m as { type: string } & WorkerResponse;
+      if (msg.type === "gate-wait") waiting();
+      else if (msg.type === "gate-open") void worker.dispatch({ type: "turn", id }, () => {});
+      else if (msg.type === "response") resolve(msg);
+    });
+  });
+  return { atGate, response };
 }
 
 /**

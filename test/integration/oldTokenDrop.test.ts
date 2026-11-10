@@ -3,7 +3,7 @@
 // older (`iat`) than the one that caused the switch is dropped: not stored, nothing cleared, no switch.
 // The real worker (extension/background.js) under a fake chrome, the account showing through Teams' own requests.
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { BASES, createFakeChrome, loadWorker, never, openedSockets, reply, TEAMS_ORIGIN, type FakeChrome, type SentRequest } from "../helpers/fakeChrome.js";
+import { BASES, createFakeChrome, loadWorker, never, openedSockets, reply, requestWithTurn, TEAMS_ORIGIN, type FakeChrome, type SentRequest } from "../helpers/fakeChrome.js";
 import { fakeJwt } from "../helpers/jwt.js";
 
 afterEach(() => {
@@ -179,14 +179,13 @@ describe("77.2: a request is never sent again with the headers of an account tha
   const RETRIED = /account changed while a request was about to be retried after its Teams tab closed or reloaded; it's now signed in as another account/;
 
   it("77.2: Teams switches to Sam while a read of Alex's waits out a 429: the read fails as account changed, and Alex's headers aren't sent again", async () => {
-    let switched: Promise<unknown> | null = null;
-    const fake: FakeChrome = createFakeChrome({
+    let throttled = false;
+    const fake = createFakeChrome({
       captured: [],
       services: {
         csa: (req) => {
-          if (switched) return services.csa(req);
-          // Throttled; Teams switches to Sam while the read waits.
-          switched = new Promise((r) => setTimeout(r, 100)).then(() => teamsSends(fake, bearer("sam", SWITCHING)));
+          if (throttled) return services.csa(req);
+          throttled = true;
           return reply(429, { message: "Too many requests" }, { headers: { "retry-after": "1" } });
         },
       },
@@ -195,9 +194,12 @@ describe("77.2: a request is never sent again with the headers of an account tha
     const worker = await loadWorker(fake);
     worker.registerListeners();
     await teamsSends(fake, bearer("alex", OLD));
+    const read = requestWithTurn(worker, "r1", "listChats");
+    await read.atGate; // throttled, it waits out the 429 before sending again
 
-    await expect(worker.handlers.listChats({})).rejects.toThrow(WAITED);
-    await switched;
+    await teamsSends(fake, bearer("sam", SWITCHING));
+
+    await expect(read.response).resolves.toMatchObject({ ok: false, error: expect.stringMatching(WAITED) });
     expect(fake.sent.map(accountOf)).toEqual(["alex"]); // the throttled one, never again
     expect(await signedInAs(worker)).toBe(`8:orgid:${ACCOUNT.sam.oid}`);
   });
@@ -271,18 +273,17 @@ describe("77.2: a request is never sent again with the headers of an account tha
     worker.registerListeners();
     await teamsSends(fake, bearer("alex", OLD));
     // The first read is throttled: the gate shuts for a second.
-    const first = worker.handlers.listChats({});
-    void first.catch(() => {});
-    await vi.waitFor(() => expect(csaReads(fake)).toBe(1));
-    await new Promise((r) => setTimeout(r, 50));
+    const first = requestWithTurn(worker, "r1", "listChats");
+    await first.atGate;
     // The second read, as Alex, waits behind the gate before its first send.
-    const second = worker.handlers.listChats({ refresh: true });
-    await new Promise((r) => setTimeout(r, 100));
+    const second = requestWithTurn(worker, "r2", "listChats", { refresh: true });
+    await second.atGate;
+    expect(csaReads(fake)).toBe(1);
 
     await teamsSends(fake, bearer("sam", SWITCHING));
 
-    await expect(second).rejects.toThrow(WAITED);
-    await expect(first).rejects.toThrow(WAITED);
+    await expect(second.response).resolves.toMatchObject({ ok: false, error: expect.stringMatching(WAITED) });
+    await expect(first.response).resolves.toMatchObject({ ok: false, error: expect.stringMatching(WAITED) });
     expect(fake.sent.map(accountOf)).toEqual(["alex"]); // only the throttled one
   });
 });
