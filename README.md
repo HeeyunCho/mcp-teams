@@ -69,13 +69,13 @@ Several AI sessions share one connection to the browser: the first one runs it, 
 
 ### When the extension's console shows connection errors
 
-While no mcp-teams server is listening on the bridge port (`port`, 47393 by default), the extension's console (and its Errors page in `chrome://extensions`) shows lines like this:
+While no mcp-teams server is listening on the bridge port (`port`, 47393 by default), the extension's console (and its Errors page in `chrome://extensions`) shows lines like this (with your own port number if you changed it):
 
 ```
 WebSocket connection to 'ws://127.0.0.1:47393/' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED
 ```
 
-That's expected when no AI app runs mcp-teams, or for a moment while sessions hand the bridge over to each other. Chrome writes the line itself for each attempt. The extension keeps retrying (quickly at first, then every 30 s) and connects by itself once a server listens. It needs looking into only if `get_version` keeps reporting the extension as not connected (`extension: null`, `bridge` waiting for the extension) while a server is running.
+That's expected when no AI app runs mcp-teams, or for a moment while sessions hand the bridge over to each other. Chrome writes the line itself for each attempt; the extension can't hide it. The extension keeps retrying (quickly at first, then every 30 s) and connects by itself once a server listens. It needs looking into only if `get_version` keeps reporting the extension as not connected (`extension: null`, `bridge: "waiting for extension"`) while a server is running. If you changed `port`, set the same port in the extension popup too: a mismatch also gives these lines.
 
 ### When Teams has no session
 
