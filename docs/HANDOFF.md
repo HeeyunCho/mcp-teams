@@ -1,8 +1,51 @@
-# Handoff: mcp-teams after 0.3.52 (2026-11-08)
+# Handoff: mcp-teams after 0.3.55 (updated 2026-11-10 on the Windows PC)
 
-Repo: GitHub `HeeyunCho/mcp-teams`. Branch `main`: 0.3.52 is the latest release (`31e06fb chore(release): v0.3.52`), followed only by docs merges (#119 and this handoff). No PRs are open, and no worktrees or work branches are left.
+Repo: GitHub `HeeyunCho/mcp-teams`. Branch `main`: **0.3.55** is the latest release (`525aadd chore(release): v0.3.55`). One work branch is in progress (#122, see below).
 
-## Where things stand
+## Merged on 2026-11-09/10
+
+Each had a fresh-subagent review with no blockers and passed CI on Linux and Windows (test, test-windows, gitleaks).
+
+| PR | Change | Release |
+|---|---|---|
+| #121 | The failed-call note's status read waits 3 s, not 60 s; tests for its `connected`/`signal` branches; `failedCallNote`/`isMissingSession` unit-tested (Part of #103) | 0.3.53 |
+| #125 | **Unsure account** (#77): any capture of the previous account within 30 s of a switch marks the account unsure, and sends are refused. Reads carry `accountNote`, `get_version` shows `accountUnsure`, and `tokenIssuedAt` reads the same token as `tokenOid` | 0.3.54 |
+| #127 | PR 1 of #123: a transport interface in `src/bridge.ts` (`BridgeSocket`, `BridgeTransport`, `webSocketTransport`), a refactor with no change in behaviour | 0.3.55 |
+
+## In progress
+
+- **#122 item 1:** a subagent works in its own Agent-tool worktree on branch `fix/122-own-requests-not-teams`.
+  - **The problem:** the worker's own requests seem to bump `seenAt`, so `services.substrate` looks fresh while the Teams tab is stuck at sign-in.
+  - **The approach:** confirm it with a failing test first, then stop own requests counting as Teams sending the session.
+  - **Then:** a fresh review, "Part of #122", PR.
+
+## Open issues and decisions (2026-11-09/10)
+
+- **#123, the native-messaging host (0.4.0, ADR 0001 step 3):**
+  - Grilled with the user; it has 13 decisions, five PRs in order, and acceptance checkboxes, including manual checks on Windows and the Mac.
+  - PR 1 is merged (#127).
+  - **Next is PR 2:** `dist/hub.js`, the 4-byte framing with the 1 MB split, the relaying host, the peer-only TCP listener, and a test against the real `mcp-teams@0.3.52` stepping down.
+  - What PR 2 must add to the transport interface is posted on #123: several listeners, a label for where a connection came from, `join()` taking a transport, and a synthetic `pong` for a native port.
+  - PR 5 (default on, `feat!:` → 0.4.0) waits for both manual checks.
+  - Outlook's pipe-name collision for non-ASCII usernames is filed as mcp-newoutlook#178.
+- **#77:** the switch-back decision is implemented (#125). The leftovers are posted on #77:
+  - test 2b uses the real clock;
+  - no test checks `accountUnsure: null` after A → B → C;
+  - the unsure guard is copied at four send paths;
+  - the hand-kept `READS` list;
+  - fixed delays in tests 7/7c.
+- **#103:** #121 is merged. Still open:
+  - "the extension's own recovery" wording (follow-up comment of 2026-11-09);
+  - the `api_traffic({ clear: true })` wording in docs/testing.md;
+  - `{ timeout: 2000 }` in `traffic.test.ts`.
+- **#122** (`ready-for-agent`, with #103/#104):
+  - item 1 is in progress (above);
+  - "the extension lists no features" is by design (`CAPABILITIES.features` is `[]` until #123).
+- **#124** (`needs-info`, with #111/#96): the extension stayed disconnected about half an hour while a hub was listening, right after a rebuild.
+  - Next time, before reloading anything, capture the service worker's state and console in `chrome://extensions`, and run `Get-NetTCPConnection -LocalPort 47393`.
+- **#111/#96** (`bug`, `ready-for-human`): close with the native host and launcher (#123, ADR 0002). #111 was triaged on 2026-11-09.
+
+## Earlier (2026-11-08)
 
 - **Merged on 2026-11-08.** Each had a fresh-subagent review with no blockers and passed CI on Linux and Windows.
 
@@ -27,12 +70,34 @@ Repo: GitHub `HeeyunCho/mcp-teams`. Branch `main`: 0.3.52 is the latest release 
     - no test for a step-down during a drain;
     - "drain" isn't in `GLOSSARY.md`;
     - peers don't re-send refused calls through the next hub.
-- **#111** (stale server after a release) stays open on purpose. Its stale-server half waits for the native host and launcher below.
+- **#111** (stale server after a release) and **#96** stay open on purpose. Their stale-server half waits for the native host and launcher below.
 - **ADRs on main:** `docs/adr/0001-where-the-hub-lives.md` (native-messaging host plus TCP fallback) and `docs/adr/0002-versioned-launcher.md`, with their terms in `GLOSSARY.md`. Read them before any hub or launcher work.
   - Delivery order (ADR 0001): #112 drain (done) → #115 handshake (done) → native host (0.4.0) → launcher (0.5.0).
 - **Releases are automatic.** `.github/workflows/version.yml` runs on every push to `main` except Markdown-only pushes:
   - it bumps the version from the commit messages (`scripts/bump-version.mjs`), tags it, and publishes to npm with trusted publishing (OIDC);
   - npm can take a minute or two to show the new version (`npm view mcp-teams version --prefer-online`).
+
+## This Windows PC (checked 2026-11-09)
+
+- **Live install:** `C:\Orca_Project\mcp-teams` is the live install. Every session's `teams` server runs its `dist/index.js`, and Chrome's Teams extension loads its `extension/` folder.
+  - On 2026-11-10 it was rebuilt on **0.3.55** (build id `12cf2b1c15b6`), after #127 merged. The extension copy in `~/.mcp-teams/extension` is on 0.3.55.
+  - **Chrome loads the extension from `~/.mcp-teams/extension`,** a copy that a *starting* server syncs from the checkout (`src/index.ts:41`, `syncExtension`). A rebuild alone doesn't update it.
+    - `node dist/index.js reload-extension` syncs it, but on this PC it answers "hub restarted" every time. The extension then reloads itself and reconnects within about 5 s.
+    - The `reload_extension` tool only reloads from that copy.
+  - **The hub** is Claude Desktop's server (0.3.53).
+  - **Running servers keep their old code** (0.3.46–0.3.54) until each session reconnects with `/mcp`. Run the process check under "Useful checks" or ask the agent for the list.
+- **Right after the reload:** no Teams session was captured (all four services null, `signedInAs: null`).
+  - The Teams tab has to load chats again to capture one.
+  - Sessions that use the Teams tools need `/mcp` → teams → Reconnect.
+- **Memory:** only about 2 GB of 27 GB was free. A subagent's full test run was stopped once for low memory.
+- **Worktrees:** an Agent-tool worktree starts with an empty `node_modules`. Run `npm ci` in it before testing; otherwise vitest resolves from the main checkout. One such run exited 1 with no output.
+- **Node versions:**
+  - default `node` is v26;
+  - **`npx -y node@20` doesn't give Node 20 here.** The `node` package's binary never gets set up, so it falls through to v26: `npx -y node@20 -v` prints `v26.3.0`.
+  - **For a real Node 20 run:**
+    - use the official zip from nodejs.org, checked against `SHASUMS256.txt` and unpacked outside the repo;
+    - run `<that folder>/node.exe node_modules/vitest/vitest.mjs run --fileParallelism=false`;
+    - check that `node.exe -v` prints v20 first.
 
 ## This Mac (checked 2026-11-08, about 08:10 local time)
 
@@ -46,11 +111,18 @@ Repo: GitHub `HeeyunCho/mcp-teams`. Branch `main`: 0.3.52 is the latest release 
 
 ## Next up
 
-1. **Native-messaging host (0.4.0, ADR 0001).** No issue exists yet.
-   - Open one from the ADR first.
-   - Where the ADR leaves a decision open, grill it with the user before writing the issue.
+1. **Native-messaging host (0.4.0, ADR 0001): issue #123**, grilled with the user on 2026-11-09/10.
+   - It has 13 decisions, five PRs in order, and acceptance checkboxes, including manual checks on Windows and the Mac.
+   - PR 5 (default on, `feat!:` → 0.4.0) waits for both manual checks.
+   - **PR 1 (the transport interface) is PR #127.**
+     - Branch `refactor/123-transport-interface`, worktree `.claude/worktrees/agent-af25389b385ab3f06`.
+     - It has had a fresh review with no blockers. CI is the full run.
+     - What PR 2 must add is posted on #123.
 2. **Versioned launcher (0.5.0, ADR 0002).** The same: open the issue from the ADR first.
-3. **`ready-for-agent` issues:** #103 and #77 (their leftovers, see above), and #76 (Windows quoting in printed setup commands).
+3. **`ready-for-agent` issues:**
+   - #103: finish the branch above.
+   - #77: implement the switch-back decision once it's posted, plus the other leftovers.
+   - #76: Windows quoting in printed setup commands.
 
 Run `gh issue list` for the full backlog. #21 and #96 are the umbrella issues that PRs reference as "Part of".
 
