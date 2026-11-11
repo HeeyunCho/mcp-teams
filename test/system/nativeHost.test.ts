@@ -7,12 +7,12 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { afterEach, describe, expect, it } from "vitest";
-import { proof, socketTransport, type BridgeSocket, type ExtensionBridge } from "../../src/bridge.js";
+import { DEFAULT_BRIDGE_OPTIONS, proof, socketTransport, type BridgeSocket, type ExtensionBridge } from "../../src/bridge.js";
 import { SERVER_VERSION } from "../../src/config.js";
 import { registerTools } from "../../src/tools.js";
 import { fakeExtension, TOKEN } from "../helpers/bridgeHarness.js";
 import { nativeHarness } from "../helpers/nativeHost.js";
-import { until } from "../helpers/timing.js";
+import { stall, until } from "../helpers/timing.js";
 
 let h: Awaited<ReturnType<typeof nativeHarness>> | undefined;
 afterEach(async () => {
@@ -340,7 +340,16 @@ describe("#123: the native host", { timeout: 30_000 }, () => {
 
   it("#123: once the serving host has proved itself, the relay's deadline is off: calls go through long after it", async () => {
     h = await nativeHarness();
-    const env = { TEAMS_MCP_HUB_AUTH_TIMEOUT_MS: String(AUTH_MS) };
+    const { logText } = h;
+    /** A failure message with hub.log, which names the deadline when it ends the relay (its exit reason). */
+    const withLog = (what: string) => `${what}; hub.log:\n${logText()}`;
+    // Only the deadline is short. The serving host's heartbeats keep their real period (#145): at
+    // the harness's 200 ms, a relaying host busy for two of them on a loaded machine has its relayed
+    // connection cut, and the call in flight fails with "Browser extension disconnected" as if the
+    // deadline had ended the relay (a session cut the same way fails with "hub restarted", and its
+    // own watchdog with "hub stopped responding"). hub.log shows no line for such a cut. h.server()
+    // still runs at FAST, but as a peer its watchdog follows the hub's declared heartbeat (20 s).
+    const env = { TEAMS_MCP_HUB_AUTH_TIMEOUT_MS: String(AUTH_MS), TEAMS_MCP_HUB_KEEPALIVE_MS: String(DEFAULT_BRIDGE_OPTIONS.keepAliveMs) };
     await h.host({ env, browser: "Chrome", instance: "profile-1", handle: (r) => (r.method === "status" ? { teamsTabs: 0 } : { from: "chrome" }) });
     const edge = await h.host({ env, browser: "Edge", instance: "profile-2", handle: (r) => (r.method === "status" ? { teamsTabs: 1, sessions: [{ sessionCaptured: true }] } : { from: "edge" }) });
     expect(edge.welcome?.capabilities.features).toContain("native");
@@ -350,8 +359,15 @@ describe("#123: the native host", { timeout: 30_000 }, () => {
     // Well past the deadline (more than three of them) ...
     await until(() => Date.now() > t0 + 2_000, 5_000, "two seconds after the welcome");
     // ... the relaying host still runs and passes calls both ways.
-    expect(edge.exitCode).toBeUndefined();
-    await expect(server.call("readMessages", {}, 3_000)).resolves.toEqual({ from: "edge" });
+    expect(edge.exitCode, withLog("the relaying host exited")).toBeUndefined();
+    const call = server.call("readMessages", {}, 3_000);
+    // This whole test process (the session and both fake extensions, not the relaying host) blocks
+    // for longer than AUTH_MS while the call is on its way through the relay, as on a busy machine:
+    // a deadline that restarted with relayed traffic would end the relay here. At the harness's
+    // 200 ms pings this also got the session dropped (#145).
+    stall(AUTH_MS + 400);
+    // A failed call becomes its message with hub.log, so toEqual shows why it failed.
+    expect(await call.catch((err: Error) => withLog(`failed: ${err.message}`))).toEqual({ from: "edge" });
     expect(edge.requests().some((r) => r.method === "readMessages")).toBe(true);
   });
 
