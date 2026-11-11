@@ -184,6 +184,23 @@ describe("#156: why a handshake was refused", () => {
     const fields = await closed(events);
     expect(fields).toMatchObject({ code: 4401, reason: "bad token", via: "tcp", hello: "peer-hello" });
   });
+
+  it("still names the auth timeout when the client never answers the close (a stalled worker)", async () => {
+    h = await bridgeHarness();
+    const { events, diagnose } = recorder();
+    await h.session("1.0.0", { diagnose, authTimeoutMs: AUTH_MS });
+    const socket = new WebSocket(`ws://127.0.0.1:${h.port}`, { origin: EXTENSION_ORIGIN });
+    socket.on("error", () => {});
+    // After the challenge, the next bytes are the hub's close frame: drop the connection without
+    // sending a close back, so the hub's close event carries no reason of its own.
+    socket.once("message", () => {
+      const raw = (socket as any)._socket;
+      raw.removeAllListeners("data");
+      raw.once("data", () => raw.destroy());
+    });
+    const fields = await closed(events);
+    expect(fields).toMatchObject({ reason: "auth timeout", via: "tcp", hello: "none" });
+  });
 });
 
 // #153: get_version's status read (up to the bridge's default minute) is timed too, so an answer
