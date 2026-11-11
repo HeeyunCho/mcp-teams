@@ -35,6 +35,8 @@ export interface NativeHostOptions {
   hubScript?: string;
   /** Runs `reg` with these arguments (Windows). */
   reg?: (args: string[]) => void;
+  /** Reads an HKCU key's default value, null when there is none (Windows; read-only). */
+  regQuery?: (key: string) => string | null;
 }
 
 interface Target {
@@ -55,14 +57,20 @@ export interface HostInstall {
   changed: boolean;
   /** The Node the host launcher named before, which no longer exists (nvm, fnm: decision 11). */
   nodeWasMissing?: string;
+  /** The dist/hub.js it ran before, which no longer exists (a pruned npx cache, a moved clone). */
+  hubWasMissing?: string;
 }
 
-/** A registration found on this computer, and whether the Node its host launcher starts is still there. */
+/** A registration found on this computer, and whether what its host launcher starts is still there. */
 export interface RegisteredHost {
   browser: HostBrowser;
-  /** null: the host launcher names no Node this code can read back (edited by hand). */
+  /** null (with hub): the host launcher names nothing this code can read back (edited by hand). */
   node: string | null;
   nodeExists: boolean | null;
+  hub: string | null;
+  hubExists: boolean | null;
+  /** Windows: the manifest is there, but this browser's HKCU key is missing or names another file. */
+  keyMissing?: true;
 }
 
 export interface InstallResult {
@@ -173,23 +181,57 @@ function writeIfChanged(path: string, text: string, mode?: number): boolean {
   return !same;
 }
 
-const defaultReg = (args: string[]) => void execFileSync("reg", args, { stdio: "ignore", windowsHide: true });
+/**
+ * reg.exe by its full path: a bare "reg" is looked up by libuv in the current folder first, where
+ * a planted reg.exe would run.
+ */
+export function regExe(env: Record<string, string | undefined> = process.env): string {
+  const root = (env.SystemRoot ?? env.SYSTEMROOT ?? "C:\\Windows").replace(/[\\/]+$/, "");
+  return `${root}\\System32\\reg.exe`;
+}
+
+const defaultReg = (args: string[]) => void execFileSync(regExe(), args, { stdio: "ignore", windowsHide: true });
+
+/** A key's default value from `reg query <key> /ve` output: the text after REG_SZ (the "(Default)" label is localized). */
+export function regDefaultValue(out: string): string | null {
+  for (const line of out.split(/\r?\n/)) {
+    const m = /\sREG_(?:EXPAND_)?SZ\s+(.*\S)\s*$/.exec(line);
+    if (m) return m[1];
+  }
+  return null;
+}
+
+/** Reads a key's default value (read-only); null when the key or its value is missing. */
+const defaultRegQuery = (key: string): string | null => {
+  try {
+    return regDefaultValue(execFileSync(regExe(), ["query", key, "/ve"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], windowsHide: true }));
+  } catch {
+    return null;
+  }
+};
 
 const hostLauncherName = (platform: NodeJS.Platform) => (platform === "win32" ? "mcp-teams-hub.bat" : "mcp-teams-hub");
 
 /**
- * The Node a host launcher starts, read back from its text (hostLauncherScript's output); null if
- * it names none in that form. A .bat's folder variables are expanded with env and its doubled %
- * undone, as cmd would; a POSIX one has its shell escapes undone.
+ * The Node and dist/hub.js a host launcher starts, read back from its text (hostLauncherScript's
+ * output); null if it names them in no such form. A .bat's folder variables are expanded with env
+ * and its doubled % undone, as cmd would; a POSIX one has its shell escapes undone.
  */
-export function launcherNode(text: string, platform: NodeJS.Platform, env: Record<string, string | undefined> = process.env): string | null {
+export function launcherPaths(text: string, platform: NodeJS.Platform, env: Record<string, string | undefined> = process.env): { node: string; hub: string } | null {
   if (platform === "win32") {
-    const quoted = /^@echo off\r?\n"([^"]*)"/.exec(text)?.[1];
-    if (quoted === undefined) return null;
-    return quoted.replace(/%%|%(\w+)%/g, (m, name?: string) => (name === undefined ? "%" : (BAT_FOLDERS as readonly string[]).includes(name) && env[name] ? env[name].replace(/\//g, "\\").replace(/\\+$/, "") : m));
+    const m = /^@echo off\r?\n"([^"]*)" "([^"]*)"/.exec(text);
+    if (!m) return null;
+    const unbat = (s: string) =>
+      s.replace(/%%|%(\w+)%/g, (all, name?: string) => {
+        if (name === undefined) return "%";
+        const dir = (BAT_FOLDERS as readonly string[]).includes(name) ? env[name] : undefined;
+        return dir ? dir.replace(/\//g, "\\").replace(/\\+$/, "") : all;
+      });
+    return { node: unbat(m[1]), hub: unbat(m[2]) };
   }
-  const quoted = /^#!\/bin\/sh\nexec "((?:[^"\\]|\\.)*)"/.exec(text)?.[1];
-  return quoted === undefined ? null : quoted.replace(/\\(.)/g, "$1");
+  const m = /^#!\/bin\/sh\nexec "((?:[^"\\]|\\.)*)" "((?:[^"\\]|\\.)*)"/.exec(text);
+  const unsh = (s: string) => s.replace(/\\(.)/g, "$1");
+  return m ? { node: unsh(m[1]), hub: unsh(m[2]) } : null;
 }
 
 const resolveOptions = (o: NativeHostOptions) => ({
@@ -198,53 +240,93 @@ const resolveOptions = (o: NativeHostOptions) => ({
   env: o.env ?? process.env,
 });
 
-/** What each registration's host launcher (for each browser found) names as its Node. */
-function readRegistrations(home: string, platform: NodeJS.Platform, env: Record<string, string | undefined>): (RegisteredHost & { target: Target })[] {
+type ReadOptions = Pick<NativeHostOptions, "home" | "platform" | "env" | "regQuery">;
+
+/**
+ * Each registration found (a browser whose profile folder and our manifest are there): what its
+ * host launcher starts, and on Windows whether the browser's HKCU key names that manifest.
+ */
+function readRegistrations(o: ReadOptions): (RegisteredHost & { target: Target })[] {
+  const { home, platform, env } = resolveOptions(o);
+  const regQuery = o.regQuery ?? defaultRegQuery;
   const found: (RegisteredHost & { target: Target })[] = [];
   for (const target of targets(home, platform, env)) {
-    if (!existsSync(target.profileDir) || !existsSync(join(target.dir, MANIFEST_FILE))) continue;
+    const manifest = join(target.dir, MANIFEST_FILE);
+    if (!existsSync(target.profileDir) || !existsSync(manifest)) continue;
     let text = "";
     try {
       text = readFileSync(join(target.dir, hostLauncherName(platform)), "utf8");
     } catch {
-      // No host launcher: it names no Node.
+      // No host launcher: it names nothing.
     }
-    const node = launcherNode(text, platform, env);
-    found.push({ target, browser: target.browser, node, nodeExists: node === null ? null : existsSync(node) });
+    const paths = launcherPaths(text, platform, env);
+    const keyMissing = target.registryKey !== undefined && regQuery(target.registryKey)?.toLowerCase() !== manifest.toLowerCase();
+    found.push({
+      target,
+      browser: target.browser,
+      node: paths?.node ?? null,
+      nodeExists: paths ? existsSync(paths.node) : null,
+      hub: paths?.hub ?? null,
+      hubExists: paths ? existsSync(paths.hub) : null,
+      ...(keyMissing ? { keyMissing: true as const } : {}),
+    });
   }
   return found;
 }
 
 /**
- * The host registrations on this computer and whether each one's Node is still there (decision
- * 11): get_version and setup say "run setup again" when it has gone. Reads files only.
+ * The host registrations on this computer, and whether what each starts is still there (decision
+ * 11): get_version and setup say "run setup again" when the Node or dist/hub.js has gone, or a
+ * browser's HKCU key is missing. Reads files and (Windows) the registry; writes nothing.
  */
-export function registeredHosts(o: Pick<NativeHostOptions, "home" | "platform" | "env"> = {}): RegisteredHost[] {
-  const { home, platform, env } = resolveOptions(o);
-  return readRegistrations(home, platform, env).map(({ browser, node, nodeExists }) => ({ browser, node, nodeExists }));
+export function registeredHosts(o: ReadOptions = {}): RegisteredHost[] {
+  return readRegistrations(o).map(({ target: _target, ...host }) => host);
 }
 
 /** What get_version shows about the native host's registration (with "nativeHost": true). */
 export interface NativeHostReport {
+  /** The browsers whose registration is complete (Windows: their HKCU key names our manifest). */
   registered: HostBrowser[];
   /** The Nodes registrations start that no longer exist. */
   nodeMissing?: string[];
+  /** The dist/hub.js files registrations run that no longer exist. */
+  hubMissing?: string[];
+  /** Windows: browsers with our manifest but no HKCU key naming it. */
+  keyMissing?: HostBrowser[];
   hint?: string;
 }
 
+const gonePaths = (hosts: RegisteredHost[], pick: (h: RegisteredHost) => [string | null, boolean | null]) => [
+  ...new Set(
+    hosts.flatMap((h) => {
+      const [path, exists] = pick(h);
+      return path !== null && exists === false ? [path] : [];
+    }),
+  ),
+];
+
 /** get_version's view of the registrations: which browsers, and what to do when one can't start. */
-export function nativeHostReport(o: Pick<NativeHostOptions, "home" | "platform" | "env"> = {}): NativeHostReport {
+export function nativeHostReport(o: ReadOptions = {}): NativeHostReport {
   const hosts = registeredHosts(o);
-  const registered = hosts.map((h) => h.browser);
+  const registered = hosts.filter((h) => !h.keyMissing).map((h) => h.browser);
   if (!hosts.length) {
     return { registered, hint: "The native host isn't registered with any browser, so the extension uses the local port. Run `npx mcp-teams setup` to register it." };
   }
-  const missing = [...new Set(hosts.flatMap((h) => (h.node !== null && h.nodeExists === false ? [h.node] : [])))];
-  if (!missing.length) return { registered };
+  const nodeMissing = gonePaths(hosts, (h) => [h.node, h.nodeExists]);
+  const hubMissing = gonePaths(hosts, (h) => [h.hub, h.hubExists]);
+  const keyMissing = hosts.filter((h) => h.keyMissing).map((h) => h.browser);
+  const why = [
+    ...(nodeMissing.length ? [`The native host starts ${nodeMissing.join(" and ")}, which no longer exists (moved by nvm or fnm?)`] : []),
+    ...(hubMissing.length ? [`The native host runs ${hubMissing.join(" and ")}, which no longer exists (an npx cache cleared, or the copy moved)`] : []),
+    ...(keyMissing.length ? [`${keyMissing.join(" and ")} ${keyMissing.length > 1 ? "have" : "has"} no registry key for the native host (installed after setup?)`] : []),
+  ];
+  if (!why.length) return { registered };
   return {
     registered,
-    nodeMissing: missing,
-    hint: `The native host starts ${missing.join(" and ")}, which no longer exists (moved by nvm or fnm?), so the browser can't start it and the extension uses the local port. Run \`npx mcp-teams setup\` again.`,
+    ...(nodeMissing.length ? { nodeMissing } : {}),
+    ...(hubMissing.length ? { hubMissing } : {}),
+    ...(keyMissing.length ? { keyMissing } : {}),
+    hint: `${why.join("; ")}, so the browser can't start it and the extension uses the local port. Run \`npx mcp-teams setup\` again.`,
   };
 }
 
@@ -255,7 +337,8 @@ export function installNativeHost(o: NativeHostOptions = {}): InstallResult {
   const hubScript = o.hubScript ?? HUB_SCRIPT;
   const reg = o.reg ?? defaultReg;
   if (!existsSync(hubScript)) return { installed: [], missingHub: true };
-  const gone = new Map(readRegistrations(home, platform, env).flatMap((r) => (r.node !== null && r.nodeExists === false ? [[r.browser, r.node] as const] : [])));
+  // What the registrations started before (to say what had gone); their keys don't matter here.
+  const before = new Map(readRegistrations({ ...o, regQuery: () => null }).map((r) => [r.browser, r] as const));
   const found = targets(home, platform, env).filter((t) => existsSync(t.profileDir));
   if (!found.length) return { installed: [] };
   let script: string;
@@ -278,14 +361,15 @@ export function installNativeHost(o: NativeHostOptions = {}): InstallResult {
         reg(["add", t.registryKey, "/ve", "/t", "REG_SZ", "/d", manifest, "/f"]);
         changed = true;
       }
-      const was = gone.get(t.browser);
+      const was = before.get(t.browser);
       result.installed.push({
         browser: t.browser,
         manifest,
         hostLauncher,
         ...(t.registryKey ? { registryKey: t.registryKey } : {}),
         changed,
-        ...(was !== undefined ? { nodeWasMissing: was } : {}),
+        ...(was?.node != null && was.nodeExists === false ? { nodeWasMissing: was.node } : {}),
+        ...(was?.hub != null && was.hubExists === false ? { hubWasMissing: was.hub } : {}),
       });
     } catch (err) {
       (result.failed ??= []).push({ browser: t.browser, error: (err as Error).message });
