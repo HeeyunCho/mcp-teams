@@ -26,6 +26,10 @@ _Avoid_: daemon, background hub
 A hub held by one session's server on the local port; the fallback when no native host can run.
 _Avoid_: in-session hub, legacy hub
 
+**Server log**:
+Every server's persistent diagnostic log (`~/.mcp-teams/server.log`): metadata about its role, the extension and Teams state, failed calls and crashes, never message content. Not the native host's `hub.log`.
+_Avoid_: debug log, trace
+
 **Serving host**:
 The native host that is the hub; there is at most one.
 _Avoid_: primary host, main host

@@ -67,6 +67,18 @@ When Teams asks to slow down (HTTP 429), mcp-teams sends nothing more to that se
 
 Several AI sessions share one connection to the browser: the first one runs it, the others go through it. They check on each other every 20 s. If the session running it stops responding (its app is suspended or hung), the others' calls fail within about 40 s with "The mcp-teams hub stopped responding; try again in a few seconds", and one of them takes over. A session that stops reading what it is sent is disconnected and reconnects. The extension reconnects by itself when it hasn't heard from the server for 45 s.
 
+### What happened while nobody looked: server.log
+
+Every mcp-teams server appends what it went through to `~/.mcp-teams/server.log` (`0600` in a `0700` folder; moved to `server.log.1` once it passes 1 MB), so an outage can be traced after a restart. Each line is one event: the time (UTC), the process id, the event, the server's version and role, then its fields:
+
+```
+2026-11-11T00:04:12.345Z pid=4242 extension-closed v=0.3.62 role=hub code=1006 transport=websocket
+```
+
+Events: `start` and `exit` (with its `reason`: `stdin-closed`, `SIGTERM`, …), `role` (hub, peer or none, and how it reached the hub), `handover` (to a newer server), `restart-needed` (the first time it is seen), `extensions` (how many are connected, by which transport), `extension-closed` (with the close code), `hub-closed` (a peer's hub went away), `teams` (the Teams state an extension reported: tabs, whether a session is captured and for which services, and whether the signed-in account is the same or changed), `tool` (a call that failed, by error name and kind, or took longer than 20 s, with its duration), and `uncaught-exception` / `unhandled-rejection`. States are logged when they change, not on every status read; the Teams state is seen only when a call reads it (`get_version`, or a failed call's session note).
+
+It holds metadata only: never message text, names, chat ids, tokens, regions or who is signed in. With several AI sessions, all of their servers write to the same file (each line names its `pid`). For a `[Hub health]` report, attach `server.log` (and `server.log.1`) first.
+
 ### When the extension's console shows connection errors
 
 While no mcp-teams server is listening on the bridge port (`port`, 47393 by default), the extension's console (and its Errors page in `chrome://extensions`) shows lines like this (with your own port number if you changed it):
