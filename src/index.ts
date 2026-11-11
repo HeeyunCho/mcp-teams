@@ -3,21 +3,39 @@ import { readFileSync } from "node:fs";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { DRAIN_MAX_WAIT_MS, ExtensionBridge } from "./bridge.js";
-import { CONFIG_PATH, SERVER_VERSION, loadConfig } from "./config.js";
+import { BUILD_DIR, CONFIG_PATH, RUNNING_BUILD, SERVER_VERSION, loadConfig } from "./config.js";
 import { registerTools } from "./tools.js";
 import { setup } from "./setup.js";
 import { installedVersion, PACKAGED_EXTENSION_DIR, syncExtension, writePairing } from "./extension.js";
 import { isNewer } from "./bridge.js";
 import { reloadUntilUpdated } from "./extensionUpdate.js";
-import { hubSocketPath } from "./native.js";
+import { hubSocketPath, msFromEnv } from "./native.js";
+import { diagnosticLog, watchState } from "./serverLog.js";
+import { restartCheck } from "./buildInfo.js";
+
+const command = process.argv[2];
+const printsOnly = ["token", "version", "--version"].includes(command);
+
+// Every server (not the commands that only print) keeps ~/.mcp-teams/server.log (#143): metadata
+// to trace an outage after a restart. The role is the bridge's once it exists.
+let roleNow = (): string => "none";
+const diagnostics = printsOnly ? undefined : diagnosticLog({ version: SERVER_VERSION, role: () => roleNow() });
+let exitReason = "unknown";
+diagnostics?.start({ command: ["setup", "reload-extension"].includes(command) ? command : command ? "other" : "serve" });
+process.on("exit", (code) => diagnostics?.exit(exitReason, code));
 
 // A stray error in a socket callback must not end the server (the AI app would show it
-// as "failed"); log it on stderr, which isn't the MCP channel.
-process.on("unhandledRejection", (err) => console.error("[mcp-teams] unhandled rejection:", err));
-process.on("uncaughtException", (err) => console.error("[mcp-teams] uncaught exception:", err));
+// as "failed"); log it on stderr, which isn't the MCP channel, and by name in server.log.
+process.on("unhandledRejection", (err) => {
+  console.error("[mcp-teams] unhandled rejection:", err);
+  diagnostics?.crash("unhandled-rejection", err);
+});
+process.on("uncaughtException", (err) => {
+  console.error("[mcp-teams] uncaught exception:", err);
+  diagnostics?.crash("uncaught-exception", err);
+});
 
 const config = loadConfig();
-const command = process.argv[2];
 
 if (command === "token") {
   // Printed for pasting into the extension's options page.
@@ -48,12 +66,17 @@ if (installed !== null && !["token", "version", "--version"].includes(command)) 
 // With "nativeHost": true in config.json (off by default until #123's PR 5), the server first
 // looks for the native host on its hub socket and moves to it from TCP once it has the extension.
 // Off, it never touches the socket: TCP only, as before.
-const bridge = new ExtensionBridge(config.port, config.token, SERVER_VERSION, config.nativeHost ? { hubSocket: hubSocketPath() } : {});
+const bridge = new ExtensionBridge(config.port, config.token, SERVER_VERSION, {
+  ...(config.nativeHost ? { hubSocket: hubSocketPath() } : {}),
+  diagnose: diagnostics?.bridge,
+});
+roleNow = () => bridge.role;
 await bridge.start();
 
 if (command === "setup") {
   const ready = await setup(bridge, SERVER_VERSION, { yes: process.argv.includes("--yes") });
   await bridge.close();
+  exitReason = "setup-done";
   process.exit(ready ? 0 : 1);
 }
 
@@ -68,10 +91,12 @@ if (command === "reload-extension") {
     const { before, after } = await bridge.reloadExtension();
     console.log(`Extension reloaded: ${before ?? "?"} → ${after}${after === SERVER_VERSION ? "" : ` (server is ${SERVER_VERSION})`}`);
     await bridge.close();
+    exitReason = "reload-done";
     process.exit(0);
   } catch (err) {
     console.error((err as Error).message);
     await bridge.close();
+    exitReason = "reload-failed";
     process.exit(1);
   }
 }
@@ -93,23 +118,31 @@ const server = new McpServer({
   version: SERVER_VERSION,
   icons: [icon("icon.svg", "image/svg+xml", ["any"]), icon("icon-128.png", "image/png", ["128x128"]), icon("icon-48.png", "image/png", ["48x48"])],
 });
-registerTools(server, bridge, config);
+registerTools(server, bridge, config, { diagnostics });
 await server.connect(new StdioServerTransport());
+
+// server.log stays current without tool calls (#143): every minute the hub reads the Teams state,
+// and any server checks the build on disk. TEAMS_MCP_WATCH_MS shortens the period (tests).
+if (diagnostics) {
+  watchState({ bridge, diagnostics, onDisk: restartCheck(RUNNING_BUILD, BUILD_DIR), everyMs: msFromEnv(process.env.TEAMS_MCP_WATCH_MS) });
+}
 
 // A signal closes at once. When the AI session ends (stdin closes), this server takes no more MCP
 // calls, but as the hub it first lets other sessions' running calls finish for a few seconds
 // (#112, ported from mcp-newoutlook src/index.ts, PR #108 there); TEAMS_MCP_DRAIN_MS changes that
 // bound (tests). The process exits soon after the bound even if a connection is slow to close.
-const shutdown = async () => {
+const shutdown = (signal: string) => async () => {
+  exitReason = signal;
   await bridge.close();
   process.exit(0);
 };
-process.on("SIGINT", shutdown);
-process.on("SIGTERM", shutdown);
+process.on("SIGINT", shutdown("SIGINT"));
+process.on("SIGTERM", shutdown("SIGTERM"));
 process.stdin.on("close", async () => {
+  exitReason = "stdin-closed";
   const fromEnv = process.env.TEAMS_MCP_DRAIN_MS ? Number(process.env.TEAMS_MCP_DRAIN_MS) : NaN;
   const drainMs = Number.isFinite(fromEnv) && fromEnv >= 0 ? fromEnv : DRAIN_MAX_WAIT_MS; // 0: no drain
-  setTimeout(() => process.exit(0), drainMs + 2_000).unref();
+  setTimeout(() => ((exitReason = "drain-timeout"), process.exit(0)), drainMs + 2_000).unref();
   await server.close().catch(() => {});
   await bridge.drainAndClose(drainMs);
   process.exit(0);
