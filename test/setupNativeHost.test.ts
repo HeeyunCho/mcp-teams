@@ -1,7 +1,7 @@
 // #123 PR 4: setup registers the native host when config.json says "nativeHost": true, and says
 // what it did. Off (the default until PR 5), setup does exactly what it did before: no host
 // manifest, no registry key, no line about it.
-import { existsSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -46,6 +46,12 @@ describe("#123: describeNativeHost (what setup says)", () => {
       ok: [`Native host registered for Chrome: ${install.registryKey} (it started C:\\old\\node.exe, which no longer exists; now ${NODE})`],
       todo: [],
     });
+  });
+
+  it("#123: says when the hub.js a registration ran had gone (a pruned npx cache, a moved clone)", () => {
+    expect(describeNativeHost({ installed: [{ ...install, changed: true, hubWasMissing: "C:\\old\\dist\\hub.js" }] }, NODE).ok).toEqual([
+      `Native host registered for Chrome: ${install.registryKey} (it ran C:\\old\\dist\\hub.js, which no longer exists)`,
+    ]);
   });
 
   it("#123: a path a .bat can't hold: nothing registered, and the extension uses the port", () => {
@@ -100,7 +106,7 @@ describe("#123: setup and the nativeHost switch", () => {
 
   const connected = () =>
     ({ extensions: [{ origin: EXTENSION_ORIGIN, browser: "Chrome" }], connected: true, call: vi.fn(async () => ({ teams: [] })) }) as unknown as ExtensionBridge;
-  const regCalls = () => doubles.execFileSync.mock.calls.filter(([file]) => file === "reg");
+  const regCalls = () => doubles.execFileSync.mock.calls.filter(([file]) => /(^|\\)reg(\.exe)?$/i.test(String(file)));
 
   it("#123: off (the default): no line about a native host, no registry key, no host folder", async () => {
     doubles.nativeHost = false;
@@ -112,12 +118,39 @@ describe("#123: setup and the nativeHost switch", () => {
     expect(existsSync(join(home, ".config", "google-chrome", "NativeMessagingHosts"))).toBe(false);
   });
 
-  it("#123: on: setup registers the host and says so", async () => {
+  it("#123: on, without a built dist/hub.js (run from src/): says the hub isn't built, registers nothing", async () => {
     doubles.nativeHost = true;
     expect(await setup(connected(), "0.0.0", { yes: true })).toBe(true);
-    // Run from src/ (no dist/hub.js next to it), so what it says is that the hub isn't built.
     expect(lines.filter((l) => /native host/i.test(l))).toEqual([
       "→ Native host not registered: dist/hub.js is missing (build first: npm run build). The extension uses the local port.",
     ]);
+    expect(regCalls()).toEqual([]);
+  });
+
+  it("#123: on: setup registers the host for the browser found (on Windows with reg add) and says so", async () => {
+    doubles.nativeHost = true;
+    // reg (Windows) succeeds; any other program (claude) isn't there.
+    doubles.execFileSync.mockImplementation((file: string) => {
+      if (/reg\.exe$/i.test(file)) return "";
+      throw Object.assign(new Error(`spawn ${file} ENOENT`), { code: "ENOENT" });
+    });
+    const hub = join(home, "mcp-teams", "dist", "hub.js");
+    mkdirSync(join(hub, ".."), { recursive: true });
+    writeFileSync(hub, "// hub");
+    expect(await setup(connected(), "0.0.0", { yes: true, nativeHost: { hubScript: hub } })).toBe(true);
+    const said = lines.filter((l) => /native host/i.test(l));
+    if (process.platform === "win32") {
+      const manifest = join(home, "AppData", "Local", "mcp-teams", "com.mcp_teams.hub.json");
+      const key = "HKCU\\Software\\Google\\Chrome\\NativeMessagingHosts\\com.mcp_teams.hub";
+      expect(regCalls().map(([file, args]) => [file, args])).toEqual([[expect.stringMatching(/\\System32\\reg\.exe$/i), ["add", key, "/ve", "/t", "REG_SZ", "/d", manifest, "/f"]]]);
+      expect(said).toEqual([`✓ Native host registered for Chrome: ${key}`]);
+      expect(readFileSync(join(home, "AppData", "Local", "mcp-teams", "mcp-teams-hub.bat"), "utf8")).toContain('"%USERPROFILE%\\mcp-teams\\dist\\hub.js"');
+    } else {
+      const dir = process.platform === "darwin" ? ["Library", "Application Support", "Google", "Chrome"] : [".config", "google-chrome"];
+      const manifest = join(home, ...dir, "NativeMessagingHosts", "com.mcp_teams.hub.json");
+      expect(regCalls()).toEqual([]);
+      expect(said).toEqual([`✓ Native host registered for Chrome: ${manifest}`]);
+      expect(existsSync(manifest)).toBe(true);
+    }
   });
 });
