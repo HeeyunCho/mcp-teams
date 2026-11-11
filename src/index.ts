@@ -3,14 +3,15 @@ import { readFileSync } from "node:fs";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { DRAIN_MAX_WAIT_MS, ExtensionBridge } from "./bridge.js";
-import { CONFIG_PATH, SERVER_VERSION, loadConfig } from "./config.js";
+import { BUILD_DIR, CONFIG_PATH, RUNNING_BUILD, SERVER_VERSION, loadConfig } from "./config.js";
 import { registerTools } from "./tools.js";
 import { setup } from "./setup.js";
 import { installedVersion, PACKAGED_EXTENSION_DIR, syncExtension, writePairing } from "./extension.js";
 import { isNewer } from "./bridge.js";
 import { reloadUntilUpdated } from "./extensionUpdate.js";
-import { hubSocketPath } from "./native.js";
-import { diagnosticLog } from "./serverLog.js";
+import { hubSocketPath, msFromEnv } from "./native.js";
+import { diagnosticLog, watchState } from "./serverLog.js";
+import { restartCheck } from "./buildInfo.js";
 
 const command = process.argv[2];
 const printsOnly = ["token", "version", "--version"].includes(command);
@@ -119,6 +120,12 @@ const server = new McpServer({
 });
 registerTools(server, bridge, config, { diagnostics });
 await server.connect(new StdioServerTransport());
+
+// server.log stays current without tool calls (#143): every minute the hub reads the Teams state,
+// and any server checks the build on disk. TEAMS_MCP_WATCH_MS shortens the period (tests).
+if (diagnostics) {
+  watchState({ bridge, diagnostics, onDisk: restartCheck(RUNNING_BUILD, BUILD_DIR), everyMs: msFromEnv(process.env.TEAMS_MCP_WATCH_MS) });
+}
 
 // A signal closes at once. When the AI session ends (stdin closes), this server takes no more MCP
 // calls, but as the hub it first lets other sessions' running calls finish for a few seconds

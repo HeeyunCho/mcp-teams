@@ -143,7 +143,7 @@ export function registerTools(server: McpServer, bridge: ExtensionBridge, config
   const status = (timeoutMs: number | undefined, signal: AbortSignal | undefined) =>
     bridge.call("status", {}, timeoutMs, signal).then(
       (st) => (diagnostics?.teamsStatus(st), st),
-      (err) => (diagnostics?.teamsStatus(null), Promise.reject(err)),
+      (err) => (diagnostics?.teamsStatus(null, signal?.aborted ? "aborted" : undefined), Promise.reject(err)),
     );
   const failures = new WeakMap<object, unknown>(); // a failed call's result → its error, for server.log
   const register = loggedRegister(server, diagnostics, (result) => failures.get(result));

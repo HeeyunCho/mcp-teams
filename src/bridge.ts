@@ -595,6 +595,8 @@ export class ExtensionBridge {
   /** Hub: calls being run (from run() until they settle), the hub's own and its peers'. */
   private active = 0;
   private alive = new WeakSet<BridgeSocket>(); // hub: extensions and peers that answered the last ping
+  private accepted = new WeakSet<BridgeSocket>(); // hub: connections accepted as an extension or a peer (server.log)
+  private unanswered = new WeakSet<BridgeSocket>(); // hub: extensions dropped for not answering a ping (server.log)
   private backlogged = new WeakSet<BridgeSocket>(); // hub: peers over maxPeerBufferedBytes at the last tick
   private legacyReloaded = false; // hub: an extension of 0.2.0 or older was told to reload
   private readonly opts: Timings;
@@ -902,7 +904,12 @@ export class ExtensionBridge {
       clearTimeout(authTimer);
       this.peers.delete(ws);
       const closing = this.sockets.get(ws);
-      if (closing) this.report("extension-closed", { code, transport: closing.transport });
+      // Turned away before it was accepted (bad token, auth timeout, an old extension told to
+      // reload, another copy connected, an extension on the host's TCP port): the "waiting for
+      // extension" case (#111, #124) would otherwise leave no line.
+      if (!this.accepted.has(ws)) this.report("handshake-closed", { code, via });
+      else if (closing && this.unanswered.has(ws)) this.report("extension-dropped", { reason: "no-pong", transport: closing.transport });
+      else if (closing) this.report("extension-closed", { code, transport: closing.transport });
       // A peer that went away can't be told the outcome of its calls: withdraw them.
       for (const ac of this.peerCalls.get(ws)?.values() ?? []) ac.abort();
       this.peerCalls.delete(ws);
@@ -966,6 +973,9 @@ export class ExtensionBridge {
       }
     }
     this.sockets.set(ws, info);
+    this.accepted.add(ws);
+    // Every connect, also a reconnect that leaves the count as it was; the version for skew (#96, #111).
+    this.report("extension-connected", { ext: logVersion(info.version), transport });
     // heartbeatMs: this hub sends {type:"ping"} that often; the extension reconnects when they stop.
     ws.send(
       JSON.stringify({ type: "welcome", serverVersion: this.serverVersion, heartbeatMs: this.opts.keepAliveMs, capabilities: this.capabilities, ...welcome }),
@@ -1031,6 +1041,7 @@ export class ExtensionBridge {
 
   private acceptPeer(ws: BridgeSocket, peerVersion: unknown, welcome: object, via: Via) {
     this.peers.add(ws);
+    this.accepted.add(ws);
     this.native.onEvent?.("peer", { version: logVersion(peerVersion), via });
     ws.on("close", () => this.native.onEvent?.("peer-left", { via }));
     // heartbeatMs: this hub pings the peer that often, so the peer can tell when it stops.
@@ -1199,6 +1210,7 @@ export class ExtensionBridge {
       for (const s of this.sockets.keys()) {
         if (s.readyState !== OPEN) continue;
         if (!stalled && !this.alive.has(s)) {
+          this.unanswered.add(s);
           s.terminate();
           continue;
         }
@@ -1441,6 +1453,19 @@ export class ExtensionBridge {
   }
 
   // ------------------------------------------------------------------ calls
+
+  /**
+   * Hub: the status of the extension calls go to now (`extension`), for server.log's background
+   * read (#143). Unlike call() it never picks another browser or moves the preferred one, so a
+   * read nobody asked for changes nothing; status takes no turn (UNQUEUED).
+   */
+  async backgroundStatus(timeoutMs: number): Promise<unknown> {
+    if (this.role !== "hub" || this.draining || this.closed) throw new Error("not the hub");
+    const open = [...this.sockets.keys()].filter((s) => s.readyState === OPEN);
+    const target = this.preferred && open.includes(this.preferred) ? this.preferred : open.at(-1);
+    if (!target) throw new Error("Browser extension is not connected.");
+    return this.send(target, "status", {}, timeoutMs);
+  }
 
   /**
    * Calls the extension. Aborting `signal` withdraws the call (see withdraw). `deadline` (ms since

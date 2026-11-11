@@ -14,7 +14,8 @@ import { join } from "node:path";
 import { isLostCall } from "./bridge.js";
 import { CONFIG_DIR } from "./config.js";
 import { errorFields, hubLog, logVersion, type Log, type LogFields } from "./hubLog.js";
-import { isMissingSession } from "./sessionNote.js";
+import type { RestartState } from "./buildInfo.js";
+import { IDLE_MS, isMissingSession } from "./sessionNote.js";
 
 /** Where every server logs: next to config.json (TEAMS_MCP_HOME moves both, for tests). */
 export const SERVER_LOG_FILE = join(CONFIG_DIR, "server.log");
@@ -27,8 +28,8 @@ export interface DiagnosticLog {
   exit(reason: string, code?: number): void;
   /** The bridge's events (BridgeOptions.diagnose): role, handover, extension, extension-closed, hub-closed. */
   bridge(event: string, fields?: LogFields): void;
-  /** A status the extension answered (null or {error} when it couldn't be read). */
-  teamsStatus(status: unknown): void;
+  /** A status the extension answered (null or {error} when it couldn't be read; `failure` says why, else unreadable). */
+  teamsStatus(status: unknown, failure?: "aborted"): void;
   /** A tool call that ended: logged when it failed (err) or took longer than slowToolMs. */
   toolCall(name: string, ms: number, err?: unknown): void;
   restartNeeded(onDiskVersion: string): void;
@@ -68,6 +69,8 @@ const FIELDS: Record<string, (v: string) => string> = {
   name: WORD, // a tool's name, from this code's own list
   services: (v) => (/^[a-z,]{1,64}$/.test(v) ? v : "-"),
   node: (v) => (/^v\d+\.\d+\.\d+$/.test(v) ? v : "-"),
+  stale: WORD,
+  ext: strictVersion, // the extension's version, for version skew (#96, #111)
   hub: strictVersion,
   to: strictVersion,
   onDisk: strictVersion,
@@ -81,6 +84,26 @@ const FIELDS: Record<string, (v: string) => string> = {
 
 /** Teams services the extension captures sessions for (extension/background.js). */
 const SERVICES = new Set(["chatsvc", "csa", "mt", "substrate", "sharepoint"]);
+
+/** An event name: lowercase words joined by dashes (anything else is written as "other"). */
+const EVENT = /^[a-z][a-z-]{0,31}$/;
+
+/** Tools whose long calls wait for the user, not for Teams: never logged as slow. */
+const WAITS_FOR_USER = new Set(["send_message"]);
+
+/**
+ * Whether the Teams session looks stale (yes/no), as get_version's note judges "stuck at sign-in"
+ * (sessionNote.ts): the tab keeps calling but made no signed-in call for IDLE_MS. captured=yes
+ * survives an expired token, so this is the sign that it went bad. Unknown (left out) for an
+ * extension from before #103, which reports no calls.
+ */
+function staleOf(st: any): "yes" | "no" | undefined {
+  if (!("lastTeamsCall" in st)) return undefined;
+  const last = Date.parse(st.lastTeamsCall?.at);
+  const signedIn = Date.parse(st.lastSignedInCall?.at);
+  if (!Number.isFinite(last)) return "no";
+  return !Number.isFinite(signedIn) || last - signedIn > IDLE_MS ? "yes" : "no";
+}
 
 /** What a failed tool call's error was, from a fixed set: its message is never logged. */
 function errorKind(err: unknown): string {
@@ -100,7 +123,7 @@ export function diagnosticLog(options: DiagnosticLogOptions): DiagnosticLog {
     try {
       const out: LogFields = { v: version, role: safe(options.role()) };
       for (const [k, v] of Object.entries(fields)) if (v !== undefined && Object.hasOwn(FIELDS, k)) out[k] = FIELDS[k](safe(v));
-      append(event, out);
+      append(EVENT.test(event) ? event : "other", out);
     } catch {
       // logging must never stop the server
     }
@@ -114,15 +137,36 @@ export function diagnosticLog(options: DiagnosticLogOptions): DiagnosticLog {
   };
   let account: { known: boolean; id?: string } = { known: false };
   let restartSeen = false;
+  const fieldsOf = (err: unknown) => {
+    try {
+      return errorFields(err);
+    } catch {
+      return { name: "unreadable", code: undefined }; // a getter that throws must not reach an exception handler
+    }
+  };
+  const kindOf = (err: unknown) => {
+    try {
+      return errorKind(err);
+    } catch {
+      return "other";
+    }
+  };
 
   return {
     start: (fields = {}) => write("start", { ...fields, node: process.version }),
     exit: (reason, code) => write("exit", { reason, code }),
-    bridge: (event, fields = {}) => (event === "role" || event === "extensions" ? onChange(event, fields) : write(event, fields)),
-    teamsStatus(status) {
+    bridge(event, fields = {}) {
+      if (event === "role" || event === "extensions") return onChange(event, fields);
+      // An extension with a bad token retries every 30 s: its refusal is logged when it changes,
+      // and again after something connected.
+      if (event === "handshake-closed") return onChange(event, fields);
+      if (event === "extension-connected") last.delete("handshake-closed");
+      write(event, fields);
+    },
+    teamsStatus(status, failure) {
       try {
         const st = status as any;
-        if (!st || typeof st !== "object" || "error" in st) return onChange("teams", { status: "unreadable" });
+        if (!st || typeof st !== "object" || "error" in st) return onChange("teams", { status: failure ?? "unreadable" });
         const services = st.services && typeof st.services === "object" ? Object.keys(st.services).filter((k) => SERVICES.has(k) && st.services[k]) : [];
         const id = typeof st.signedInAs === "string" && st.signedInAs ? st.signedInAs : undefined;
         // The account itself stays in memory: the log says only whether it changed.
@@ -131,6 +175,7 @@ export function diagnosticLog(options: DiagnosticLogOptions): DiagnosticLog {
           tabs: Number.isFinite(Number(st.teamsTabs)) ? Number(st.teamsTabs) : "-",
           captured: Array.isArray(st.sessions) && st.sessions.some((x: any) => x?.sessionCaptured) ? "yes" : "no",
           services: services.length ? services.join(",") : "none",
+          stale: staleOf(st),
         };
         const changedAccount = !account.known || account.id !== id;
         const key = JSON.stringify(state);
@@ -143,9 +188,11 @@ export function diagnosticLog(options: DiagnosticLogOptions): DiagnosticLog {
       }
     },
     toolCall(name, ms, err) {
-      if (err === undefined && ms <= slowToolMs) return;
-      const e = err === undefined ? undefined : errorFields(err);
-      write("tool", { name, ok: err === undefined ? "yes" : "no", ms: Math.round(ms), error: e?.name, code: e?.code, kind: err === undefined ? undefined : errorKind(err), slow: ms > slowToolMs ? "yes" : undefined });
+      // send_message waits for the user's click in its confirmation window: a long wait isn't slow.
+      const slow = ms > slowToolMs && !WAITS_FOR_USER.has(name);
+      if (err === undefined && !slow) return;
+      const e = err === undefined ? undefined : fieldsOf(err);
+      write("tool", { name, ok: err === undefined ? "yes" : "no", ms: Math.round(ms), error: e?.name, code: e?.code, kind: err === undefined ? undefined : kindOf(err), slow: slow ? "yes" : undefined });
     },
     restartNeeded(onDiskVersion) {
       if (restartSeen) return;
@@ -153,8 +200,52 @@ export function diagnosticLog(options: DiagnosticLogOptions): DiagnosticLog {
       write("restart-needed", { onDisk: logVersion(onDiskVersion) });
     },
     crash(kind, err) {
-      const e = errorFields(err);
+      const e = fieldsOf(err);
       write(kind, { error: e.name, code: e.code });
     },
   };
+}
+
+/** How often the background watch reads the Teams state and the build on disk. */
+export const WATCH_MS = 60_000;
+/** How long the background watch waits for the extension's status. */
+const WATCH_STATUS_TIMEOUT_MS = 5_000;
+
+export interface WatchStateOptions {
+  bridge: { readonly role: string; readonly connected: boolean; backgroundStatus(timeoutMs: number): Promise<unknown> };
+  diagnostics: DiagnosticLog;
+  /** Whether the code on disk is newer than the running one (restartCheck). */
+  onDisk: () => RestartState;
+  everyMs?: number;
+}
+
+/**
+ * Keeps server.log current while no tool is called (#143: the overnight outage had no calls, so
+ * nothing read the Teams state). Every period, the hub with an extension reads its status (logged
+ * when it changed), and any server checks the build on disk (restart-needed, once). The timer is
+ * unref'd, a read never overlaps the last one, and nothing here throws. Returns a stop function.
+ */
+export function watchState({ bridge, diagnostics, onDisk, everyMs = WATCH_MS }: WatchStateOptions): () => void {
+  let reading = false;
+  const tick = () => {
+    try {
+      const state = onDisk();
+      if (state.restartNeeded) diagnostics.restartNeeded(state.onDisk.version);
+    } catch {
+      // a build.json it can't read is no reason to stop watching
+    }
+    if (reading || bridge.role !== "hub" || !bridge.connected) return;
+    reading = true;
+    bridge
+      .backgroundStatus(WATCH_STATUS_TIMEOUT_MS)
+      .then(
+        (st) => diagnostics.teamsStatus(st),
+        () => diagnostics.teamsStatus(null),
+      )
+      .catch(() => {})
+      .finally(() => (reading = false));
+  };
+  const timer = setInterval(tick, everyMs);
+  timer.unref();
+  return () => clearInterval(timer);
 }
