@@ -207,7 +207,13 @@ describe("#24: printed commands quote for the platform", () => {
   it('#24: the "No AI app found" hint', () => {
     expect(noAppHint(spaced, "darwin")).toBe("No AI app found. Register this stdio server with yours: '/Users/Alex Doe/$bin/node' '/Users/Alex'\\''s/index.js'");
     expect(noAppHint(windows, "win32")).toBe(
-      'No AI app found. Register this stdio server with yours: "C:\\Program Files\\nodejs\\node.exe" "C:\\Users\\Alex&Sam\\index.js" "C:\\Users\\Alex%20Doe\\x" -y',
+      'No AI app found. Register this stdio server with yours (PowerShell; in cmd.exe, leave out the leading &): & "C:\\Program Files\\nodejs\\node.exe" "C:\\Users\\Alex&Sam\\index.js" "C:\\Users\\Alex%20Doe\\x" -y',
+    );
+  });
+
+  it("#138: on Windows, an unquoted first word gets no & and no note", () => {
+    expect(noAppHint({ command: "C:\\nodejs\\node.exe", args: ["C:\\Users\\Alex Doe\\index.js"] }, "win32")).toBe(
+      'No AI app found. Register this stdio server with yours: C:\\nodejs\\node.exe "C:\\Users\\Alex Doe\\index.js"',
     );
   });
 
