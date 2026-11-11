@@ -13,6 +13,7 @@ import type { ExtensionBridge } from "./bridge.js";
 import { applyPlan, planClients, type Plan, type ServerCommand } from "./clients.js";
 import { EXTENSION_ORIGIN, installedVersion, syncExtension, writePairing } from "./extension.js";
 import { loadConfig } from "./config.js";
+import { installNativeHost, type InstallResult, type NativeHostOptions } from "./nativehost.js";
 
 const SERVER_SCRIPT = fileURLToPath(new URL("./index.js", import.meta.url));
 const EXTENSION_WAIT_MS = 10 * 60_000;
@@ -32,7 +33,21 @@ export function quote(arg: string, platform: NodeJS.Platform = process.platform)
   return /[^A-Za-z0-9_@%+=:,./-]/.test(arg) ? `'${arg.replace(/'/g, "'\\''")}'` : arg;
 }
 
-const commandLine = (parts: string[], platform: NodeJS.Platform) => parts.map((part) => quote(part, platform)).join(" ");
+/**
+ * A command printed for the user to paste. On Windows, a quoted first word gets
+ * PowerShell's call operator, `& "C:\Program Files\nodejs\node.exe" x`: PowerShell (the
+ * default terminal) reads a quoted first word as a string, not a command, and fails with
+ * "Unexpected token". cmd.exe refuses the `&` ("& was unexpected at this time.") and runs
+ * nothing, so wherever this can start with `&`, say so with powershellNote. (A command
+ * that starts with `claude` never gets it.)
+ */
+const commandLine = (parts: string[], platform: NodeJS.Platform) => {
+  const line = parts.map((part) => quote(part, platform)).join(" ");
+  return platform === "win32" && line.startsWith('"') ? `& ${line}` : line;
+};
+
+/** Before a command line that may start with PowerShell's `&` (see commandLine). */
+const powershellNote = (line: string) => (line.startsWith("& ") ? " (PowerShell; in cmd.exe, leave out the leading &)" : "");
 
 /** The package from npm, always the latest release (npx keeps it cached). */
 export const NPX_COMMAND: ServerCommand = { command: "npx", args: ["-y", "mcp-teams@latest"] };
@@ -130,8 +145,10 @@ export const claudeAddCommand = (cmd: ServerCommand, platform: NodeJS.Platform =
   commandLine(["claude", "mcp", "add", "--scope", "user", "teams", "--", cmd.command, ...cmd.args], platform);
 
 /** What to do when no AI app was found: register the server by hand. */
-export const noAppHint = (cmd: ServerCommand, platform: NodeJS.Platform = process.platform) =>
-  `No AI app found. Register this stdio server with yours: ${commandLine([cmd.command, ...cmd.args], platform)}`;
+export const noAppHint = (cmd: ServerCommand, platform: NodeJS.Platform = process.platform) => {
+  const line = commandLine([cmd.command, ...cmd.args], platform);
+  return `No AI app found. Register this stdio server with yours${powershellNote(line)}: ${line}`;
+};
 
 /** Claude Code is configured through its CLI: null if it isn't installed, "broken" if its CLI won't start. */
 function planClaudeCode(cmd: ServerCommand): ClaudeCode | "broken" | null {
@@ -355,12 +372,48 @@ async function connectExtension(bridge: ExtensionBridge, serverVersion: string):
   return true;
 }
 
+// ------------------------------------------------------------------ native host
+
+/** What setup says about a native host registration (#123): done (ok) and still to do (todo). */
+export function describeNativeHost({ installed, failed = [], missingHub, nonAsciiPath }: InstallResult, node: string = process.execPath): { ok: string[]; todo: string[] } {
+  const port = "The extension uses the local port.";
+  if (missingHub) return { ok: [], todo: [`Native host not registered: dist/hub.js is missing (build first: npm run build). ${port}`] };
+  if (nonAsciiPath !== undefined) return { ok: [], todo: [`Native host not registered: ${nonAsciiPath} has characters a Windows .bat can't hold. ${port}`] };
+  const todos = failed.map((f) => `Native host for ${f.browser} not registered (${f.error}). The extension uses the local port there.`);
+  if (!installed.length && !failed.length) todos.push(`Native host not registered: no Chrome or Edge profile found. ${port}`);
+  const okLines = installed.map((i) => {
+    const moved = [
+      ...(i.nodeWasMissing !== undefined ? [` (it started ${i.nodeWasMissing}, which no longer exists; now ${node})`] : []),
+      ...(i.hubWasMissing !== undefined ? [` (it ran ${i.hubWasMissing}, which no longer exists)`] : []),
+    ].join("");
+    return `Native host ${i.changed ? "registered" : "up to date"} for ${i.browser}: ${i.registryKey ?? i.manifest}${moved}`;
+  });
+  return { ok: okLines, todo: todos };
+}
+
+/**
+ * Registers the native host (ADR 0001) with the browsers found, so the extension can reach the hub
+ * without the TCP port, which stays as the fallback. Only with "nativeHost": true (#123; PR 5
+ * turns it on by default): off, setup leaves native messaging alone.
+ */
+function registerNativeHost(options: NativeHostOptions) {
+  const said = describeNativeHost(installNativeHost(options), options.node);
+  for (const line of said.ok) ok(line);
+  for (const line of said.todo) todo(line);
+  console.log("");
+}
+
 // ------------------------------------------------------------------ setup
 
-export async function setup(bridge: ExtensionBridge, serverVersion: string, { yes = false } = {}): Promise<boolean> {
+/**
+ * yes: make the changes without asking. nativeHost: where the native host's registration looks and
+ * what it registers (tests: a temporary dist/hub.js); left out, this computer and this copy.
+ */
+export async function setup(bridge: ExtensionBridge, serverVersion: string, { yes = false, nativeHost = {} }: { yes?: boolean; nativeHost?: NativeHostOptions } = {}): Promise<boolean> {
   console.log(`mcp-teams ${serverVersion} setup\n`);
   await registerApps(yes);
   console.log("");
+  if (loadConfig().nativeHost) registerNativeHost(nativeHost);
   if (!(await connectExtension(bridge, serverVersion))) return false;
 
   // Opens Teams in a background tab if none is open, and waits for its session.

@@ -4,6 +4,7 @@ import { isLostCall, type Capabilities, type ExtensionBridge, type ExtensionInfo
 import type { Config } from "./config.js";
 import { readBuildInfo, restartCheck, restartHint } from "./buildInfo.js";
 import { BUILD_DIR, RUNNING_BUILD } from "./config.js";
+import { nativeHostReport } from "./nativehost.js";
 import { failedCallNote, isMissingSession, sessionNote, type TeamsStatus } from "./sessionNote.js";
 import type { DiagnosticLog } from "./serverLog.js";
 
@@ -105,17 +106,19 @@ function capText<T extends Message>(messages: T[], maxLength: number): T[] {
 }
 
 /** What the tools use from the config; autoSendTo may be left out (no auto-send). */
-export type ToolsConfig = Omit<Config, "autoSendTo" | "nativeHost"> & { autoSendTo?: string[] };
+export type ToolsConfig = Omit<Config, "autoSendTo" | "nativeHost"> & { autoSendTo?: string[]; nativeHost?: boolean };
 
 /**
  * For tests. build: a dist/ folder whose build.json is taken as the running build (read now) and as the
  * one on disk (read again on demand), and the clock for reusing that read and for get_version's session
- * note (#103). Left out: this code's own dist/ and Date.now.
+ * note (#103). Left out: this code's own dist/ and Date.now. nativeHost: where get_version looks for
+ * the native host's registrations (a temporary home); left out, this computer's.
  */
 export interface ToolsOptions {
   build?: { dir: string; now?: () => number };
   /** server.log (#143): failed and slow calls, the Teams state from each status read, restartNeeded once seen. */
   diagnostics?: DiagnosticLog;
+  nativeHost?: Parameters<typeof nativeHostReport>[0];
 }
 
 /**
@@ -205,6 +208,9 @@ export function registerTools(server: McpServer, bridge: ExtensionBridge, config
         // or the WebSocket; null with no extension. A hub from before #123 doesn't say, and had only
         // the WebSocket.
         transport: bridge.extension ? (bridge.extension.transport ?? "websocket") : null,
+        // #123 decision 11: with "nativeHost": true, which browsers have the host registered, and
+        // whether the Node its launcher starts has gone (nvm, fnm): then setup must run again.
+        ...(config.nativeHost ? { nativeHost: nativeHostReport(options.nativeHost) } : {}),
         // The port the bridge uses (with port 0 configured, the free one it got).
         port: bridge.port,
         teams,
