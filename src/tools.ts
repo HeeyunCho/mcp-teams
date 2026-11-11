@@ -142,12 +142,15 @@ export function registerTools(server: McpServer, bridge: ExtensionBridge, config
     if (state.restartNeeded) diagnostics?.restartNeeded(state.onDisk.version);
     return state;
   };
-  // Every status read: server.log keeps the Teams state when it changed.
-  const status = (timeoutMs: number | undefined, signal: AbortSignal | undefined) =>
-    bridge.call("status", {}, timeoutMs, signal).then(
-      (st) => (diagnostics?.teamsStatus(st), st),
-      (err) => (diagnostics?.teamsStatus(null, signal?.aborted ? "aborted" : undefined), Promise.reject(err)),
+  // Every status read: server.log keeps the Teams state when it changed, and how long the read took
+  // when it was slow or failed (#153: get_version's read may take up to the bridge's default minute).
+  const status = (timeoutMs: number | undefined, signal: AbortSignal | undefined) => {
+    const started = performance.now();
+    return bridge.call("status", {}, timeoutMs, signal).then(
+      (st) => (diagnostics?.teamsStatus(st, { ms: performance.now() - started }), st),
+      (err) => (diagnostics?.teamsStatus(null, { ms: performance.now() - started, error: err, aborted: signal?.aborted }), Promise.reject(err)),
     );
+  };
   const failures = new WeakMap<object, unknown>(); // a failed call's result → its error, for server.log
   const register = loggedRegister(server, diagnostics, (result) => failures.get(result));
   const now = options.build?.now ?? (() => Date.now());
