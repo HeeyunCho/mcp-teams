@@ -1,6 +1,6 @@
 # Handoff: mcp-teams after #154 (updated 2026-11-11 on the Windows PC)
 
-Repo: GitHub `HeeyunCho/mcp-teams`. PRs 1–4 of #123 (the native-messaging host) are on `main`, all **off by default** (`nativeHost` off). Next is PR 5, which turns it on. The last release is <!-- STATE: #154 merge SHA / release --> (#154); 0.3.65 (`6504879`) has #150.
+Repo: GitHub `HeeyunCho/mcp-teams`. PRs 1–4 of #123 (the native-messaging host) are on `main`, all **off by default** (`nativeHost` off). Next is PR 5, which turns it on. The last release is 0.3.66 (`367f198`, #154); 0.3.65 (`6504879`) has #150.
 
 ## Now (2026-11-11)
 
@@ -8,7 +8,7 @@ Repo: GitHub `HeeyunCho/mcp-teams`. PRs 1–4 of #123 (the native-messaging host
 |---|---|---|
 | #150 | Fixes #145: the relay-deadline test in `test/system/nativeHost.test.ts` runs the real 20 s heartbeat. The 200 ms test heartbeat (`TEAMS_MCP_HUB_KEEPALIVE_MS=200`) had cut connections that a loaded machine kept busy; under 20 busy loops on Node 20 it went from 5 failures in 30 runs to 0 in 30. Test only | Merged as `89cc4ad`, released in 0.3.65 (`6504879`) |
 | #151 | The previous handoff (docs only) | Merged as `7fb6edb`, no release. Its Linux `test` job first failed on #152, passed on re-run |
-| #154 | Fixes #153: the status read's log in `server.log` (below). Review: no blockers; 2 should-fix items fixed | Merged as <!-- STATE: #154 merge SHA / release --> |
+| #154 | Fixes #153: the status read's log in `server.log` (below). Review: no blockers; 2 should-fix items fixed | Merged as `6f29a09`, released in 0.3.66 (`367f198`). Merged without waiting for more CI: its own CI had passed; locally unit/serverLog (28) and integration/diagnose (9) passed, and system/serverLog failed once on the #152 rotation race (not touched by #154), then passed 3 of 3 |
 
 ### #154, the status read log
 
@@ -37,7 +37,7 @@ Repo: GitHub `HeeyunCho/mcp-teams`. PRs 1–4 of #123 (the native-messaging host
 
 ### csa/mt captures (in progress, no issue yet)
 
-<!-- STATE: captures -->
+*Still waiting on the user's DevTools check as of 2026-11-11 15:00; no issue filed yet.*
 
 - After sign-in only `chatsvc` was captured. `substrate` was captured from the Teams page at 12:49:54Z, so #129's `isTeamsOrigin` passes Teams' page requests. `csa` and `mt` stayed null.
 - A read-only `list_teams` opened the helper tab. It made no signed-in call (only config, telemetry, `/manifest.json`) and failed after 82 s with "team list session is not available". The user's tab made no `chatsvc` call since 11:56:57Z.
@@ -129,7 +129,7 @@ Run `gh issue list` for the full backlog. #21 and #96 are the umbrella issues th
 
 - **Live install:** `C:\Orca_Project\mcp-teams` is the live install. Every session's `teams` server runs its `dist/index.js`, and Chrome's Teams extension loads a copy of its `extension/` folder.
   - Rebuilt on 2026-11-11 at 12:41 on 0.3.65 (`5ef6c32bb59a`). The user then reconnected every session (`C:\PM_HUB_DB` last), restarted Claude Desktop, reloaded the extension and signed in. All 12 servers ran 0.3.65 by 13:05; the hub moved to the NAVERWORKS session (pid 75600).
-  - It will be rebuilt again after #154: <!-- STATE: rebuild -->
+  - Rebuilt again after #154 at 14:54 on 0.3.66 (`367f198`, build `e06bb586f16f`). All 13 running servers predate it (Claude Code sessions in PM-HUB, Jev-Agentic-Loops, Downloads, system-manager, mcp-atlassian, local-plugins, mcp-teams, mcp-newoutlook, NAVERWORKS (the hub, pid 75600), C:PM_HUB_DB and one more started 14:38; Claude Desktop's two) and need `/mcp` → teams → Reconnect, the hub's session last.
   - **Watch out during hand-overs:** old servers kept taking port 47393 back. A new hub stepped down 0.3.58 hubs about 10 times in 3 s.
   - **Chrome loads the extension from `~/.mcp-teams/extension`,** which a *starting* server syncs from the checkout (`syncExtension` in `src/index.ts`). A rebuild alone doesn't update it. `node dist/index.js reload-extension` syncs it (on this PC it answers "hub restarted"; the extension reloads and reconnects within about 5 s). The `reload_extension` tool only reloads from the copy.
   - **Running servers keep their old code** until each session reconnects with `/mcp`. Reconnect the hub's session last; the hub moves between sessions. To list stale servers, compare each `node … mcp-teams/dist/index.js` process's start time with `dist/index.js`'s write time; `~/.claude/sessions/<parent pid>.json` gives a Claude Code session's folder.
