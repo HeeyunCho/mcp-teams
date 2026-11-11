@@ -4,6 +4,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { LOST_CALL, NOT_READ, NOT_SENT } from "../../src/bridge.js";
 import { diagnosticLog, watchState } from "../../src/serverLog.js";
 import { until } from "../helpers/timing.js";
 
@@ -147,6 +148,24 @@ describe("#153: an unreadable status read says why and how long it took", () => 
       "teams v=0.3.62 role=none status=unreadable kind=not-connected ms=1 failures=5",
     ]);
     expect(lines().join("\n")).not.toMatch(/Contoso|Sam|Roe|secret-chat|thread/);
+  });
+
+  it("classifies the bridge's own messages, whatever their wording", () => {
+    const kinds: [string, string][] = [
+      [LOST_CALL.timedOut("status"), "timeout"],
+      [LOST_CALL.disconnected, "closed"],
+      [NOT_SENT.gone, "closed"],
+      [NOT_READ.notHub, "not-hub"],
+      [NOT_READ.notConnected, "not-connected"],
+      [NOT_READ.connecting, "not-connected"],
+      [LOST_CALL.withdrawn, "aborted"],
+    ];
+    const kindOf = (message: string) => {
+      const { log, lines } = setup(); // a log of its own: failures of one kind in a row are counted, not logged
+      log.teamsStatus(null, { ms: 1, error: new Error(message) });
+      return / kind=([\w-]+)/.exec(lines()[0])?.[1];
+    };
+    expect(kinds.map(([message]) => kindOf(message))).toEqual(kinds.map(([, kind]) => kind));
   });
 
   it("shows how long reads stayed broken: the 1st failure, every 10th, a new kind, and the read that recovers", () => {

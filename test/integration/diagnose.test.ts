@@ -1,6 +1,7 @@
 // #143: what the bridge tells server.log (BridgeOptions.diagnose): its role and how it got it, the
 // hand-over to a newer server, the extensions coming and going (with the close code), and, as a
-// peer, the hub closing. Real sockets, the harness's FAST timings.
+// peer, the hub closing. Real sockets, the harness's FAST timings. And (#153) what get_version's
+// status read writes to server.log, against a scripted bridge.
 import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";

@@ -11,7 +11,7 @@
  * States are logged when they change, not on every status read. Logging never throws.
  */
 import { join } from "node:path";
-import { isLostCall, LOST_CALL, NOT_SENT } from "./bridge.js";
+import { isLostCall, LOST_CALL, NOT_READ, NOT_SENT } from "./bridge.js";
 import { CONFIG_DIR } from "./config.js";
 import { errorFields, hubLog, logVersion, type Log, type LogFields } from "./hubLog.js";
 import type { RestartState } from "./buildInfo.js";
@@ -151,12 +151,15 @@ function errorKind(err: unknown): string {
 function readFailureKind(err: unknown): "timeout" | "closed" | "not-connected" | "not-hub" | "aborted" | "error" {
   const message = err instanceof Error ? err.message : typeof err === "string" ? err : "";
   if (message === LOST_CALL.withdrawn || message === NOT_SENT.cancelled) return "aborted";
-  if (/^Extension call '\w+' timed out/.test(message)) return "timeout"; // LOST_CALL.timedOut
-  if (message === "not the hub") return "not-hub";
+  if (message.startsWith(TIMED_OUT[0]) && message.endsWith(TIMED_OUT[1])) return "timeout";
+  if (message.startsWith(NOT_READ.notHub)) return "not-hub";
   if (isLostCall(message) || message === NOT_SENT.gone || message === NOT_SENT.hubClosing) return "closed";
-  if (/extension is not connected|^Connecting to the mcp-teams bridge/i.test(message)) return "not-connected";
+  if (message.startsWith(NOT_READ.notConnected) || message.startsWith(NOT_READ.connecting)) return "not-connected";
   return "error";
 }
+
+/** LOST_CALL.timedOut's text before and after the method's name. */
+const TIMED_OUT = LOST_CALL.timedOut("\u0000").split("\u0000") as [string, string];
 
 export function diagnosticLog(options: DiagnosticLogOptions): DiagnosticLog {
   const append: Log = hubLog(options.file ?? SERVER_LOG_FILE, options.maxBytes);
@@ -178,7 +181,7 @@ export function diagnosticLog(options: DiagnosticLogOptions): DiagnosticLog {
     last.set(event, key);
     write(event, fields);
   };
-  let account: { known: boolean; id?: string; signedIn: boolean } = { known: false, signedIn: false };
+  let account: { id?: string; signedIn: boolean } = { signedIn: false }; // id: the last account seen (#153)
   let failures = 0; // status reads in a row that failed (#153)
   let reconnected = false; // an extension connected or the role changed since the last status read
   let slowReads = 0; // successful status reads in a row slower than slowStatusMs
@@ -249,7 +252,7 @@ export function diagnosticLog(options: DiagnosticLogOptions): DiagnosticLog {
         const services = st.services && typeof st.services === "object" ? Object.keys(st.services).filter((k) => SERVICES.has(k) && st.services[k]) : [];
         const id = typeof st.signedInAs === "string" && st.signedInAs ? st.signedInAs : undefined;
         // The account itself stays in memory: the log says only whether it changed.
-        const accountField = !id ? "none" : !account.known ? "first" : account.id === id ? "same" : "changed";
+        const accountField = !id ? "none" : !account.id ? "first" : account.id === id ? "same" : "changed";
         const state = {
           tabs: Number.isFinite(Number(st.teamsTabs)) ? Number(st.teamsTabs) : "-",
           captured: Array.isArray(st.sessions) && st.sessions.some((x: any) => x?.sessionCaptured) ? "yes" : "no",
@@ -258,9 +261,9 @@ export function diagnosticLog(options: DiagnosticLogOptions): DiagnosticLog {
         };
         // An account is known once one was seen (#153): no account, then one, is its first, not a
         // switch. Signing out (an account, then none) is logged; the account seen last is kept.
-        const changedAccount = id ? !account.known || account.id !== id || !account.signedIn : account.signedIn;
+        const changedAccount = id ? account.id !== id || !account.signedIn : account.signedIn;
         const key = JSON.stringify(state);
-        account = id ? { known: true, id, signedIn: true } : { ...account, signedIn: false };
+        account = id ? { id, signedIn: true } : { ...account, signedIn: false };
         // A slow read is logged even when nothing changed: the 1st of a run of them, and every REPEAT_EVERY-th.
         const slow = ms !== undefined && ms > slowStatusMs;
         slowReads = slow ? slowReads + 1 : 0;
