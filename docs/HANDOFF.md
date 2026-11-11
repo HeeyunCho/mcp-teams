@@ -1,16 +1,18 @@
 # Handoff: mcp-teams after #123 PR 4 (updated 2026-11-11 on the Windows PC)
 
-Repo: GitHub `HeeyunCho/mcp-teams`. PRs 1–4 of #123 (the native-messaging host) are on `main`, all **off by default** (`nativeHost` off). Next is PR 5, which turns it on. The last release is 0.3.62 (`336ff7e`, #140 and #141).
+Repo: GitHub `HeeyunCho/mcp-teams`. PRs 1–4 of #123 (the native-messaging host) are on `main`, all **off by default** (`nativeHost` off). Next is PR 5, which turns it on. The last release is 0.3.64 (`bb24f47`, #147); 0.3.63 (`87ef6b8`) has #144 and #146.
 
 ## Now (2026-11-11)
 
 | PR | Change | State |
 |---|---|---|
-| #144 | Fixes #138: on Windows, a printed command whose first word is quoted starts with `& `. cmd.exe rejects a leading `&`, so the hint adds "(PowerShell; in cmd.exe, leave out the leading &)". Review: no blockers, two test nits fixed (`c409dfb`) | Merged as `3bbd5ad` <!-- STATE: #144 — merged 09:16Z per gh; set release version once version.yml cuts it --> |
-| #146 | #123 PR 4: setup registration, `batPath`, moved node / gone `hub.js` / missing HKCU key reporting, the `nativeMessaging` permission. Off by default | Merged as `347ec95` <!-- STATE: #146 — merged 09:16Z per gh; set release version once version.yml cuts it --> |
-| #147 | Fixes #143: every server writes `~/.mcp-teams/server.log` | Open; test and test-windows green, gitleaks failed on head `d824279` <!-- STATE: #147 — gitleaks status and final merge state per the lead --> |
+| #144 | Fixes #138: on Windows, a printed command whose first word is quoted starts with `& `. cmd.exe rejects a leading `&`, so the hint adds "(PowerShell; in cmd.exe, leave out the leading &)". Review: no blockers, two test nits fixed (`c409dfb`) | Merged as `3bbd5ad`, released in 0.3.63 (`87ef6b8`) |
+| #146 | #123 PR 4: setup registration, `batPath`, moved node / gone `hub.js` / missing HKCU key reporting, the `nativeMessaging` permission. Off by default | Merged as `347ec95`, released in 0.3.63 (`87ef6b8`) |
+| #147 | Fixes #143: every server writes `~/.mcp-teams/server.log` | Merged as `aa2c1fa`, released in 0.3.64 (`bb24f47`). gitleaks first failed on the redaction test's made-up JWT (`test/unit/serverLog.test.ts:140`); it is in `.gitleaksignore` (`3689810`). Main was merged in for conflicts with #146 in `src/tools.ts` and `docs/testing.md` (`e8bdafe`) |
 
-- **#145** (Node 20 flake in `test/system/nativeHost.test.ts` under load, "once the serving host has proved itself, the relay's deadline is off" → `Browser extension disconnected`) is being fixed on a branch today. <!-- STATE: #145 — branch/PR number and state per the lead -->
+- **#145** (Node 20 flake in `test/system/nativeHost.test.ts` under load, "once the serving host has proved itself, the relay's deadline is off" → `Browser extension disconnected`) is fixed in **PR #150** (open, `fix/145-relay-deadline-flake`, test only). Cause: the harness's 200 ms test heartbeat (`TEAMS_MCP_HUB_KEEPALIVE_MS=200`) cut a connection that a loaded machine kept busy for about two periods, not the 600 ms deadline. Fix: that test runs the real 20 s heartbeat and stalls `AUTH_MS + 400` ms mid-call; under 20 busy loops on Node 20 it went from 5 failures in 30 runs to 0 in 30. Review: no blockers; comment fixes in `3066aab`.
+- **#149** (follow-up from #145's review): keep-alive drops write no `hub.log` line, and other system tests on the 200 ms test heartbeat (linger, takeover, `extensionNative`) should be audited one at a time.
+- **#148** (`needs-triage`, filed 2026-11-11): the extension logs "WebSocket is already in CLOSING or CLOSED state" (`background.js:2138` in 0.3.60, `:2278` on main). The challenge handler checks `readyState` before awaiting the pairing token and proof, then sends the `hello` on a socket the hub closed meanwhile. Harmless, but it means the hub closed during the handshake; look for `handshake-closed` in `server.log`.
 - **#142** (`needs-triage`): an hourly Hub health report on 2026-11-10 17:44Z, `restartNeeded` with server 0.3.57 running and 0.3.58 on disk. That is the known stale-server case (#111/#96).
 
 ### The outage of 2026-11-11, 01:04–07:17 (CET)
