@@ -67,6 +67,18 @@ When Teams asks to slow down (HTTP 429), mcp-teams sends nothing more to that se
 
 Several AI sessions share one connection to the browser: the first one runs it, the others go through it. They check on each other every 20 s. If the session running it stops responding (its app is suspended or hung), the others' calls fail within about 40 s with "The mcp-teams hub stopped responding; try again in a few seconds", and one of them takes over. A session that stops reading what it is sent is disconnected and reconnects. The extension reconnects by itself when it hasn't heard from the server for 45 s.
 
+### What happened while nobody looked: server.log
+
+Every mcp-teams server appends what it went through to `~/.mcp-teams/server.log` (`0600` in a `0700` folder; moved to `server.log.1` once it passes 1 MB), so an outage can be traced after a restart. Each line is one event: the time (UTC), the process id, the event, the server's version and role, then its fields:
+
+```
+2026-11-11T00:04:12.345Z pid=4242 extension-closed v=0.3.62 role=hub code=1006 transport=websocket
+```
+
+Events: `start` and `exit` (with its `reason`: `stdin-closed`, `SIGTERM`, …; a `pid` with a `start` but no `exit` line was killed or crashed hard), `role` (hub, peer or none, and how it reached the hub), `handover` (to a newer server), `restart-needed` (the first time it is seen), `extension-connected` (each connect, with the extension's version as `ext`), `extensions` (how many are connected, by which transport), `extension-closed` (with the close code), `extension-dropped` (`reason=no-pong`: the hub dropped an extension that stopped answering its pings), `handshake-closed` (a connection turned away before it was accepted, with its code: 4401 a wrong token or no proof in time, 4426 an extension too old, 4409 another copy connected, 4403 an extension on the native host's TCP port), `hub-closed` (a peer's hub went away), `teams` (the Teams state an extension reported: tabs, whether a session is captured and for which services, `stale=yes` when the tab keeps calling but made no signed-in call for 5 minutes, which a captured but expired session looks like, and whether the signed-in account is the same or changed), `tool` (a call that failed, by error name and kind, or took longer than 20 s, with its duration; `send_message`'s wait for your click never counts as slow), and `uncaught-exception` / `unhandled-rejection`. States are logged when they change, not on every read. The hub reads the Teams state every minute by itself, so it is logged even while no AI session calls a tool, and every server checks every minute whether mcp-teams was updated on disk.
+
+It holds metadata only: never message text, names, chat ids, tokens, regions or who is signed in. With several AI sessions, all of their servers write to the same file (each line names its `pid`). For a `[Hub health]` report, attach `server.log` (and `server.log.1`) first. A file like `server.log.1234-ab12cd34.rotating` is an older part of the log that couldn't be moved to `server.log.1` because another program (a virus scanner, a viewer) held that open; attach it too, or delete it.
+
 ### When the extension's console shows connection errors
 
 While no mcp-teams server is listening on the bridge port (`port`, 47393 by default), the extension's console (and its Errors page in `chrome://extensions`) shows lines like this (with your own port number if you changed it):

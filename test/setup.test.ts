@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -170,6 +170,28 @@ describe("#24: quote", () => {
       rmSync(dir, { recursive: true, force: true });
     }
   });
+
+  // A quoted first word is a string to PowerShell, not a command: pasted as printed,
+  // `"C:\Program Files\nodejs\node.exe" x` fails with "Unexpected token". The node here
+  // is this one, copied into a folder with a space so its path gets quoted. (Not a hard
+  // link: that shares the running node.exe, and Windows then refuses to delete it.)
+  it.runIf(process.platform === "win32")('#138: PowerShell runs the "No AI app found" command when node\'s path is quoted', { timeout: 60_000 }, () => {
+    const dir = mkdtempSync(join(tmpdir(), "quote first-"));
+    try {
+      const node = join(dir, "node.exe");
+      copyFileSync(process.execPath, node);
+      const script = join(dir, "argv.js");
+      writeFileSync(script, "process.stdout.write(JSON.stringify(process.argv.slice(2)));");
+      const hint = noAppHint({ command: node, args: [script, "C:\\Users\\Alex Doe\\x", "-y"] }, "win32");
+      const command = hint.slice(hint.indexOf(": ") + 2);
+      expect(command.startsWith('& "')).toBe(true);
+      const encoded = Buffer.from(command, "utf16le").toString("base64");
+      const out = execFileSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-EncodedCommand", encoded], { encoding: "utf8" });
+      expect(JSON.parse(out)).toEqual(["C:\\Users\\Alex Doe\\x", "-y"]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });
 
 describe("#24: printed commands quote for the platform", () => {
@@ -186,7 +208,13 @@ describe("#24: printed commands quote for the platform", () => {
   it('#24: the "No AI app found" hint', () => {
     expect(noAppHint(spaced, "darwin")).toBe("No AI app found. Register this stdio server with yours: '/Users/Alex Doe/$bin/node' '/Users/Alex'\\''s/index.js'");
     expect(noAppHint(windows, "win32")).toBe(
-      'No AI app found. Register this stdio server with yours: "C:\\Program Files\\nodejs\\node.exe" "C:\\Users\\Alex&Sam\\index.js" "C:\\Users\\Alex%20Doe\\x" -y',
+      'No AI app found. Register this stdio server with yours (PowerShell; in cmd.exe, leave out the leading &): & "C:\\Program Files\\nodejs\\node.exe" "C:\\Users\\Alex&Sam\\index.js" "C:\\Users\\Alex%20Doe\\x" -y',
+    );
+  });
+
+  it("#138: on Windows, an unquoted first word gets no & and no note", () => {
+    expect(noAppHint({ command: "C:\\nodejs\\node.exe", args: ["C:\\Users\\Alex Doe\\index.js"] }, "win32")).toBe(
+      'No AI app found. Register this stdio server with yours: C:\\nodejs\\node.exe "C:\\Users\\Alex Doe\\index.js"',
     );
   });
 

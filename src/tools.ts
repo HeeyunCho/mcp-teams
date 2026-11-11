@@ -4,7 +4,9 @@ import { isLostCall, type Capabilities, type ExtensionBridge, type ExtensionInfo
 import type { Config } from "./config.js";
 import { readBuildInfo, restartCheck, restartHint } from "./buildInfo.js";
 import { BUILD_DIR, RUNNING_BUILD } from "./config.js";
+import { nativeHostReport } from "./nativehost.js";
 import { failedCallNote, isMissingSession, sessionNote, type TeamsStatus } from "./sessionNote.js";
+import type { DiagnosticLog } from "./serverLog.js";
 
 /** Sending waits for the user's click in the confirmation window (5 minutes at most). */
 const SEND_TIMEOUT_MS = 6 * 60_000;
@@ -32,15 +34,46 @@ type Extra = { signal?: AbortSignal };
  * (null keeps it). Handlers pass extra.signal to bridge.call, so cancelling a tool withdraws its
  * extension call.
  */
-function safeWith(hint: () => string | null, explain: (err: unknown, extra: Extra) => Promise<string | null>) {
+function safeWith(hint: () => string | null, explain: (err: unknown, extra: Extra) => Promise<string | null>, failed?: (result: object, err: unknown) => void) {
   return <A, E extends Extra = Extra>(fn: (args: A, extra: E) => Promise<ReturnType<typeof text>>) =>
     async (args: A, extra: E) => {
       try {
         return await fn(args, extra);
       } catch (err) {
-        return fail((await explain(err, extra).catch(() => null)) ?? err, hint());
+        const result = fail((await explain(err, extra).catch(() => null)) ?? err, hint());
+        failed?.(result, err);
+        return result;
       }
     };
+}
+
+/**
+ * `server.registerTool`, with each call's end told to `diagnostics` (server.log, #143): its tool,
+ * how long it took, and for a failed one the error `errorOf` has for its result. Logging never
+ * delays or changes the call's answer.
+ */
+function loggedRegister(server: McpServer, diagnostics: DiagnosticLog | undefined, errorOf: (result: object) => unknown): McpServer["registerTool"] {
+  const register = server.registerTool.bind(server) as (name: string, config: unknown, cb: (...a: any[]) => Promise<any>) => any;
+  if (!diagnostics) return register as McpServer["registerTool"];
+  const note = (name: string, started: number, err: unknown) => {
+    try {
+      diagnostics.toolCall(name, performance.now() - started, err);
+    } catch {
+      // logging never stops a call
+    }
+  };
+  return ((name: string, config: unknown, cb: (...a: any[]) => Promise<any>) =>
+    register(name, config, async (...args: any[]) => {
+      const started = performance.now();
+      try {
+        const result = await cb(...args);
+        note(name, started, result?.isError ? (errorOf(result) ?? new Error("tool error")) : undefined);
+        return result;
+      } catch (err) {
+        note(name, started, err);
+        throw err;
+      }
+    })) as McpServer["registerTool"];
 }
 
 const conversation = z
@@ -73,15 +106,19 @@ function capText<T extends Message>(messages: T[], maxLength: number): T[] {
 }
 
 /** What the tools use from the config; autoSendTo may be left out (no auto-send). */
-export type ToolsConfig = Omit<Config, "autoSendTo" | "nativeHost"> & { autoSendTo?: string[] };
+export type ToolsConfig = Omit<Config, "autoSendTo" | "nativeHost"> & { autoSendTo?: string[]; nativeHost?: boolean };
 
 /**
  * For tests. build: a dist/ folder whose build.json is taken as the running build (read now) and as the
  * one on disk (read again on demand), and the clock for reusing that read and for get_version's session
- * note (#103). Left out: this code's own dist/ and Date.now.
+ * note (#103). Left out: this code's own dist/ and Date.now. nativeHost: where get_version looks for
+ * the native host's registrations (a temporary home); left out, this computer's.
  */
 export interface ToolsOptions {
   build?: { dir: string; now?: () => number };
+  /** server.log (#143): failed and slow calls, the Teams state from each status read, restartNeeded once seen. */
+  diagnostics?: DiagnosticLog;
+  nativeHost?: Parameters<typeof nativeHostReport>[0];
 }
 
 /**
@@ -98,19 +135,33 @@ export function registerTools(server: McpServer, bridge: ExtensionBridge, config
   // The version of the code that runs (its build.json), not package.json's.
   const serverVersion = running.version;
   // Read on demand only (get_version, a failed call): no timers, no watchers.
-  const onDisk = restartCheck(running, options.build?.dir ?? BUILD_DIR, options.build?.now);
+  const diagnostics = options.diagnostics;
+  const checkDisk = restartCheck(running, options.build?.dir ?? BUILD_DIR, options.build?.now);
+  const onDisk = () => {
+    const state = checkDisk();
+    if (state.restartNeeded) diagnostics?.restartNeeded(state.onDisk.version);
+    return state;
+  };
+  // Every status read: server.log keeps the Teams state when it changed.
+  const status = (timeoutMs: number | undefined, signal: AbortSignal | undefined) =>
+    bridge.call("status", {}, timeoutMs, signal).then(
+      (st) => (diagnostics?.teamsStatus(st), st),
+      (err) => (diagnostics?.teamsStatus(null, signal?.aborted ? "aborted" : undefined), Promise.reject(err)),
+    );
+  const failures = new WeakMap<object, unknown>(); // a failed call's result → its error, for server.log
+  const register = loggedRegister(server, diagnostics, (result) => failures.get(result));
   const now = options.build?.now ?? (() => Date.now());
   // A call that failed for a missing session says why, as get_version's note does (#103), from the
   // extension's status, read only for such a failure.
   const explain = async (err: unknown, extra: Extra) => {
     const message = err instanceof Error ? err.message : String(err);
     if (!isMissingSession(message) || !bridge.connected) return null;
-    const status = await bridge.call("status", {}, NOTE_STATUS_TIMEOUT_MS, extra.signal);
-    return failedCallNote(message, status as TeamsStatus | null, now());
+    const st = await status(NOTE_STATUS_TIMEOUT_MS, extra.signal);
+    return failedCallNote(message, st as TeamsStatus | null, now());
   };
-  const safe = safeWith(() => restartHint(running, onDisk()), explain);
+  const safe = safeWith(() => restartHint(running, onDisk()), explain, (result, err) => failures.set(result, err));
   const autoSendTo = config.autoSendTo ?? [];
-  server.registerTool(
+  register(
     "get_version",
     {
       title: "Version and connection status",
@@ -121,7 +172,7 @@ export function registerTools(server: McpServer, bridge: ExtensionBridge, config
     safe(async (_, extra) => {
       let teams: unknown = null;
       if (bridge.connected) {
-        teams = await bridge.call("status", {}, undefined, extra.signal).catch((e: Error) => ({ error: e.message }));
+        teams = await status(undefined, extra.signal).catch((e: Error) => ({ error: e.message }));
         // #77: whether the account is unsure after a switch; an extension from before it doesn't say (null).
         if (teams && typeof teams === "object" && !("error" in teams)) teams = { ...teams, accountUnsure: (teams as TeamsStatus).accountUnsure ?? null };
       }
@@ -157,6 +208,9 @@ export function registerTools(server: McpServer, bridge: ExtensionBridge, config
         // or the WebSocket; null with no extension. A hub from before #123 doesn't say, and had only
         // the WebSocket.
         transport: bridge.extension ? (bridge.extension.transport ?? "websocket") : null,
+        // #123 decision 11: with "nativeHost": true, which browsers have the host registered, and
+        // whether the Node its launcher starts has gone (nvm, fnm): then setup must run again.
+        ...(config.nativeHost ? { nativeHost: nativeHostReport(options.nativeHost) } : {}),
         // The port the bridge uses (with port 0 configured, the free one it got).
         port: bridge.port,
         teams,
@@ -166,7 +220,7 @@ export function registerTools(server: McpServer, bridge: ExtensionBridge, config
     }),
   );
 
-  server.registerTool(
+  register(
     "reload_extension",
     {
       title: "Reload the browser extension",
@@ -180,7 +234,7 @@ export function registerTools(server: McpServer, bridge: ExtensionBridge, config
     }),
   );
 
-  server.registerTool(
+  register(
     "api_traffic",
     {
       title: "Show the Teams web app's API calls (diagnostic)",
@@ -204,7 +258,7 @@ export function registerTools(server: McpServer, bridge: ExtensionBridge, config
   /** The bridge param: sent only when asked, so a call without it reads as before. */
   const refreshParam = (r: boolean) => (r ? { refresh: true } : {});
 
-  server.registerTool(
+  register(
     "list_teams",
     {
       title: "List teams and channels",
@@ -227,7 +281,7 @@ export function registerTools(server: McpServer, bridge: ExtensionBridge, config
     }),
   );
 
-  server.registerTool(
+  register(
     "list_chats",
     {
       title: "List chats",
@@ -245,7 +299,7 @@ export function registerTools(server: McpServer, bridge: ExtensionBridge, config
     ),
   );
 
-  server.registerTool(
+  register(
     "read_messages",
     {
       title: "Read a chat or channel",
@@ -278,7 +332,7 @@ export function registerTools(server: McpServer, bridge: ExtensionBridge, config
     .min(1)
     .describe("Which meeting: its chat id from list_meetings (19:meeting_…) or its title. A title must match exactly one meeting chat.");
 
-  server.registerTool(
+  register(
     "list_meetings",
     {
       title: "List Teams meetings",
@@ -296,7 +350,7 @@ export function registerTools(server: McpServer, bridge: ExtensionBridge, config
     ),
   );
 
-  server.registerTool(
+  register(
     "get_meeting",
     {
       title: "Get a meeting's calls and attendance",
@@ -310,7 +364,7 @@ export function registerTools(server: McpServer, bridge: ExtensionBridge, config
     safe(async (args, extra) => text(await bridge.call("getMeeting", args, READ_TIMEOUT_MS, extra.signal))),
   );
 
-  server.registerTool(
+  register(
     "read_transcript",
     {
       title: "Read a meeting transcript",
@@ -328,7 +382,7 @@ export function registerTools(server: McpServer, bridge: ExtensionBridge, config
     ),
   );
 
-  server.registerTool(
+  register(
     "search_transcripts",
     {
       title: "Search meeting transcripts",
@@ -344,7 +398,7 @@ export function registerTools(server: McpServer, bridge: ExtensionBridge, config
     safe(async (args, extra) => text(await bridge.call("searchTranscripts", args, 300_000, extra.signal))),
   );
 
-  server.registerTool(
+  register(
     "search_messages",
     {
       title: "Search messages",
@@ -359,7 +413,7 @@ export function registerTools(server: McpServer, bridge: ExtensionBridge, config
     safe(async (args, extra) => text(await bridge.call("searchMessages", args, READ_TIMEOUT_MS, extra.signal))),
   );
 
-  server.registerTool(
+  register(
     "find_people",
     {
       title: "Find people",
@@ -373,7 +427,7 @@ export function registerTools(server: McpServer, bridge: ExtensionBridge, config
     safe(async (args, extra) => text(await bridge.call("findPeople", args, READ_TIMEOUT_MS, extra.signal))),
   );
 
-  server.registerTool(
+  register(
     "send_message",
     {
       title: "Send a message (needs your click)",

@@ -1,10 +1,10 @@
 // The native host's log (#123 decision 6): ~/.mcp-teams/hub.log (0600), rotated to hub.log.1
 // once it passes 1 MB, with metadata only (type, method, ok, bytes, ms), never message text.
-import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync, existsSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { errorFields, HUB_LOG_MAX_BYTES, hubLog, logVersion, trafficLogger } from "../../src/hubLog.js";
+import { errorFields, HUB_LOG_MAX_BYTES, hubLog, logVersion, rotate, trafficLogger } from "../../src/hubLog.js";
 
 const dirs: string[] = [];
 afterEach(() => {
@@ -63,6 +63,37 @@ describe("#123: hub.log", () => {
     const dir = tempDir();
     writeFileSync(join(dir, "not-a-folder"), "");
     expect(() => hubLog(join(dir, "not-a-folder", "hub.log"))("host")).not.toThrow();
+  });
+});
+
+describe("#143: rotation with other processes and other programs", () => {
+  const lineCount = (dir: string) =>
+    readdirSync(dir)
+      .filter((f) => f.startsWith("hub.log") && statSync(join(dir, f)).isFile())
+      .reduce((n, f) => n + readFileSync(join(dir, f), "utf8").split("\n").filter(Boolean).length, 0);
+
+  it("while .1 can't be replaced (held open by another program), leaves the rotated log aside once instead of copying it back on every line", () => {
+    const dir = tempDir();
+    const file = join(dir, "hub.log");
+    mkdirSync(`${file}.1`); // a .1 nothing can be renamed over
+    const log = hubLog(file, 1_000);
+    for (let i = 0; i < 100; i++) log("line", { i }); // ~55 bytes a line: past the cap about five times
+    // Each time the log passed the cap it was set aside once; the live log never grew past the cap and a line.
+    expect(statSync(file).size).toBeLessThan(1_000 + 100);
+    expect(readdirSync(dir).filter((f) => f.endsWith(".rotating")).length).toBeGreaterThanOrEqual(4);
+    expect(lineCount(dir)).toBe(100);
+  });
+
+  it("puts a small log back when another process rotated first, so its lines stay in the live log", () => {
+    const dir = tempDir();
+    const file = join(dir, "hub.log");
+    writeFileSync(`${file}.1`, "x".repeat(2_000)); // the other process's rotation
+    writeFileSync(file, "a line written since\n");
+    // This process saw the big log just before the other one moved it.
+    rotate(file, 1_000, 2_000);
+    expect(readFileSync(file, "utf8")).toBe("a line written since\n");
+    expect(statSync(`${file}.1`).size).toBe(2_000);
+    expect(readdirSync(dir).sort()).toEqual(["hub.log", "hub.log.1"]);
   });
 });
 
