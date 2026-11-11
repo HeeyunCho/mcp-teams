@@ -103,10 +103,10 @@ const FIELDS: Record<string, (v: string) => string> = {
 };
 
 /**
- * Failed status reads in a row are logged at the 1st and then every this many (#153): with the hub's
- * read every minute, a line every 10 minutes while it stays broken.
+ * Failed status reads in a row, and slow ones, are logged at the 1st and then every this many (#153):
+ * with the hub's read every minute, a line every 10 minutes while it stays so.
  */
-const FAILURE_EVERY = 10;
+const REPEAT_EVERY = 10;
 
 /** Teams services the extension captures sessions for (extension/background.js). */
 const SERVICES = new Set(["chatsvc", "csa", "mt", "substrate", "sharepoint"]);
@@ -179,6 +179,7 @@ export function diagnosticLog(options: DiagnosticLogOptions): DiagnosticLog {
   };
   let account: { known: boolean; id?: string; signedIn: boolean } = { known: false, signedIn: false };
   let failures = 0; // status reads in a row that failed (#153)
+  let reconnected = false; // an extension connected or the role changed since the last status read
   let slowReads = 0; // successful status reads in a row slower than slowStatusMs
   const slowStatusMs = options.slowStatusMs ?? SLOW_STATUS_MS;
   let restartSeen = false;
@@ -208,6 +209,9 @@ export function diagnosticLog(options: DiagnosticLogOptions): DiagnosticLog {
     start: (fields = {}) => write("start", { ...fields, node: process.version }),
     exit: (reason, code) => write("exit", { reason, code }),
     bridge(event, fields = {}) {
+      // The first failed read after a reconnect or a role change is logged at once (#153 review):
+      // it is a new connection's, not more of the same run.
+      if (event === "role" || event === "extension-connected") reconnected = true;
       if (event === "role" || event === "extensions") return onChange(event, fields);
       // An extension with a bad token retries every 30 s: its refusal is logged when it changes,
       // and again after something connected.
@@ -225,20 +229,22 @@ export function diagnosticLog(options: DiagnosticLogOptions): DiagnosticLog {
           return write("teams", { status: "aborted", ms });
         }
         if (!st || typeof st !== "object" || "error" in st) {
-          // Failures in a row are counted: the 1st, every FAILURE_EVERY-th and one of a new kind are
+          // Failures in a row are counted: the 1st, every REPEAT_EVERY-th and one of a new kind are
           // logged, so a long outage shows without a line every minute.
           failures++;
           slowReads = 0;
           const error = read.error ?? (st && typeof st === "object" ? st.error : undefined);
           const kind = error === undefined ? undefined : readKindOf(error);
           const key = `unreadable ${kind}`;
-          const logged = failures === 1 || failures % FAILURE_EVERY === 0 || last.get("teams") !== key;
+          const logged = failures === 1 || failures % REPEAT_EVERY === 0 || last.get("teams") !== key || reconnected;
           last.set("teams", key);
+          reconnected = false;
           if (logged) write("teams", { status: "unreadable", kind, ms, failures });
           return;
         }
         const after = failures || undefined; // the read that recovers says how many failed before it
         failures = 0;
+        reconnected = false;
         const services = st.services && typeof st.services === "object" ? Object.keys(st.services).filter((k) => SERVICES.has(k) && st.services[k]) : [];
         const id = typeof st.signedInAs === "string" && st.signedInAs ? st.signedInAs : undefined;
         // The account itself stays in memory: the log says only whether it changed.
@@ -254,10 +260,10 @@ export function diagnosticLog(options: DiagnosticLogOptions): DiagnosticLog {
         const changedAccount = id ? !account.known || account.id !== id || !account.signedIn : account.signedIn;
         const key = JSON.stringify(state);
         account = id ? { known: true, id, signedIn: true } : { ...account, signedIn: false };
-        // A slow read is logged even when nothing changed: the 1st of a run of them, and every FAILURE_EVERY-th.
+        // A slow read is logged even when nothing changed: the 1st of a run of them, and every REPEAT_EVERY-th.
         const slow = ms !== undefined && ms > slowStatusMs;
         slowReads = slow ? slowReads + 1 : 0;
-        const slowLine = slow && (slowReads === 1 || slowReads % FAILURE_EVERY === 0);
+        const slowLine = slow && (slowReads === 1 || slowReads % REPEAT_EVERY === 0);
         if (last.get("teams") === key && !changedAccount && !after && !slowLine) return;
         last.set("teams", key);
         write("teams", { ...state, account: accountField, ms, slow: slow ? "yes" : undefined, after });

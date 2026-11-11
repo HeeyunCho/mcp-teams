@@ -172,6 +172,22 @@ describe("#153: an unreadable status read says why and how long it took", () => 
     ]);
   });
 
+  it("logs the first failure after the extension reconnected or the role changed at once, keeping the count", () => {
+    const { log, lines } = setup();
+    const timeout = { ms: 15_001, error: new Error("Extension call 'status' timed out") };
+    log.teamsStatus(null, timeout);
+    log.bridge("extension-connected", { ext: "0.3.65", transport: "websocket" }); // a 4000 replace
+    log.teamsStatus(null, timeout);
+    log.teamsStatus(null, timeout);
+    log.bridge("role", { role: "hub", via: "tcp" });
+    log.teamsStatus(null, timeout);
+    expect(events(lines).filter((l) => / teams /.test(` ${l}`))).toEqual([
+      "teams v=0.3.62 role=none status=unreadable kind=timeout ms=15001 failures=1",
+      "teams v=0.3.62 role=none status=unreadable kind=timeout ms=15001 failures=2",
+      "teams v=0.3.62 role=none status=unreadable kind=timeout ms=15001 failures=4",
+    ]);
+  });
+
   it("logs a read slower than 2.5 s even when nothing changed: the 1st of a run of slow reads and every 10th", () => {
     const { log, lines } = setup();
     const ok = { teamsTabs: 1, sessions: [{ sessionCaptured: true }], services: { chatsvc: "2026-11-11T00:00:00Z" } };
