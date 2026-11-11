@@ -137,7 +137,12 @@ describe("#123: setup and the nativeHost switch", () => {
     const hub = join(home, "mcp-teams", "dist", "hub.js");
     mkdirSync(join(hub, ".."), { recursive: true });
     writeFileSync(hub, "// hub");
-    expect(await setup(connected(), "0.0.0", { yes: true, nativeHost: { hubScript: hub } })).toBe(true);
+    // A Node in the temporary home too: the Node running the tests may sit under a non-ASCII home
+    // (C:\Users\홍길동\…) that the stubbed %USERPROFILE% no longer covers, which a .bat can't hold.
+    const node = join(home, "nodejs", "node.exe");
+    mkdirSync(join(node, ".."), { recursive: true });
+    writeFileSync(node, "");
+    expect(await setup(connected(), "0.0.0", { yes: true, nativeHost: { hubScript: hub, node } })).toBe(true);
     const said = lines.filter((l) => /native host/i.test(l));
     if (process.platform === "win32") {
       const manifest = join(home, "AppData", "Local", "mcp-teams", "com.mcp_teams.hub.json");
