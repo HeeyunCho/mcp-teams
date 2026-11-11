@@ -7,12 +7,12 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { afterEach, describe, expect, it } from "vitest";
-import { proof, socketTransport, type BridgeSocket, type ExtensionBridge } from "../../src/bridge.js";
+import { DEFAULT_BRIDGE_OPTIONS, proof, socketTransport, type BridgeSocket, type ExtensionBridge } from "../../src/bridge.js";
 import { SERVER_VERSION } from "../../src/config.js";
 import { registerTools } from "../../src/tools.js";
 import { fakeExtension, TOKEN } from "../helpers/bridgeHarness.js";
 import { nativeHarness } from "../helpers/nativeHost.js";
-import { until } from "../helpers/timing.js";
+import { stall, until } from "../helpers/timing.js";
 
 let h: Awaited<ReturnType<typeof nativeHarness>> | undefined;
 afterEach(async () => {
@@ -340,7 +340,10 @@ describe("#123: the native host", { timeout: 30_000 }, () => {
 
   it("#123: once the serving host has proved itself, the relay's deadline is off: calls go through long after it", async () => {
     h = await nativeHarness();
-    const env = { TEAMS_MCP_HUB_AUTH_TIMEOUT_MS: String(AUTH_MS) };
+    // Only the deadline is short. The serving host's heartbeats keep their real period (#145): at
+    // the harness's 200 ms, a session or relaying host busy for two of them on a loaded machine is
+    // dropped, and the call in flight fails as if the deadline had ended the relay.
+    const env = { TEAMS_MCP_HUB_AUTH_TIMEOUT_MS: String(AUTH_MS), TEAMS_MCP_HUB_KEEPALIVE_MS: String(DEFAULT_BRIDGE_OPTIONS.keepAliveMs) };
     await h.host({ env, browser: "Chrome", instance: "profile-1", handle: (r) => (r.method === "status" ? { teamsTabs: 0 } : { from: "chrome" }) });
     const edge = await h.host({ env, browser: "Edge", instance: "profile-2", handle: (r) => (r.method === "status" ? { teamsTabs: 1, sessions: [{ sessionCaptured: true }] } : { from: "edge" }) });
     expect(edge.welcome?.capabilities.features).toContain("native");
@@ -349,9 +352,13 @@ describe("#123: the native host", { timeout: 30_000 }, () => {
     await until(() => server.extensions.length === 2, 3_000, "both browsers");
     // Well past the deadline (more than three of them) ...
     await until(() => Date.now() > t0 + 2_000, 5_000, "two seconds after the welcome");
-    // ... the relaying host still runs and passes calls both ways.
-    expect(edge.exitCode).toBeUndefined();
-    await expect(server.call("readMessages", {}, 3_000)).resolves.toEqual({ from: "edge" });
+    // ... the relaying host still runs and passes calls both ways. hub.log names whatever ended it
+    // (the deadline logs its exit reason).
+    expect(edge.exitCode, `the relaying host exited; hub.log:\n${h.logText()}`).toBeUndefined();
+    const call = server.call("readMessages", {}, 3_000);
+    // On a busy machine (#145) this session stalls for a second in the middle of the call.
+    stall(1_000);
+    expect(await call.catch((err: Error) => `failed: ${err.message}\nhub.log:\n${h!.logText()}`)).toEqual({ from: "edge" });
     expect(edge.requests().some((r) => r.method === "readMessages")).toBe(true);
   });
 
