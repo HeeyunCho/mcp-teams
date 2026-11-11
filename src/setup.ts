@@ -32,7 +32,21 @@ export function quote(arg: string, platform: NodeJS.Platform = process.platform)
   return /[^A-Za-z0-9_@%+=:,./-]/.test(arg) ? `'${arg.replace(/'/g, "'\\''")}'` : arg;
 }
 
-const commandLine = (parts: string[], platform: NodeJS.Platform) => parts.map((part) => quote(part, platform)).join(" ");
+/**
+ * A command printed for the user to paste. On Windows, a quoted first word gets
+ * PowerShell's call operator, `& "C:\Program Files\nodejs\node.exe" x`: PowerShell (the
+ * default terminal) reads a quoted first word as a string, not a command, and fails with
+ * "Unexpected token". cmd.exe refuses the `&` ("& was unexpected at this time.") and runs
+ * nothing, so wherever this can start with `&`, say so with powershellNote. (A command
+ * that starts with `claude` never gets it.)
+ */
+const commandLine = (parts: string[], platform: NodeJS.Platform) => {
+  const line = parts.map((part) => quote(part, platform)).join(" ");
+  return platform === "win32" && line.startsWith('"') ? `& ${line}` : line;
+};
+
+/** Before a command line that may start with PowerShell's `&` (see commandLine). */
+const powershellNote = (line: string) => (line.startsWith("& ") ? " (PowerShell; in cmd.exe, leave out the leading &)" : "");
 
 /** The package from npm, always the latest release (npx keeps it cached). */
 export const NPX_COMMAND: ServerCommand = { command: "npx", args: ["-y", "mcp-teams@latest"] };
@@ -130,8 +144,10 @@ export const claudeAddCommand = (cmd: ServerCommand, platform: NodeJS.Platform =
   commandLine(["claude", "mcp", "add", "--scope", "user", "teams", "--", cmd.command, ...cmd.args], platform);
 
 /** What to do when no AI app was found: register the server by hand. */
-export const noAppHint = (cmd: ServerCommand, platform: NodeJS.Platform = process.platform) =>
-  `No AI app found. Register this stdio server with yours: ${commandLine([cmd.command, ...cmd.args], platform)}`;
+export const noAppHint = (cmd: ServerCommand, platform: NodeJS.Platform = process.platform) => {
+  const line = commandLine([cmd.command, ...cmd.args], platform);
+  return `No AI app found. Register this stdio server with yours${powershellNote(line)}: ${line}`;
+};
 
 /** Claude Code is configured through its CLI: null if it isn't installed, "broken" if its CLI won't start. */
 function planClaudeCode(cmd: ServerCommand): ClaudeCode | "broken" | null {
