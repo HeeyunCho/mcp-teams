@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { EXTENSION_ID } from "../../src/extension.js";
-import { batPath, HOST_NAME, hostLauncherScript, installNativeHost, NonAsciiBatPathError } from "../../src/nativehost.js";
+import { batPath, HOST_NAME, hostLauncherScript, installNativeHost, NonAsciiBatPathError, registeredHosts } from "../../src/nativehost.js";
 
 const json = (path: string) => JSON.parse(readFileSync(path, "utf8"));
 
@@ -215,7 +215,7 @@ describe("#123: installNativeHost on Windows", () => {
     expect(calls).toEqual([]);
   });
 
-  it("#123: a failing reg call is reported, not thrown", () => {
+  it("#123: a failing reg call is reported, not thrown (the HKCU key is the last step)", () => {
     mk(...WIN_CHROME);
     const r = installNativeHost(
       winOpts(() => {
@@ -224,5 +224,82 @@ describe("#123: installNativeHost on Windows", () => {
     );
     expect(r.installed).toEqual([]);
     expect(r.failed).toEqual([{ browser: "Chrome", error: "Access is denied." }]);
+  });
+});
+
+// Decision 11: the host launcher names the Node that ran setup. nvm or fnm can move or remove it,
+// and then Chrome can't start the host until setup runs again; get_version and setup say so.
+describe("#123: a registration whose Node has gone", () => {
+  /** A Node in the temp home, as nvm would install one. */
+  const fakeNode = (...parts: string[]) => {
+    const node = join(home, ...parts);
+    mkdirSync(join(node, ".."), { recursive: true });
+    writeFileSync(node, "");
+    return node;
+  };
+  const winOpts = () => ({ home, platform: "win32" as const, env: winEnv(), hubScript: hub, reg: () => {} });
+  /** A path as a .bat holds it: backslashes only. */
+  const win = (p: string) => p.replace(/\//g, "\\");
+  /**
+   * Whether a Node read back from a .bat can be found: on a macOS or Linux host (CI) the temp
+   * path comes back with backslashes, which name no file there.
+   */
+  const ON_WINDOWS = process.platform === "win32";
+
+  it("#123: nothing registered: nothing to report", () => {
+    mk(...MAC_CHROME);
+    expect(registeredHosts({ home, platform: "darwin" })).toEqual([]);
+  });
+
+  it("#123: macOS: reports each registration with its Node, and whether that Node is still there", () => {
+    mk(...MAC_CHROME);
+    mk(...MAC_EDGE);
+    const node = fakeNode("nvm", "v20 $x", "bin", "node");
+    installNativeHost({ home, platform: "darwin", node, hubScript: hub });
+    expect(registeredHosts({ home, platform: "darwin" })).toEqual([
+      { browser: "Chrome", node, nodeExists: true },
+      { browser: "Edge", node, nodeExists: true },
+    ]);
+    rmSync(node);
+    expect(registeredHosts({ home, platform: "darwin" }).map((r) => [r.browser, r.nodeExists])).toEqual([
+      ["Chrome", false],
+      ["Edge", false],
+    ]);
+  });
+
+  it("#123: Windows: reads the Node back from the .bat, its folder variable and doubled % undone", () => {
+    mk(...WIN_CHROME);
+    const node = fakeNode("AppData", "Roaming", "nvm", "v20 100%", "node.exe");
+    installNativeHost({ ...winOpts(), env: { ...winEnv(), APPDATA: join(home, "AppData", "Roaming") }, node });
+    expect(readFileSync(join(home, "AppData", "Local", "mcp-teams", "mcp-teams-hub.bat"), "utf8")).toContain('"%APPDATA%\\nvm\\v20 100%%\\node.exe"');
+    const env = { ...winEnv(), APPDATA: join(home, "AppData", "Roaming") };
+    expect(registeredHosts({ home, platform: "win32", env })).toEqual([{ browser: "Chrome", node: win(node), nodeExists: ON_WINDOWS }]);
+    rmSync(node);
+    expect(registeredHosts({ home, platform: "win32", env })[0].nodeExists).toBe(false);
+  });
+
+  it("#123: a host launcher it can't read a Node from is reported with node null, not as gone", () => {
+    mk(...MAC_CHROME);
+    installNativeHost({ home, platform: "darwin", node: fakeNode("node"), hubScript: hub });
+    writeFileSync(join(home, ...MAC_CHROME, "NativeMessagingHosts", "mcp-teams-hub"), "#!/bin/sh\necho edited by hand\n");
+    expect(registeredHosts({ home, platform: "darwin" })).toEqual([{ browser: "Chrome", node: null, nodeExists: null }]);
+  });
+
+  it("#123: setup registering again says which Node had gone, and the new host launcher names this one", () => {
+    mk(...WIN_CHROME);
+    const old = fakeNode("AppData", "Local", "fnm", "v20.1", "node.exe");
+    installNativeHost({ ...winOpts(), node: old });
+    rmSync(old);
+    const now = fakeNode("AppData", "Local", "fnm", "v20.2", "node.exe");
+    const r = installNativeHost({ ...winOpts(), node: now });
+    expect(r.installed).toEqual([expect.objectContaining({ browser: "Chrome", changed: true, nodeWasMissing: win(old) })]);
+    expect(registeredHosts({ home, platform: "win32", env: winEnv() })).toEqual([{ browser: "Chrome", node: win(now), nodeExists: ON_WINDOWS }]);
+  });
+
+  it("#123: a registration whose Node is still there says nothing of it", () => {
+    mk(...MAC_CHROME);
+    const node = fakeNode("node");
+    installNativeHost({ home, platform: "darwin", node, hubScript: hub });
+    expect(installNativeHost({ home, platform: "darwin", node, hubScript: hub }).installed[0]).not.toHaveProperty("nodeWasMissing");
   });
 });

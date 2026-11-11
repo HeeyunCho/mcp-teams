@@ -53,6 +53,16 @@ export interface HostInstall {
   registryKey?: string;
   /** Whether a file or the registry was written (false: all already up to date). */
   changed: boolean;
+  /** The Node the host launcher named before, which no longer exists (nvm, fnm: decision 11). */
+  nodeWasMissing?: string;
+}
+
+/** A registration found on this computer, and whether the Node its host launcher starts is still there. */
+export interface RegisteredHost {
+  browser: HostBrowser;
+  /** null: the host launcher names no Node this code can read back (edited by hand). */
+  node: string | null;
+  nodeExists: boolean | null;
 }
 
 export interface InstallResult {
@@ -167,15 +177,61 @@ const defaultReg = (args: string[]) => void execFileSync("reg", args, { stdio: "
 
 const hostLauncherName = (platform: NodeJS.Platform) => (platform === "win32" ? "mcp-teams-hub.bat" : "mcp-teams-hub");
 
+/**
+ * The Node a host launcher starts, read back from its text (hostLauncherScript's output); null if
+ * it names none in that form. A .bat's folder variables are expanded with env and its doubled %
+ * undone, as cmd would; a POSIX one has its shell escapes undone.
+ */
+export function launcherNode(text: string, platform: NodeJS.Platform, env: Record<string, string | undefined> = process.env): string | null {
+  if (platform === "win32") {
+    const quoted = /^@echo off\r?\n"([^"]*)"/.exec(text)?.[1];
+    if (quoted === undefined) return null;
+    return quoted.replace(/%%|%(\w+)%/g, (m, name?: string) => (name === undefined ? "%" : (BAT_FOLDERS as readonly string[]).includes(name) && env[name] ? env[name].replace(/\//g, "\\").replace(/\\+$/, "") : m));
+  }
+  const quoted = /^#!\/bin\/sh\nexec "((?:[^"\\]|\\.)*)"/.exec(text)?.[1];
+  return quoted === undefined ? null : quoted.replace(/\\(.)/g, "$1");
+}
+
+const resolveOptions = (o: NativeHostOptions) => ({
+  home: o.home ?? homedir(),
+  platform: o.platform ?? process.platform,
+  env: o.env ?? process.env,
+});
+
+/** What each registration's host launcher (for each browser found) names as its Node. */
+function readRegistrations(home: string, platform: NodeJS.Platform, env: Record<string, string | undefined>): (RegisteredHost & { target: Target })[] {
+  const found: (RegisteredHost & { target: Target })[] = [];
+  for (const target of targets(home, platform, env)) {
+    if (!existsSync(target.profileDir) || !existsSync(join(target.dir, MANIFEST_FILE))) continue;
+    let text = "";
+    try {
+      text = readFileSync(join(target.dir, hostLauncherName(platform)), "utf8");
+    } catch {
+      // No host launcher: it names no Node.
+    }
+    const node = launcherNode(text, platform, env);
+    found.push({ target, browser: target.browser, node, nodeExists: node === null ? null : existsSync(node) });
+  }
+  return found;
+}
+
+/**
+ * The host registrations on this computer and whether each one's Node is still there (decision
+ * 11): get_version and setup say "run setup again" when it has gone. Reads files only.
+ */
+export function registeredHosts(o: Pick<NativeHostOptions, "home" | "platform" | "env"> = {}): RegisteredHost[] {
+  const { home, platform, env } = resolveOptions(o);
+  return readRegistrations(home, platform, env).map(({ browser, node, nodeExists }) => ({ browser, node, nodeExists }));
+}
+
 /** Registers the host for every browser whose profile folder exists (setup). */
 export function installNativeHost(o: NativeHostOptions = {}): InstallResult {
-  const home = o.home ?? homedir();
-  const platform = o.platform ?? process.platform;
-  const env = o.env ?? process.env;
+  const { home, platform, env } = resolveOptions(o);
   const node = o.node ?? process.execPath;
   const hubScript = o.hubScript ?? HUB_SCRIPT;
   const reg = o.reg ?? defaultReg;
   if (!existsSync(hubScript)) return { installed: [], missingHub: true };
+  const gone = new Map(readRegistrations(home, platform, env).flatMap((r) => (r.node !== null && r.nodeExists === false ? [[r.browser, r.node] as const] : [])));
   const found = targets(home, platform, env).filter((t) => existsSync(t.profileDir));
   if (!found.length) return { installed: [] };
   let script: string;
@@ -198,7 +254,15 @@ export function installNativeHost(o: NativeHostOptions = {}): InstallResult {
         reg(["add", t.registryKey, "/ve", "/t", "REG_SZ", "/d", manifest, "/f"]);
         changed = true;
       }
-      result.installed.push({ browser: t.browser, manifest, hostLauncher, ...(t.registryKey ? { registryKey: t.registryKey } : {}), changed });
+      const was = gone.get(t.browser);
+      result.installed.push({
+        browser: t.browser,
+        manifest,
+        hostLauncher,
+        ...(t.registryKey ? { registryKey: t.registryKey } : {}),
+        changed,
+        ...(was !== undefined ? { nodeWasMissing: was } : {}),
+      });
     } catch (err) {
       (result.failed ??= []).push({ browser: t.browser, error: (err as Error).message });
     }
