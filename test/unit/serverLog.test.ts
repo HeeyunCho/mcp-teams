@@ -3,7 +3,8 @@
 import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { LOST_CALL, NOT_READ, NOT_SENT } from "../../src/bridge.js";
 import { diagnosticLog, watchState } from "../../src/serverLog.js";
 import { until } from "../helpers/timing.js";
 
@@ -103,11 +104,124 @@ describe("#143: the Teams state the extension reports", () => {
     expect(lines().join("\n")).not.toMatch(/orgid|00000000|emea/);
   });
 
+  it("#153: counts no account as unknown, so signing in for the first time is first, not changed", () => {
+    const { log, lines } = setup();
+    const A = "8:orgid:00000000-0000-0000-0000-00000000000a";
+    const B = "8:orgid:00000000-0000-0000-0000-00000000000b";
+    log.teamsStatus(status({ teamsTabs: 0, signedInAs: null }));
+    log.teamsStatus(status({ signedInAs: A })); // the 2026-11-11 12:03:55 line said changed here
+    log.teamsStatus(status({ signedInAs: A }));
+    log.teamsStatus(status({ signedInAs: null }));
+    log.teamsStatus(status({ signedInAs: A })); // signed in again as the same account
+    log.teamsStatus(status({ signedInAs: B })); // a real switch
+    expect(lines().map((l) => / account=(\w+)/.exec(l)?.[1])).toEqual(["none", "first", "none", "same", "changed"]);
+    expect(lines().join("\n")).not.toMatch(/orgid|00000000/);
+  });
+
   it("logs an unreadable status as such", () => {
     const { log, lines } = setup();
     log.teamsStatus(null);
     log.teamsStatus({ error: "Browser extension is not connected." });
-    expect(lines().map((l) => l.replace(/^\S+ pid=\d+ /, ""))).toEqual(["teams v=0.3.62 role=none status=unreadable"]);
+    expect(lines().map((l) => l.replace(/^\S+ pid=\d+ /, ""))).toEqual([
+      "teams v=0.3.62 role=none status=unreadable failures=1",
+      "teams v=0.3.62 role=none status=unreadable kind=not-connected failures=2",
+    ]);
+  });
+});
+
+describe("#153: an unreadable status read says why and how long it took", () => {
+  const events = (lines: () => string[]) => lines().map((l) => l.replace(/^\S+ pid=\d+ /, ""));
+  const BODY = "Contoso merger: confidential, call Sam Roe";
+
+  it("logs the failure's kind from a fixed set and its ms, never the rejection's message", () => {
+    const { log, lines } = setup();
+    log.teamsStatus(null, { ms: 5003.4, error: new Error("Extension call 'status' timed out") });
+    log.teamsStatus(null, { ms: 12, error: new Error(`No chat matches "${BODY}" in 19:secret-chat@thread.v2`) });
+    log.teamsStatus(null, { ms: 7, error: new Error("Browser extension reconnected; try again.") });
+    log.teamsStatus(null, { ms: 0, error: new Error("not the hub") });
+    log.teamsStatus(null, { ms: 1, error: new Error("Browser extension is not connected.") });
+    expect(events(lines)).toEqual([
+      "teams v=0.3.62 role=none status=unreadable kind=timeout ms=5003 failures=1",
+      "teams v=0.3.62 role=none status=unreadable kind=error ms=12 failures=2",
+      "teams v=0.3.62 role=none status=unreadable kind=closed ms=7 failures=3",
+      "teams v=0.3.62 role=none status=unreadable kind=not-hub ms=0 failures=4",
+      "teams v=0.3.62 role=none status=unreadable kind=not-connected ms=1 failures=5",
+    ]);
+    expect(lines().join("\n")).not.toMatch(/Contoso|Sam|Roe|secret-chat|thread/);
+  });
+
+  it("classifies the bridge's own messages, whatever their wording", () => {
+    const kinds: [string, string][] = [
+      [LOST_CALL.timedOut("status"), "timeout"],
+      [LOST_CALL.disconnected, "closed"],
+      [NOT_SENT.gone, "closed"],
+      [NOT_READ.notHub, "not-hub"],
+      [NOT_READ.notConnected, "not-connected"],
+      [NOT_READ.connecting, "not-connected"],
+      [LOST_CALL.withdrawn, "aborted"],
+    ];
+    const kindOf = (message: string) => {
+      const { log, lines } = setup(); // a log of its own: failures of one kind in a row are counted, not logged
+      log.teamsStatus(null, { ms: 1, error: new Error(message) });
+      return / kind=([\w-]+)/.exec(lines()[0])?.[1];
+    };
+    expect(kinds.map(([message]) => kindOf(message))).toEqual(kinds.map(([, kind]) => kind));
+  });
+
+  it("shows how long reads stayed broken: the 1st failure, every 10th, a new kind, and the read that recovers", () => {
+    const { log, lines } = setup();
+    const timeout = { ms: 5001, error: new Error("Extension call 'status' timed out") };
+    for (let i = 0; i < 12; i++) log.teamsStatus(null, timeout);
+    log.teamsStatus(null, { ms: 3, error: new Error("Browser extension disconnected") });
+    for (let i = 0; i < 12; i++) log.teamsStatus(null, timeout);
+    const ok = { teamsTabs: 1, sessions: [{ sessionCaptured: true }], services: { chatsvc: "2026-11-11T00:00:00Z" } };
+    log.teamsStatus(ok, { ms: 4 });
+    log.teamsStatus(null, timeout);
+    log.teamsStatus(ok, { ms: 4 }); // the same state as before the failure: still logged, as the recovery
+    log.teamsStatus(ok, { ms: 4 });
+    expect(events(lines)).toEqual([
+      "teams v=0.3.62 role=none status=unreadable kind=timeout ms=5001 failures=1",
+      "teams v=0.3.62 role=none status=unreadable kind=timeout ms=5001 failures=10",
+      "teams v=0.3.62 role=none status=unreadable kind=closed ms=3 failures=13",
+      "teams v=0.3.62 role=none status=unreadable kind=timeout ms=5001 failures=14",
+      "teams v=0.3.62 role=none status=unreadable kind=timeout ms=5001 failures=20",
+      "teams v=0.3.62 role=none tabs=1 captured=yes services=chatsvc account=none ms=4 after=25",
+      "teams v=0.3.62 role=none status=unreadable kind=timeout ms=5001 failures=1",
+      "teams v=0.3.62 role=none tabs=1 captured=yes services=chatsvc account=none ms=4 after=1",
+    ]);
+  });
+
+  it("logs the first failure after the extension reconnected or the role changed at once, keeping the count", () => {
+    const { log, lines } = setup();
+    const timeout = { ms: 15_001, error: new Error("Extension call 'status' timed out") };
+    log.teamsStatus(null, timeout);
+    log.bridge("extension-connected", { ext: "0.3.65", transport: "websocket" }); // a 4000 replace
+    log.teamsStatus(null, timeout);
+    log.teamsStatus(null, timeout);
+    log.bridge("role", { role: "hub", via: "tcp" });
+    log.teamsStatus(null, timeout);
+    expect(events(lines).filter((l) => / teams /.test(` ${l}`))).toEqual([
+      "teams v=0.3.62 role=none status=unreadable kind=timeout ms=15001 failures=1",
+      "teams v=0.3.62 role=none status=unreadable kind=timeout ms=15001 failures=2",
+      "teams v=0.3.62 role=none status=unreadable kind=timeout ms=15001 failures=4",
+    ]);
+  });
+
+  it("logs a read slower than 2.5 s even when nothing changed: the 1st of a run of slow reads and every 10th", () => {
+    const { log, lines } = setup();
+    const ok = { teamsTabs: 1, sessions: [{ sessionCaptured: true }], services: { chatsvc: "2026-11-11T00:00:00Z" } };
+    log.teamsStatus(ok, { ms: 3 });
+    log.teamsStatus(ok, { ms: 2_400 }); // close, but not slow: no line
+    log.teamsStatus(ok, { ms: 14_000 }); // get_version's read, which may take up to a minute
+    for (let i = 0; i < 9; i++) log.teamsStatus(ok, { ms: 4_900 });
+    log.teamsStatus(ok, { ms: 5 });
+    log.teamsStatus(ok, { ms: 2_600 });
+    expect(events(lines)).toEqual([
+      "teams v=0.3.62 role=none tabs=1 captured=yes services=chatsvc account=none ms=3",
+      "teams v=0.3.62 role=none tabs=1 captured=yes services=chatsvc account=none ms=14000 slow=yes",
+      "teams v=0.3.62 role=none tabs=1 captured=yes services=chatsvc account=none ms=4900 slow=yes",
+      "teams v=0.3.62 role=none tabs=1 captured=yes services=chatsvc account=none ms=2600 slow=yes",
+    ]);
   });
 });
 
@@ -217,9 +331,10 @@ describe("#143 review: what a status says, and what never throws", () => {
 
   it("logs a status read that was cancelled as aborted, not as unreadable", () => {
     const { log, lines } = setup();
-    log.teamsStatus(null, "aborted");
+    log.teamsStatus(null, { aborted: true, ms: 40 });
     log.teamsStatus(null);
-    expect(events(lines)).toEqual(["teams v=0.3.62 role=none status=aborted", "teams v=0.3.62 role=none status=unreadable"]);
+    // A cancelled read says nothing about Teams: it is not counted as a failure.
+    expect(events(lines)).toEqual(["teams v=0.3.62 role=none status=aborted ms=40", "teams v=0.3.62 role=none status=unreadable failures=1"]);
   });
 
   it("does not count send_message's wait for the user's click as slow", () => {
@@ -241,7 +356,9 @@ describe("#143 review: what a status says, and what never throws", () => {
     });
     expect(() => log.crash("uncaught-exception", hostile)).not.toThrow();
     expect(() => log.toolCall("list_chats", 1, hostile)).not.toThrow();
-    expect(lines()).toHaveLength(2);
+    expect(() => log.teamsStatus(null, { ms: 5, error: hostile })).not.toThrow();
+    expect(lines()).toHaveLength(3);
+    expect(lines()[2]).toMatch(/ teams v=0\.3\.62 role=none status=unreadable kind=error ms=5 failures=1$/);
   });
 });
 
@@ -260,7 +377,7 @@ describe("#143 review: the background watch (hub only)", () => {
     stops.push(watchState({ bridge, diagnostics: log, onDisk: () => ({ restartNeeded: false }), everyMs: 20 }));
     await until(() => bridge.reads >= 3, 3_000, "three reads");
     expect(existsSync(file) ? lines() : []).toHaveLength(1);
-    expect(lines()[0]).toMatch(/ teams v=0\.3\.62 role=none tabs=1 captured=yes services=chatsvc account=none$/);
+    expect(lines()[0]).toMatch(/ teams v=0\.3\.62 role=none tabs=1 captured=yes services=chatsvc account=none ms=\d+$/);
   });
 
   it("does not read as a peer or without an extension, and logs a failed read as unreadable", async () => {
@@ -268,6 +385,7 @@ describe("#143 review: the background watch (hub only)", () => {
     const peer = fakeBridge("peer");
     const idle = Object.assign(fakeBridge("hub"), { connected: false });
     const failing = fakeBridge("hub", async () => {
+      await new Promise((r) => setTimeout(r, 30));
       throw new Error("Extension call 'status' timed out");
     });
     stops.push(watchState({ bridge: peer, diagnostics: log, onDisk: () => ({ restartNeeded: false }), everyMs: 20 }));
@@ -275,7 +393,35 @@ describe("#143 review: the background watch (hub only)", () => {
     stops.push(watchState({ bridge: failing, diagnostics: log, onDisk: () => ({ restartNeeded: false }), everyMs: 20 }));
     await until(() => failing.reads >= 2, 3_000, "the failing reads");
     expect(peer.reads + idle.reads).toBe(0);
-    expect(existsSync(file) ? lines().map((l) => l.replace(/^\S+ pid=\d+ /, "")) : []).toEqual(["teams v=0.3.62 role=none status=unreadable"]);
+    const logged = existsSync(file) ? lines().map((l) => l.replace(/^\S+ pid=\d+ /, "")) : [];
+    expect(logged).toHaveLength(1); // the 2nd failure in a row is counted, not logged
+    expect(logged[0]).toMatch(/^teams v=0\.3\.62 role=none status=unreadable kind=timeout ms=\d+ failures=1$/);
+    expect(Number(/ ms=(\d+)/.exec(logged[0])?.[1])).toBeGreaterThanOrEqual(25); // how long the read took
+  });
+
+  it("#153 review: waits 15 s for the status, so a healthy 6 s answer is a slow success, not a timeout", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval", "performance"] });
+    try {
+      const { log, lines } = setup();
+      const asked: number[] = [];
+      // The bridge's own rule: no answer within timeoutMs is a timeout. This extension answers in 6 s.
+      const bridge = {
+        role: "hub",
+        connected: true,
+        backgroundStatus: (timeoutMs: number) =>
+          new Promise((resolve, reject) => {
+            asked.push(timeoutMs);
+            if (timeoutMs < 6_000) setTimeout(() => reject(new Error("Extension call 'status' timed out")), timeoutMs);
+            else setTimeout(() => resolve(status), 6_000);
+          }),
+      };
+      stops.push(watchState({ bridge, diagnostics: log, onDisk: () => ({ restartNeeded: false }), everyMs: 60_000 }));
+      await vi.advanceTimersByTimeAsync(60_000 + 6_000);
+      expect(asked).toEqual([15_000]);
+      expect(lines().map((l) => l.replace(/^\S+ pid=\d+ /, ""))).toEqual(["teams v=0.3.62 role=none tabs=1 captured=yes services=chatsvc account=none ms=6000 slow=yes"]);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("logs restartNeeded from the watch too, on any role, without a call", async () => {

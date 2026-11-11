@@ -100,7 +100,7 @@ describe("#143: a real server's server.log", () => {
       "role role=hub via=tcp",
       "extension-connected role=hub ext=0.3.62 transport=websocket",
       "extensions role=hub count=1 transport=websocket",
-      "teams role=hub tabs=1 captured=yes services=chatsvc account=first",
+      "teams role=hub tabs=1 captured=yes services=chatsvc account=first ms=N",
       "tool role=hub name=read_messages ok=no ms=N error=Error kind=other",
       "extension-closed role=hub code=1000 transport=websocket",
       "extensions role=hub count=0",
@@ -149,9 +149,9 @@ describe("#143: a real server's server.log", () => {
     await until(() => teams().length === 1, 10_000, "the first background read");
     signedIn = "2026-11-10T23:50:00.000Z"; // no signed-in call for 14 minutes while the tab keeps calling
     await until(() => teams().length === 2, 10_000, "the stale session");
-    expect(teams().map((l) => l.replace(/^\S+ pid=\d+ /, "").replace(/ v=\S+/, ""))).toEqual([
-      "teams role=hub tabs=1 captured=yes services=chatsvc stale=no account=none",
-      "teams role=hub tabs=1 captured=yes services=chatsvc stale=yes account=none",
+    expect(teams().map((l) => l.replace(/^\S+ pid=\d+ /, "").replace(/ v=\S+/, "").replace(/ ms=\d+/, " ms=N"))).toEqual([
+      "teams role=hub tabs=1 captured=yes services=chatsvc stale=no account=none ms=N",
+      "teams role=hub tabs=1 captured=yes services=chatsvc stale=yes account=none ms=N",
     ]);
     ext.close(1000);
     await client.close();

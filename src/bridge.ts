@@ -317,6 +317,17 @@ function lateTicks(periodMs: number): () => boolean {
 const PEER_BUFFER_HARD_CAP = 4;
 
 /**
+ * What a call or a background status read fails with before anything was sent because there is
+ * no extension to ask (or, notHub, this server can't read in the background). server.log tells
+ * these apart by their start (#153), so a message may grow but must keep starting with these.
+ */
+export const NOT_READ = Object.freeze({
+  notHub: "not the hub",
+  notConnected: "Browser extension is not connected.",
+  connecting: "Connecting to the mcp-teams bridge; try again in a few seconds.",
+});
+
+/**
  * What a call fails with when the bridge lost it after sending it, so its outcome is unknown (a
  * send may have been posted). A hub relays them to its peers word for word. src/tools.ts tells
  * the AI to check before sending again on exactly these (isLostCall), so add any new one here.
@@ -1460,10 +1471,10 @@ export class ExtensionBridge {
    * read nobody asked for changes nothing; status takes no turn (UNQUEUED).
    */
   async backgroundStatus(timeoutMs: number): Promise<unknown> {
-    if (this.role !== "hub" || this.draining || this.closed) throw new Error("not the hub");
+    if (this.role !== "hub" || this.draining || this.closed) throw new Error(NOT_READ.notHub);
     const open = [...this.sockets.keys()].filter((s) => s.readyState === OPEN);
     const target = this.preferred && open.includes(this.preferred) ? this.preferred : open.at(-1);
-    if (!target) throw new Error("Browser extension is not connected.");
+    if (!target) throw new Error(NOT_READ.notConnected);
     return this.send(target, "status", {}, timeoutMs);
   }
 
@@ -1494,8 +1505,8 @@ export class ExtensionBridge {
     if (!this.connected || !target) {
       const reason =
         this.role === "none"
-          ? (this.listenError ?? "Connecting to the mcp-teams bridge; try again in a few seconds.")
-          : "Browser extension is not connected. Open Chrome or Edge with the mcp-teams extension installed (run `mcp-teams setup`).";
+          ? (this.listenError ?? NOT_READ.connecting)
+          : `${NOT_READ.notConnected} Open Chrome or Edge with the mcp-teams extension installed (run \`mcp-teams setup\`).`;
       throw new Error(reason);
     }
     // A send opens a window that must close once nobody waits for it: an extension that ignores
@@ -1577,7 +1588,7 @@ export class ExtensionBridge {
   /** Hub: asks every connected browser's extension to reload itself. */
   private async reloadAll(timeoutMs: number) {
     const open = [...this.sockets.keys()].filter((s) => s.readyState === OPEN);
-    if (!open.length) throw new Error("Browser extension is not connected.");
+    if (!open.length) throw new Error(NOT_READ.notConnected);
     const results = await Promise.allSettled(open.map((s) => this.send(s, "reload", {}, timeoutMs)));
     const failed = results.filter((r): r is PromiseRejectedResult => r.status === "rejected");
     if (failed.length === results.length) throw failed[0].reason;

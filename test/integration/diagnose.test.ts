@@ -1,8 +1,17 @@
 // #143: what the bridge tells server.log (BridgeOptions.diagnose): its role and how it got it, the
 // hand-over to a newer server, the extensions coming and going (with the close code), and, as a
-// peer, the hub closing. Real sockets, the harness's FAST timings.
+// peer, the hub closing. Real sockets, the harness's FAST timings. And (#153) what get_version's
+// status read writes to server.log, against a scripted bridge.
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { afterEach, describe, expect, it } from "vitest";
-import { bridgeHarness, type BridgeHarness } from "../helpers/bridgeHarness.js";
+import { diagnosticLog } from "../../src/serverLog.js";
+import { registerTools } from "../../src/tools.js";
+import { bridgeHarness, TOKEN, type BridgeHarness } from "../helpers/bridgeHarness.js";
 import { until } from "../helpers/timing.js";
 
 type Event = { event: string; fields: Record<string, unknown> };
@@ -112,5 +121,57 @@ describe("#143: the bridge's diagnostic events", () => {
     await h.extension({ handle: () => ({ ok: 1 }) });
     await until(() => hub.connected, 3_000, "the extension");
     expect(await hub.call("status", {})).toEqual({ ok: 1 });
+  });
+});
+
+// #153: get_version's status read (up to the bridge's default minute) is timed too, so an answer
+// that took 5-20 s, which no tool line shows, is in server.log. The tools against a scripted bridge.
+describe("#153: get_version's status read in server.log", () => {
+  const dirs: string[] = [];
+  let client: Client | undefined;
+  afterEach(async () => {
+    await client?.close();
+    client = undefined;
+    for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });
+  });
+
+  /** server.log's teams lines after one get_version whose status read is `read`. */
+  async function teamsLines(read: () => Promise<unknown>) {
+    const dir = mkdtempSync(join(tmpdir(), "mt-diag-"));
+    dirs.push(dir);
+    const file = join(dir, "server.log");
+    const diagnostics = diagnosticLog({ file, version: "0.3.65", role: () => "peer", slowStatusMs: 50 });
+    const bridge = {
+      connected: true,
+      extension: { version: "0.3.65", browser: "Chrome" },
+      extensions: [{ version: "0.3.65", browser: "Chrome" }],
+      listenError: null,
+      role: "peer",
+      port: 0,
+      hubVersion: "0.3.65",
+      call: (method: string) => (method === "status" ? read() : Promise.reject(new Error(`unexpected ${method}`))),
+    } as unknown as Parameters<typeof registerTools>[1];
+    const server = new McpServer({ name: "mcp-teams", version: "0.0.0" });
+    registerTools(server, bridge, { port: 0, token: TOKEN }, { diagnostics });
+    client = new Client({ name: "test", version: "0.0.0" });
+    const [a, b] = InMemoryTransport.createLinkedPair();
+    await Promise.all([server.connect(a), client.connect(b)]);
+    await client.callTool({ name: "get_version", arguments: {} });
+    return (existsSync(file) ? readFileSync(file, "utf8").split("\n") : []).filter((l) => / teams /.test(l)).map((l) => l.replace(/^\S+ pid=\d+ /, ""));
+  }
+  const later = <T>(ms: number, value: () => T) => new Promise<T>((done) => setTimeout(() => done(value()), ms));
+
+  it("logs a slow answer with its ms", async () => {
+    const lines = await teamsLines(() => later(120, () => ({ teamsTabs: 1, sessions: [{ sessionCaptured: true }], services: { chatsvc: "2026-11-11T00:00:00Z" } })));
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toMatch(/^teams v=0\.3\.65 role=peer tabs=1 captured=yes services=chatsvc account=none ms=\d+ slow=yes$/);
+    expect(Number(/ ms=(\d+)/.exec(lines[0])?.[1])).toBeGreaterThanOrEqual(100);
+  });
+
+  it("logs a failed read with its kind and ms, not its message", async () => {
+    const lines = await teamsLines(() => later(60, () => 0).then(() => Promise.reject(new Error("Extension call 'status' timed out"))));
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toMatch(/^teams v=0\.3\.65 role=peer status=unreadable kind=timeout ms=\d+ failures=1$/);
+    expect(Number(/ ms=(\d+)/.exec(lines[0])?.[1])).toBeGreaterThanOrEqual(50);
   });
 });

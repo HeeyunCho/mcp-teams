@@ -11,7 +11,7 @@
  * States are logged when they change, not on every status read. Logging never throws.
  */
 import { join } from "node:path";
-import { isLostCall } from "./bridge.js";
+import { isLostCall, LOST_CALL, NOT_READ, NOT_SENT } from "./bridge.js";
 import { CONFIG_DIR } from "./config.js";
 import { errorFields, hubLog, logVersion, type Log, type LogFields } from "./hubLog.js";
 import type { RestartState } from "./buildInfo.js";
@@ -23,18 +23,36 @@ export const SERVER_LOG_FILE = join(CONFIG_DIR, "server.log");
 /** A tool call that takes longer than this is logged even when it succeeds. */
 export const SLOW_TOOL_MS = 20_000;
 
+/**
+ * A status read that takes longer than this is logged even when the state didn't change (#153).
+ * The extension answers status in milliseconds when it is well, so 2.5 s is clearly unwell: the
+ * background read's slow answers show long before its 15 s limit, and get_version's reads (up to a
+ * minute) long before a tool counts as slow (20 s).
+ */
+export const SLOW_STATUS_MS = 2_500;
+
 export interface DiagnosticLog {
   start(fields?: LogFields): void;
   exit(reason: string, code?: number): void;
   /** The bridge's events (BridgeOptions.diagnose): role, handover, extension, extension-closed, hub-closed. */
   bridge(event: string, fields?: LogFields): void;
-  /** A status the extension answered (null or {error} when it couldn't be read; `failure` says why, else unreadable). */
-  teamsStatus(status: unknown, failure?: "aborted"): void;
+  /** A status the extension answered (null or {error} when it couldn't be read), and how its read went. */
+  teamsStatus(status: unknown, read?: StatusRead): void;
   /** A tool call that ended: logged when it failed (err) or took longer than slowToolMs. */
   toolCall(name: string, ms: number, err?: unknown): void;
   restartNeeded(onDiskVersion: string): void;
   /** An uncaught exception or unhandled rejection, by its name and code only. */
   crash(kind: "uncaught-exception" | "unhandled-rejection", err: unknown): void;
+}
+
+/** How a status read went (#153). */
+export interface StatusRead {
+  /** How long it took. */
+  ms?: number;
+  /** Why it failed: only its kind is logged, from a fixed set, never its message. */
+  error?: unknown;
+  /** The caller cancelled it (get_version's signal): that says nothing about Teams. */
+  aborted?: boolean;
 }
 
 export interface DiagnosticLogOptions {
@@ -43,6 +61,7 @@ export interface DiagnosticLogOptions {
   /** The server's role now, written on every line. */
   role: () => string;
   slowToolMs?: number;
+  slowStatusMs?: number;
   maxBytes?: number;
 }
 
@@ -80,7 +99,15 @@ const FIELDS: Record<string, (v: string) => string> = {
   ms: (v) => (/^\d{1,9}$/.test(v) ? v : "-"),
   tabs: (v) => (/^\d{1,4}$/.test(v) ? v : "-"),
   count: (v) => (/^\d{1,4}$/.test(v) ? v : "-"),
+  failures: (v) => (/^\d{1,9}$/.test(v) ? v : "-"), // status reads in a row that failed (#153)
+  after: (v) => (/^\d{1,9}$/.test(v) ? v : "-"), // the failures before the read that recovered
 };
+
+/**
+ * Failed status reads in a row, and slow ones, are logged at the 1st and then every this many (#153):
+ * with the hub's read every minute, a line every 10 minutes while it stays so.
+ */
+const REPEAT_EVERY = 10;
 
 /** Teams services the extension captures sessions for (extension/background.js). */
 const SERVICES = new Set(["chatsvc", "csa", "mt", "substrate", "sharepoint"]);
@@ -115,6 +142,25 @@ function errorKind(err: unknown): string {
   return "other";
 }
 
+/**
+ * Why a status read failed (#153), from a fixed set; its message is never logged. timeout: no
+ * answer in time. closed: the connection went while it waited. not-connected: no extension to ask.
+ * not-hub: this server can't read it in the background. aborted: withdrawn. error: anything else,
+ * such as the extension's own error answer.
+ */
+function readFailureKind(err: unknown): "timeout" | "closed" | "not-connected" | "not-hub" | "aborted" | "error" {
+  const message = err instanceof Error ? err.message : typeof err === "string" ? err : "";
+  if (message === LOST_CALL.withdrawn || message === NOT_SENT.cancelled) return "aborted";
+  if (message.startsWith(TIMED_OUT[0]) && message.endsWith(TIMED_OUT[1])) return "timeout";
+  if (message.startsWith(NOT_READ.notHub)) return "not-hub";
+  if (isLostCall(message) || message === NOT_SENT.gone || message === NOT_SENT.hubClosing) return "closed";
+  if (message.startsWith(NOT_READ.notConnected) || message.startsWith(NOT_READ.connecting)) return "not-connected";
+  return "error";
+}
+
+/** LOST_CALL.timedOut's text before and after the method's name. */
+const TIMED_OUT = LOST_CALL.timedOut("\u0000").split("\u0000") as [string, string];
+
 export function diagnosticLog(options: DiagnosticLogOptions): DiagnosticLog {
   const append: Log = hubLog(options.file ?? SERVER_LOG_FILE, options.maxBytes);
   const version = logVersion(options.version);
@@ -135,7 +181,11 @@ export function diagnosticLog(options: DiagnosticLogOptions): DiagnosticLog {
     last.set(event, key);
     write(event, fields);
   };
-  let account: { known: boolean; id?: string } = { known: false };
+  let account: { id?: string; signedIn: boolean } = { signedIn: false }; // id: the last account seen (#153)
+  let failures = 0; // status reads in a row that failed (#153)
+  let reconnected = false; // an extension connected or the role changed since the last status read
+  let slowReads = 0; // successful status reads in a row slower than slowStatusMs
+  const slowStatusMs = options.slowStatusMs ?? SLOW_STATUS_MS;
   let restartSeen = false;
   const fieldsOf = (err: unknown) => {
     try {
@@ -151,11 +201,21 @@ export function diagnosticLog(options: DiagnosticLogOptions): DiagnosticLog {
       return "other";
     }
   };
+  const readKindOf = (err: unknown) => {
+    try {
+      return readFailureKind(err);
+    } catch {
+      return "error";
+    }
+  };
 
   return {
     start: (fields = {}) => write("start", { ...fields, node: process.version }),
     exit: (reason, code) => write("exit", { reason, code }),
     bridge(event, fields = {}) {
+      // The first failed read after a reconnect or a role change is logged at once (#153 review):
+      // it is a new connection's, not more of the same run.
+      if (event === "role" || event === "extension-connected") reconnected = true;
       if (event === "role" || event === "extensions") return onChange(event, fields);
       // An extension with a bad token retries every 30 s: its refusal is logged when it changes,
       // and again after something connected.
@@ -163,26 +223,54 @@ export function diagnosticLog(options: DiagnosticLogOptions): DiagnosticLog {
       if (event === "extension-connected") last.delete("handshake-closed");
       write(event, fields);
     },
-    teamsStatus(status, failure) {
+    teamsStatus(status, read = {}) {
       try {
         const st = status as any;
-        if (!st || typeof st !== "object" || "error" in st) return onChange("teams", { status: failure ?? "unreadable" });
+        const ms = read.ms === undefined || !Number.isFinite(read.ms) ? undefined : Math.max(0, Math.round(read.ms));
+        if (read.aborted) {
+          if (last.get("teams") === "aborted") return;
+          last.set("teams", "aborted");
+          return write("teams", { status: "aborted", ms });
+        }
+        if (!st || typeof st !== "object" || "error" in st) {
+          // Failures in a row are counted: the 1st, every REPEAT_EVERY-th and one of a new kind are
+          // logged, so a long outage shows without a line every minute.
+          failures++;
+          slowReads = 0;
+          const error = read.error ?? (st && typeof st === "object" ? st.error : undefined);
+          const kind = error === undefined ? undefined : readKindOf(error);
+          const key = `unreadable ${kind}`;
+          const logged = failures === 1 || failures % REPEAT_EVERY === 0 || last.get("teams") !== key || reconnected;
+          last.set("teams", key);
+          reconnected = false;
+          if (logged) write("teams", { status: "unreadable", kind, ms, failures });
+          return;
+        }
+        const after = failures || undefined; // the read that recovers says how many failed before it
+        failures = 0;
+        reconnected = false;
         const services = st.services && typeof st.services === "object" ? Object.keys(st.services).filter((k) => SERVICES.has(k) && st.services[k]) : [];
         const id = typeof st.signedInAs === "string" && st.signedInAs ? st.signedInAs : undefined;
         // The account itself stays in memory: the log says only whether it changed.
-        const accountField = !id ? "none" : !account.known ? "first" : account.id === id ? "same" : "changed";
+        const accountField = !id ? "none" : !account.id ? "first" : account.id === id ? "same" : "changed";
         const state = {
           tabs: Number.isFinite(Number(st.teamsTabs)) ? Number(st.teamsTabs) : "-",
           captured: Array.isArray(st.sessions) && st.sessions.some((x: any) => x?.sessionCaptured) ? "yes" : "no",
           services: services.length ? services.join(",") : "none",
           stale: staleOf(st),
         };
-        const changedAccount = !account.known || account.id !== id;
+        // An account is known once one was seen (#153): no account, then one, is its first, not a
+        // switch. Signing out (an account, then none) is logged; the account seen last is kept.
+        const changedAccount = id ? account.id !== id || !account.signedIn : account.signedIn;
         const key = JSON.stringify(state);
-        account = { known: true, id };
-        if (last.get("teams") === key && !changedAccount) return;
+        account = id ? { id, signedIn: true } : { ...account, signedIn: false };
+        // A slow read is logged even when nothing changed: the 1st of a run of them, and every REPEAT_EVERY-th.
+        const slow = ms !== undefined && ms > slowStatusMs;
+        slowReads = slow ? slowReads + 1 : 0;
+        const slowLine = slow && (slowReads === 1 || slowReads % REPEAT_EVERY === 0);
+        if (last.get("teams") === key && !changedAccount && !after && !slowLine) return;
         last.set("teams", key);
-        write("teams", { ...state, account: accountField });
+        write("teams", { ...state, account: accountField, ms, slow: slow ? "yes" : undefined, after });
       } catch {
         // a status of an unexpected shape is not worth a crash
       }
@@ -208,8 +296,12 @@ export function diagnosticLog(options: DiagnosticLogOptions): DiagnosticLog {
 
 /** How often the background watch reads the Teams state and the build on disk. */
 export const WATCH_MS = 60_000;
-/** How long the background watch waits for the extension's status. */
-const WATCH_STATUS_TIMEOUT_MS = 5_000;
+/**
+ * How long the background watch waits for the extension's status. It runs once a minute and blocks
+ * nothing; at 5 s, healthy answers that took ~5.1 s were logged as timeouts (#153), now they show
+ * as slow (SLOW_STATUS_MS).
+ */
+const WATCH_STATUS_TIMEOUT_MS = 15_000;
 
 export interface WatchStateOptions {
   bridge: { readonly role: string; readonly connected: boolean; backgroundStatus(timeoutMs: number): Promise<unknown> };
@@ -236,11 +328,13 @@ export function watchState({ bridge, diagnostics, onDisk, everyMs = WATCH_MS }: 
     }
     if (reading || bridge.role !== "hub" || !bridge.connected) return;
     reading = true;
-    bridge
-      .backgroundStatus(WATCH_STATUS_TIMEOUT_MS)
+    const started = performance.now();
+    const ms = () => performance.now() - started;
+    Promise.resolve()
+      .then(() => bridge.backgroundStatus(WATCH_STATUS_TIMEOUT_MS))
       .then(
-        (st) => diagnostics.teamsStatus(st),
-        () => diagnostics.teamsStatus(null),
+        (st) => diagnostics.teamsStatus(st, { ms: ms() }),
+        (error) => diagnostics.teamsStatus(null, { ms: ms(), error }),
       )
       .catch(() => {})
       .finally(() => (reading = false));
