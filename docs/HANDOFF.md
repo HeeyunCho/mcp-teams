@@ -1,175 +1,126 @@
-# Handoff: mcp-teams after #130, the native host (updated 2026-11-10 on the Windows PC)
+# Handoff: mcp-teams after #123 PR 4 (updated 2026-11-11 on the Windows PC)
 
-Repo: GitHub `HeeyunCho/mcp-teams`. Branch `main`: **#130** (PR 2 of #123, the native host) is merged as `05e027b`, on top of 0.3.57 (#132, `.gitattributes` with LF). The release workflow cuts the next version from that merge. No code PRs are open.
+Repo: GitHub `HeeyunCho/mcp-teams`. PRs 1–4 of #123 (the native-messaging host) are on `main`, all **off by default** (`nativeHost` off). Next is PR 5, which turns it on. The last release is 0.3.62 (`336ff7e`, #140 and #141).
 
-## Merged on 2026-11-09/10
+## Now (2026-11-11)
 
-Each had a fresh-subagent review with no blockers and passed CI on Linux and Windows (test, test-windows, gitleaks).
+| PR | Change | State |
+|---|---|---|
+| #144 | Fixes #138: on Windows, a printed command whose first word is quoted starts with `& `. cmd.exe rejects a leading `&`, so the hint adds "(PowerShell; in cmd.exe, leave out the leading &)". Review: no blockers, two test nits fixed (`c409dfb`) | Merged as `3bbd5ad` <!-- STATE: #144 — merged 09:16Z per gh; set release version once version.yml cuts it --> |
+| #146 | #123 PR 4: setup registration, `batPath`, moved node / gone `hub.js` / missing HKCU key reporting, the `nativeMessaging` permission. Off by default | Merged as `347ec95` <!-- STATE: #146 — merged 09:16Z per gh; set release version once version.yml cuts it --> |
+| #147 | Fixes #143: every server writes `~/.mcp-teams/server.log` | Open; test and test-windows green, gitleaks failed on head `d824279` <!-- STATE: #147 — gitleaks status and final merge state per the lead --> |
+
+- **#145** (Node 20 flake in `test/system/nativeHost.test.ts` under load, "once the serving host has proved itself, the relay's deadline is off" → `Browser extension disconnected`) is being fixed on a branch today. <!-- STATE: #145 — branch/PR number and state per the lead -->
+- **#142** (`needs-triage`): an hourly Hub health report on 2026-11-10 17:44Z, `restartNeeded` with server 0.3.57 running and 0.3.58 on disk. That is the known stale-server case (#111/#96).
+
+### The outage of 2026-11-11, 01:04–07:17 (CET)
+
+- The user saw Teams not working from about 01:04 until the PC was restarted at 07:17. **Nothing recorded the cause:**
+  - Claude Desktop's `%LOCALAPPDATA%\Claude\Logs\mcp-server-teams.log` had no tool calls and no errors between 23:19Z and 06:17Z, only a server restart at 02:30Z.
+  - No Claude Code session called Teams.
+  - Windows logs had nothing at 01:04. The Teams Meeting Add-in MSI repairs (00:55, 04:55) and the Claude VM service restart (03:30) aren't linked.
+  - `~/.mcp-teams/hub.log` doesn't exist while `nativeHost` is off.
+  - After the restart, `get_version` was healthy (session captured 06:19Z).
+- Filed as **#143**; **#147** adds `~/.mcp-teams/server.log`.
+- **Next outage: copy `~/.mcp-teams/server.log` (and `server.log.1`) BEFORE restarting or reconnecting anything.** Also Claude Desktop's teams log, and for #124 the service worker's state in `chrome://extensions` and `Get-NetTCPConnection -LocalPort 47393`.
+
+### #147, `server.log`
+
+- **Events:** `start`/`exit`, `role`, `handover`, `extension-connected` (with `ext=`), `extension-closed`, `extension-dropped reason=no-pong`, `handshake-closed` (4401/4403/4409/4426), `hub-closed`, `teams` on change (with `stale=`), `restart-needed`, failed tools and tools over 20 s.
+- The hub reads the Teams state in the background every 60 s, so a night with no tool calls still shows the Teams state.
+- Metadata only: fixed fields, each checked against a pattern; no message text, names, tokens or ids.
+- **Rotation** (`src/hubLog.ts`, shared with `hub.log`): each process claims the file before moving it to `.1`. A real race lost lines before (967 of 3,000 kept). A claim that can't replace `.1` (for example antivirus holding it) stays aside as `<file>.<pid>-<random>.rotating`.
+- **Follow-ups (not blocking):**
+  - clean up old `.rotating` files;
+  - a repeated refusal logs once, so "still failing" and "stopped trying" look the same;
+  - 4401 is shared by a bad token and an auth timeout;
+  - the native host (`dist/hub.js`) doesn't pass the new events;
+  - `teams` lines repeat across pids, since each server's own `get_version` writes one.
+
+### #146, #123 PR 4
+
+- `nativeMessaging` in `extension/manifest.json` (without it `connectNative` is undefined in real Chrome, so PR 3 never ran natively).
+- New `src/nativehost.ts`: a host manifest per browser, a launcher (`mcp-teams-hub.bat` on Windows) and HKCU keys for Chrome and Edge via `%SystemRoot%\System32\reg.exe`. `batPath` names paths through `%USERPROFILE%`/`%LOCALAPPDATA%`/`%APPDATA%`; a path still non-ASCII registers nothing.
+- `get_version` gets a `nativeHost` field (`registered`, `nodeMissing`, `hubMissing`, `keyMissing`, `hint`) only with the switch on.
+- The HKCU key is read with `reg export` (UTF-16LE file), because `reg query`'s output under code page 949 garbled a Hangul home path.
+- **Follow-ups:**
+  - **PR 5 must register by default together with the switch;**
+  - switching off leaves an earlier registration in place;
+  - with the switch on, `get_version` runs `reg.exe` twice synchronously (about 0.1 s each);
+  - `refreshNativeHosts` (for `npm run update`) isn't ported;
+  - the README doesn't cover the moved-node or non-ASCII path behaviour;
+  - manual check: Chrome may warn about the new permission;
+  - still open from the PR 3 review: 4403 reporting in `get_version`, and `transport: null` with no extension connected.
+
+## Merged on 2026-11-10 (after the last handoff)
+
+Each had a fresh-subagent review with no blockers and passed CI (test, test-windows, gitleaks).
 
 | PR | Change | Release |
 |---|---|---|
-| #121 | The failed-call note's status read waits 3 s, not 60 s; tests for its `connected`/`signal` branches; `failedCallNote`/`isMissingSession` unit-tested (Part of #103) | 0.3.53 |
-| #125 | **Unsure account** (#77): any capture of the previous account within 30 s of a switch marks the account unsure, and sends are refused. Reads carry `accountNote`, `get_version` shows `accountUnsure`, and `tokenIssuedAt` reads the same token as `tokenOid` | 0.3.54 |
-| #127 | PR 1 of #123: a transport interface in `src/bridge.ts` (`BridgeSocket`, `BridgeTransport`, `webSocketTransport`), a refactor with no change in behaviour | 0.3.55 |
-| #129 | #122 item 1: `captureSession` stores or refreshes a session only from the Teams page (`isTeamsOrigin`), so an Outlook tab's `substrate.office.com` requests no longer move `services.substrate` or replace Teams' capture | 0.3.56 |
+| #133 | Handoff after #130 (docs only) | none |
+| #135 | `msFromEnv()` takes only plain digits for `TEAMS_MCP_HUB_*_MS`; a huge value clamps to 2^31−1; the `relay()` comment says a late hello gives at most two deadlines (#123 nits) | 0.3.59 |
+| #136 | Fixes #134: the README says the extension's `ERR_CONNECTION_REFUSED` console lines are expected while no server listens | none (docs) |
+| #137 | Fixes #76: on Windows, `quote()` double-quotes an argument with `'` or `;` | 0.3.60 |
+| #139 | #103 leftovers: the recovery wording corrected (the note was true), `api_traffic({ clear: true })` in docs/testing.md, `traffic.test.ts` waits with `until()` | 0.3.61 |
+| #141 | #77 test leftovers: 2b with a frozen `Date`, A → B → C ends an unsure state, tests 7/7c switch at `gate-wait` (`requestWithTurn`), `until()` on `performance.now()` | 0.3.62 |
+| #140 | #123 PR 3: the extension's `connectNative` first with TCP fallback, native retry after a 4403 (backoff to 30 s), chunk joining (`extension/chunks.js`), `transport` in `get_version`, the extension's own nonce through the relay, answers over 64 MB as a short error | 0.3.62 |
 
-**After #129, check once in real Chrome:**
-1. Run `api_traffic` with `record: true` and use Teams search.
-2. Confirm that `substrate` and `chatsvc` are still captured.
+## Open issues and decisions
 
-If Teams ever sent a captured-service request from another origin, it would no longer be captured.
-
-## Merged: PR #130, the native host (#123 PR 2)
-
-- **Merged** on 2026-11-10 as `05e027b` (merge commit, head `c862dab`), after CI passed (test, test-windows, gitleaks). The branch `feat/123-native-host` and its worktree are deleted.
-- **What:**
-  - `dist/hub.js`, with Chrome's 4-byte framing and the 1 MB split;
-  - the serving and relaying host, with the 30 s linger and `~/.mcp-teams/hub.log` (metadata only);
-  - the peer-only TCP listener on 47393, which refuses extensions with 4403;
-  - the Windows pipe `\\.\pipe\mcp-teams-<ASCII>-<sha256 8 hex>`;
-  - the interface additions.
-- **Off by default:** `nativeHost` is off, so with it off every server path runs as on `main` (the reviews' gate).
-- **The 0.3.52 test:** it installs the real `mcp-teams@0.3.52` from npm. The old hub hands port 47393 over to the host and passes on both Node versions.
-- **Reviews:** three, which found two security problems; both are fixed.
-  1. Proofs are bound to their channel: TCP `client`/`server`, socket `client:socket`/`server:socket`.
-  2. A relaying host verifies the pipe's holder: its own nonce, and nothing passes until a `server:socket` proof.
-- **The relay deadline** (`569f39a`, reviewed, no blockers):
-  - the holder gets the serving host's `authTimeoutMs` (5 s) for its challenge and again for a proven welcome;
-  - at most 64 frames and 1 MB are held before the welcome;
-  - `TEAMS_MCP_HUB_AUTH_TIMEOUT_MS` shortens it for tests.
-- **Follow-ups, done before the merge:**
-  - `28ee536`: the welcome deadline also starts at the challenge when the extension's hello hasn't come yet, and a later hello restarts it. A proven relay with a 600 ms deadline still passes a call 2 s later. `msFromEnv()` (src/native.ts) takes whole ms above 0 for the `TEAMS_MCP_HUB_*_MS` variables, clamped to 2^31−1.
-  - `462f5f6`: `lostCall.test.ts` finds `describeSocketError`'s end with either line ending (the Windows CI checkout had CRLF).
-  - A fresh review of both found no blockers. Its two should-fix test gaps are fixed in **`c862dab`**:
-    - a test that a hello after the holder's challenge restarts the deadline from the hello. With the restart removed on purpose it failed (exit 1040 ms after the hello, 1250 needed);
-    - a lower bound on the early-challenge test.
-  - The review's four nits are posted on #123 (comment 6772138839):
-    - `msFromEnv` also accepts `1e3`, `0x10` and ` 600 `;
-    - `1e400` (Infinity) falls back to the default while `1e308` clamps;
-    - a late hello can give the holder up to two deadlines, which a comment should say;
-    - the `lostCall` end search needs a trailing newline.
-- **Testing:** the full `npm test` on Node 26 was green (62 files, 768 passed) before the deadline commits; CI was the full run after them.
-  - System tests run the built `dist/hub.js`, so **run `npm run build` first**. A stale `dist/` fails the welcome test with the old `serverVersion`.
-  - Locally with about 1.3 GB free, "a relaying host whose hub socket holder never sends a challenge exits within the auth timeout" took 14.9 s against its limit. It passes alone.
-- **Not blocking, posted on #123 and in the PR:**
-  - the relay is a signing oracle for `client:socket` (not exploitable as far as the review saw);
-  - the relay overwrites the extension's `nonce` (matters for PR 3);
-  - `sameText` duplicates `sameProof`, and the `proofRole` strings are written out in `relay()`;
-  - the handshake exists three times;
-  - commit messages `f32d2f3`, `eedcd82` and `6b66869` cite some wrong Outlook commits (the code comments are right);
-  - during takeover, a waiting response over 1 MB can trip the cap (the host exits; the extension reconnects).
-- **Next PRs:**
-  - **PR 3:** the extension's `connectNative` with the TCP fallback, retrying native after a 4403, chunk joining, `transport` in `get_version`, and the nonce point.
-  - **PR 4:** setup registration, `batPath`, and moved-node reporting.
-  - **PR 5:** the version switch, default on, `feat!:` → 0.4.0. It waits for the manual checks on Windows and the Mac.
-
-## Open issues and decisions (2026-11-09/10)
-
-- **#77:** implemented in #125. The leftovers are posted on #77:
-  - test 2b uses the real clock;
-  - no test checks `accountUnsure: null` after A → B → C;
-  - the unsure guard is copied at four send paths;
-  - the hand-kept `READS` list;
-  - fixed delays in tests 7/7c.
-- **#103:** #121 is merged. Still open:
-  - "the extension's own recovery" wording;
-  - the `api_traffic({ clear: true })` wording in docs/testing.md;
-  - `{ timeout: 2000 }` in `traffic.test.ts`.
-- **#122:** item 1 is merged (#129). Still open:
-  - whether the worker's own requests should count as Teams' sends;
-  - "the extension lists no features" is by design until #123 PR 3.
-- **#124** (`needs-info`, with #111/#96): the extension stayed disconnected about half an hour while a hub was listening, right after a rebuild.
-  - Next time, before reloading anything, capture the service worker's state and console in `chrome://extensions`, and run `Get-NetTCPConnection -LocalPort 47393`.
-  - **Another episode, 2026-11-10 about 16:45 local time:**
-    - Claude Desktop's teams server first reported "Server teams unavailable". After its 60 s retry it ran 0.3.56 with the bridge "waiting for extension" (`extension=null`, `teams=null`, `restartNeeded=false`).
-    - Port 47393 then had the hub (pid 30504, the mcp-atlassian session's server, started 16:28:57) and 8 established connections, all `mcp-teams` servers, none from Chrome.
-    - About a minute later `get_version` showed the extension connected again (0.3.56, websocket). It isn't known whether it came back by itself or because the extension was reloaded.
-    - Teams itself had no session: `teamsTabs: 0`, all services null.
-    - The test runs going on at the time use their own ports (`TEAMS_MCP_PORT` 0 or a test port), never 47393, and the hub predates them.
-  - **`background.js:2104` in Chrome's console** is `new WebSocket(\`ws://127.0.0.1:${port || DEFAULT_PORT}\`)` in the extension's connect. An error there is most likely Chrome's "WebSocket connection … failed" while no hub is listening (for example while the hub moves between sessions). The extension retries, so it is noise, not the fault. The exact error text wasn't captured.
-- **#111/#96** (`bug`, `ready-for-human`): close with the native host and launcher (#123, ADR 0002).
-- **Outlook:** the pipe-name collision for non-ASCII usernames is filed as mcp-newoutlook#178.
-
-## Earlier (2026-11-08)
-
-- **Merged on 2026-11-08.** Each had a fresh-subagent review with no blockers and passed CI on Linux and Windows.
-
-  | PR | Change | Release |
-  |---|---|---|
-  | #108 | The api_traffic log save goes to the storage it was recorded under | 0.3.49 |
-  | #109 | A call that fails for a missing session gets the same note as `get_version` | 0.3.50 |
-  | #110 | An old token of the previous account doesn't switch back, and the account check before a resend waits for captures still being stored | 0.3.51 |
-  | #118 | The hub drains in-flight calls for up to 5 s when its session ends (`TEAMS_MCP_DRAIN_MS`; `0` means no drain), and tells peers `{type:"drained"}` when it answered everything | 0.3.52 |
-
-- **#112** (drain) is closed by #118.
-- **Review leftovers** (none blocking) are posted as comments on the issues; read those before working on them:
-  - **#103:** the status read for a failed call's note uses the 60 s default; two branches of `failedCallNote` are untested; pure functions are tested in `test/integration/`; two small docs and timeout nits.
-  - **#77:**
-    - fixed delays in tests 7 and 7c;
-    - the A → B → A switch within 30 s, where a send goes out as B while Teams shows A;
-    - no test for `iat` equal to the switching token's;
-    - `tokenIssuedAt` has no unit test and may read a different header than `tokenOid`.
-  - **#112:**
-    - port citations name a PR, not a commit (ADR 0001 §7);
-    - a late queued send can flash its confirmation window;
-    - no test for a step-down during a drain;
-    - "drain" isn't in `GLOSSARY.md`;
-    - peers don't re-send refused calls through the next hub.
-- **#111** (stale server after a release) and **#96** stay open on purpose. Their stale-server half waits for the native host and launcher below.
-- **ADRs on main:** `docs/adr/0001-where-the-hub-lives.md` (native-messaging host plus TCP fallback) and `docs/adr/0002-versioned-launcher.md`, with their terms in `GLOSSARY.md`. Read them before any hub or launcher work.
-  - Delivery order (ADR 0001): #112 drain (done) → #115 handshake (done) → native host (0.4.0) → launcher (0.5.0).
-- **Releases are automatic.** `.github/workflows/version.yml` runs on every push to `main` except Markdown-only pushes:
-  - it bumps the version from the commit messages (`scripts/bump-version.mjs`), tags it, and publishes to npm with trusted publishing (OIDC);
-  - npm can take a minute or two to show the new version (`npm view mcp-teams version --prefer-online`).
-
-## This Windows PC (checked 2026-11-09)
-
-- **Live install:** `C:\Orca_Project\mcp-teams` is the live install. Every session's `teams` server runs its `dist/index.js`, and Chrome's Teams extension loads its `extension/` folder.
-  - On 2026-11-10 at 17:03 it was rebuilt on `05e027b` (#130 merged; `package.json` still 0.3.57 until the release commit is pulled) with `npm ci` and `npm run build`. The extension copy in `~/.mcp-teams/extension` was on 0.3.56; a starting server syncs it. Since 0.3.56, only the extension's manifest version has changed.
-    - The checkout's uncommitted `package-lock.json` (dependency drift from an `npm install`) was saved as a patch in that session's scratchpad and restored before the pull.
-    - Ten servers were older than that build. The hub was the mcp-atlassian session's server, pid 30504. The others: mcp-newoutlook, mcp-teams, PM-HUB, system-manager, pm-hub-sync, two Claude Desktop servers, and two Claude Code sessions with no recorded folder.
-  - **Chrome loads the extension from `~/.mcp-teams/extension`,** a copy that a *starting* server syncs from the checkout (`src/index.ts:41`, `syncExtension`). A rebuild alone doesn't update it.
-    - `node dist/index.js reload-extension` syncs it, but on this PC it answers "hub restarted" every time. The extension then reloads itself and reconnects within about 5 s.
-    - The `reload_extension` tool only reloads from that copy.
-  - **The hub** moves between sessions. On 2026-11-10 after the 0.3.56 rebuild it was the system-manager session's server; reconnect the hub's session last.
-  - **Running servers keep their old code** until each session reconnects with `/mcp`. After the 0.3.56 rebuild, 12 were on older code: mcp-teams, mcp-newoutlook, PM-HUB, MD-Editor, mcp-atlassian, system-manager (hub), NAVERWORKS, MeetNotes, one Claude Code session with no recorded folder, two Claude Desktop servers, and one started by the NAVER WORKS app. To list them, compare each `node … mcp-teams/dist/index.js` process's start time with `dist/index.js`'s write time; `~/.claude/sessions/<parent pid>.json` gives a Claude Code session's folder.
-- **Right after the reload:** no Teams session was captured (all four services null, `signedInAs: null`).
-  - The Teams tab has to load chats again to capture one.
-  - Sessions that use the Teams tools need `/mcp` → teams → Reconnect.
-- **Memory:** only about 2 GB of 27 GB was free. A subagent's full test run was stopped once for low memory.
-- **Worktrees:** an Agent-tool worktree starts with an empty `node_modules`. Run `npm ci` in it before testing; otherwise vitest resolves from the main checkout. One such run exited 1 with no output.
-- **Node versions:**
-  - default `node` is v26;
-  - **`npx -y node@20` doesn't give Node 20 here.** The `node` package's binary never gets set up, so it falls through to v26: `npx -y node@20 -v` prints `v26.3.0`.
-  - **For a real Node 20 run:**
-    - use the official zip from nodejs.org, checked against `SHASUMS256.txt` and unpacked outside the repo;
-    - run `<that folder>/node.exe node_modules/vitest/vitest.mjs run --fileParallelism=false`;
-    - check that `node.exe -v` prints v20 first.
-
-## This Mac (checked 2026-11-08, about 08:10 local time)
-
-- **Versions:** the hub on port 47393 and the extension both run 0.3.52; the shared npx cache holds 0.3.52. `get_version` reports `restartNeeded: false` and `versionsMatch: true`.
-  - The hub belongs to the Claude Code session in this repo; the user reconnected it with `/mcp` after the release.
-- **Teams session:** captured, all four services signed in.
-  - After the extension reloaded into 0.3.52 its captures were empty, as expected.
-  - Its own recovery brought the session back within about 90 s, with no tab or extension reload.
-- **Other sessions:** the older Claude Code sessions (scion, MeetNotes, PM-HUB, local-plugins, mcp-newoutlook) still run their old mcp-teams servers. They join as peers and pick up new code only when each one reconnects.
-- **Claude Desktop:** not running. Its teams log ends with a clean shutdown at 04:47 UTC on 2026-11-08.
+- **#123** (native host, `ready-for-agent`): PRs 1–4 merged (#127, #130, #140, #146). Not blocking, posted on #123:
+  - from the PR 3 review: decision 9's `get_version` report of a 4403 isn't done (only the popup's `lastError`); `transport` is `null` with no extension; `skipNative` is one-shot; no deadline for the native welcome (main has the same gap for TCP); a native welcome failing its proof has its `lastError` overwritten by the TCP attempt; `Reassembler` has no unit tests and no limit on sets; style nits (`nativeFirst()` clears `skipNative`, `OPEN`/`CLOSED`, the hello parsed twice, a third `getVersion` test helper);
+  - from the #130 reviews: the relay is a signing oracle for `client:socket` (not exploitable as far as seen); `sameText` duplicates `sameProof`; the handshake exists three times; during takeover a waiting response over 1 MB can trip the cap; commit messages `f32d2f3`, `eedcd82`, `6b66869` cite some wrong Outlook commits.
+- **#77** (`ready-for-agent`): the test leftovers are done (#141). Still open: the unsure guard copied at four send paths, the hand-kept `READS` list, `sendTo`'s 12 parameters, and `OLD_TOKEN_WINDOW_MS` also setting how long the unsure state lasts. Nits from #141: 7/7c still race a real 1 s Retry-After if the process stalls over 1 s; the 2b `setTimeout` spy matches exactly 1000 ms; `requestWithTurn` has no `deadline`.
+- **#103** (`ready-for-agent`): the three leftovers are done (#139). Still open: refactor notes from the #107 review (the `getVersion` test setup duplicated, `{at, host}` spelled out in four places, the "signed in" rule copied, `teamsCalls` naming three things) and behaviour notes (the 5-minute gap in the stuck rule, background-tab calls counting as Teams-tab calls).
+- **#122** (`ready-for-human`): only the manual Chrome check after #129 is left, and nothing says it was done:
+  1. run `api_traffic` with `record: true`, use Teams search for a minute, call `api_traffic` again;
+  2. confirm `substrate` and `chatsvc` are still captured. Close #122 once it passes.
+- **#124** (`needs-info`): the extension stayed disconnected while a hub listened. The 2026-11-10 16:45 episode is in Earlier. `server.log` (#147) will show the `handshake-closed` and `extension-*` lines next time.
+- **#111/#96** (`ready-for-human`): close with the native host and launcher (#123, ADR 0002). #142 is another instance.
+- **Closed:** #76 (#137), #134 (#136), #138 (#144).
+- **Outlook:** the pipe-name collision for non-ASCII usernames is mcp-newoutlook#178.
 
 ## Next up
 
-1. **Native-messaging host (0.4.0, ADR 0001): issue #123**, grilled with the user on 2026-11-09/10.
-   - It has 13 decisions, five PRs in order, and acceptance checkboxes, including manual checks on Windows and the Mac.
-   - PR 5 (default on, `feat!:` → 0.4.0) waits for both manual checks.
-   - PR 1 (#127, the transport interface) and PR 2 (#130, the native host) are merged.
-   - **Next is PR 3:** the extension's `connectNative` with the TCP fallback, retrying native after a 4403, chunk joining, `transport` in `get_version`, and the nonce point (the relay overwrites the extension's `nonce`). Read the #123 comments first, including the nits from the #130 reviews.
-2. **Versioned launcher (0.5.0, ADR 0002).** The same: open the issue from the ADR first.
-3. **`ready-for-agent` issues:**
-   - #103: finish the branch above.
-   - #77: implement the switch-back decision once it's posted, plus the other leftovers.
-   - #76: Windows quoting in printed setup commands.
+1. **#123 PR 5:** turn `nativeHost` on by default, with setup registering by default; `feat!:` → 0.4.0. It waits for the manual checks on Windows and the Mac (including Chrome's permission warning from #146). Read the #123 comments first.
+2. **Versioned launcher (0.5.0, ADR 0002).** Open the issue from the ADR first.
+3. The manual Chrome check on #122.
+4. `ready-for-agent` leftovers on #77 and #103 (above); #145 if not done today.
 
 Run `gh issue list` for the full backlog. #21 and #96 are the umbrella issues that PRs reference as "Part of".
+
+## This Windows PC (checked 2026-11-11)
+
+- **Live install:** `C:\Orca_Project\mcp-teams` is the live install. Every session's `teams` server runs its `dist/index.js`, and Chrome's Teams extension loads a copy of its `extension/` folder.
+  - Rebuilt on 2026-11-11 at 07:45 on `336ff7e` (0.3.62) with `npm ci` and `npm run build`. It doesn't yet have #144/#146 (`347ec95`); pulling those adds the `nativeMessaging` permission to the extension.
+  - All 10 running servers predated that build: the Claude Code sessions in mcp-teams, mcp-newoutlook, Downloads, NAVERWORKS, local-plugins, mcp-atlassian, system-manager and PM-HUB (the hub), and Claude Desktop's 2.
+  - **Chrome loads the extension from `~/.mcp-teams/extension`,** which a *starting* server syncs from the checkout (`syncExtension` in `src/index.ts`). A rebuild alone doesn't update it. `node dist/index.js reload-extension` syncs it (on this PC it answers "hub restarted"; the extension reloads and reconnects within about 5 s). The `reload_extension` tool only reloads from the copy.
+  - **Running servers keep their old code** until each session reconnects with `/mcp`. Reconnect the hub's session last; the hub moves between sessions. To list stale servers, compare each `node … mcp-teams/dist/index.js` process's start time with `dist/index.js`'s write time; `~/.claude/sessions/<parent pid>.json` gives a Claude Code session's folder.
+  - After an extension reload no Teams session is captured until the Teams tab loads chats again.
+- **Claude Desktop's teams log:** `%LOCALAPPDATA%\Claude\Logs\mcp-server-teams.log` (not `%APPDATA%`).
+- **Memory:** often only about 2 GB of 27 GB free. Timing tests can then fail (#145; `drain.test.ts` once on Node 20 during #147); rerun the file alone.
+- **Worktrees:** an Agent-tool worktree starts with an empty `node_modules`. Run `npm ci` in it before testing; otherwise vitest resolves from the main checkout.
+- **Node versions:** default `node` is v26. `npx -y node@20` doesn't give Node 20 here (`npx -y node@20 -v` prints `v26.3.0`).
+  - **For a real Node 20 run:** an unpacked v20.20.2 is at `C:\Users\조희연\AppData\Local\Temp\claude\4b73b95594a054db\17972b37-7e83-4ce8-8b9d-3b36d890ee62\scratchpad\node20\node-v20.20.2-win-x64\node.exe`. It's in a session scratchpad and may disappear; if so, get the official zip from nodejs.org, check it against `SHASUMS256.txt` and unpack it outside the repo.
+  - Run `<node.exe> node_modules/vitest/vitest.mjs run --fileParallelism=false`, after checking that `node.exe -v` prints v20.
+- System tests run the built `dist/hub.js`, so **run `npm run build` first**; a stale `dist/` fails the welcome test with the old `serverVersion`.
+
+## Earlier
+
+- **#130, the native host (#123 PR 2),** merged 2026-11-10 as `05e027b` (0.3.58): `dist/hub.js` with Chrome's 4-byte framing and the 1 MB split; the serving and relaying host with the 30 s linger and `~/.mcp-teams/hub.log`; the peer-only TCP listener on 47393, which refuses extensions with 4403; the Windows pipe `\\.\pipe\mcp-teams-<ASCII>-<sha256 8 hex>`. Proofs are bound to their channel (`client`/`server`, `client:socket`/`server:socket`); a relaying host verifies the pipe's holder against its own nonce; the relay deadline is `569f39a`/`28ee536`, with tests in `c862dab`. The 0.3.52 test installs the real `mcp-teams@0.3.52` and checks the hand-over of 47393.
+- **Merged on 2026-11-09/10:** #121 (0.3.53, the failed-call note's status read waits 3 s), #125 (0.3.54, the unsure account, #77), #127 (0.3.55, #123 PR 1, the transport interface), #129 (0.3.56, `captureSession` only from the Teams page, #122).
+- **Merged on 2026-11-08:** #108 (0.3.49), #109 (0.3.50), #110 (0.3.51), #118 (0.3.52, the hub drains in-flight calls for up to 5 s, `TEAMS_MCP_DRAIN_MS`; closed #112). #112's leftovers: port citations name a PR, not a commit (ADR 0001 §7); a late queued send can flash its confirmation window; no test for a step-down during a drain; "drain" isn't in `GLOSSARY.md`; peers don't re-send refused calls through the next hub.
+- **#124 episode, 2026-11-10 about 16:45:** Claude Desktop's teams server reported "Server teams unavailable", then ran 0.3.56 with the bridge "waiting for extension". Port 47393 had the hub (pid 30504, the mcp-atlassian session's server) and 8 connections, all mcp-teams servers, none from Chrome. About a minute later the extension was connected again; it isn't known whether by itself. `background.js:2104` in Chrome's console is the extension's `new WebSocket(...)`; an error there is most likely Chrome's connection-refused line while no hub listens (#134), so noise.
+- **ADRs on main:** `docs/adr/0001-where-the-hub-lives.md` (native-messaging host plus TCP fallback) and `docs/adr/0002-versioned-launcher.md`, with their terms in `GLOSSARY.md`. Read them before any hub or launcher work. Delivery order: #112 drain (done) → #115 handshake (done) → native host (0.4.0) → launcher (0.5.0).
+- **Releases are automatic.** `.github/workflows/version.yml` runs on every push to `main` except Markdown-only pushes: it bumps the version from the commit messages (`scripts/bump-version.mjs`), tags it, and publishes to npm with trusted publishing (OIDC). npm can take a minute or two to show it (`npm view mcp-teams version --prefer-online`).
+
+## This Mac (checked 2026-11-08, about 08:10 local time)
+
+- **Versions:** the hub on port 47393 and the extension both ran 0.3.52; the shared npx cache held 0.3.52. `get_version` reported `restartNeeded: false` and `versionsMatch: true`.
+- **Teams session:** captured, all four services. After the extension reloaded its captures were empty, and its own recovery brought the session back within about 90 s.
+- **Other sessions** (scion, MeetNotes, PM-HUB, local-plugins, mcp-newoutlook) ran old mcp-teams servers; they join as peers and pick up new code only when each reconnects.
+- **Claude Desktop:** its teams log is `~/Library/Logs/Claude/mcp-server-teams.log`.
 
 ## How the user wants work done
 
@@ -210,18 +161,18 @@ Run `gh issue list` for the full backlog. #21 and #96 are the umbrella issues th
 
 ## Useful checks
 
-- **Hub owner:** `lsof -nP -iTCP:47393`. The listener is the hub; the `Google` process connected to it is the extension.
-- **Live state:** the `teams` MCP tool `get_version` reports the server, extension and hub versions, the bridge state, `restartNeeded` and the Teams session.
-  - Without the tools, pipe `initialize`, then `notifications/initialized`, then a `tools/call get_version` into `node ~/.npm/_npx/6995c9b5f6c70e20/node_modules/mcp-teams/dist/index.js`. It joins the bridge as a peer.
-- **Claude Desktop's log:** `~/Library/Logs/Claude/mcp-server-teams.log`.
+- **Hub owner:** `lsof -nP -iTCP:47393` on the Mac, `Get-NetTCPConnection -LocalPort 47393` on Windows. The listener is the hub; Chrome's connection to it is the extension.
+- **Live state:** the `teams` MCP tool `get_version` reports the server, extension and hub versions, the bridge state and `transport`, `restartNeeded`, the Teams session, and (with the switch on) `nativeHost`.
+  - Without the tools, pipe `initialize`, then `notifications/initialized`, then a `tools/call get_version` into the server's `dist/index.js` (on the Mac, `node ~/.npm/_npx/6995c9b5f6c70e20/node_modules/mcp-teams/dist/index.js`). It joins the bridge as a peer.
+- **Logs:** `~/.mcp-teams/server.log` once #147 is in; `~/.mcp-teams/hub.log` only with `nativeHost` on; Claude Desktop's teams log (paths above).
 - **Versions on disk:**
   - `~/.mcp-teams/extension/manifest.json` (extension folder);
-  - `~/.npm/_npx/6995c9b5f6c70e20/node_modules/mcp-teams/package.json` (shared npx cache).
+  - `~/.npm/_npx/6995c9b5f6c70e20/node_modules/mcp-teams/package.json` (the Mac's shared npx cache).
 
 ## Suggested skills
 
-- `grill-with-docs` (calls `grilling` and `domain-modeling`): before opening the native-host and launcher issues.
+- `grill-with-docs` (calls `grilling` and `domain-modeling`): before opening the launcher issue.
 - `tdd`: for each implementation issue.
 - `code-review`: review each branch in a fresh subagent before merge.
-- `diagnosing-bugs`: if Teams or the bridge breaks again after a release.
+- `diagnosing-bugs`: if Teams or the bridge breaks again; start from `server.log`.
 - `orca-cli`: only for long parallel work.
