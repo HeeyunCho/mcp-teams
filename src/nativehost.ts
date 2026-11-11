@@ -11,8 +11,8 @@
  * New here: hostNodeCheck, which reports a registration whose Node has gone (decision 11).
  */
 import { execFileSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { EXTENSION_ORIGIN } from "./extension.js";
@@ -192,23 +192,38 @@ export function regExe(env: Record<string, string | undefined> = process.env): s
 
 const defaultReg = (args: string[]) => void execFileSync(regExe(), args, { stdio: "ignore", windowsHide: true });
 
-/** A key's default value from `reg query <key> /ve` output: the text after REG_SZ (the "(Default)" label is localized). */
-export function regDefaultValue(out: string): string | null {
-  for (const line of out.split(/\r?\n/)) {
-    const m = /\sREG_(?:EXPAND_)?SZ\s+(.*\S)\s*$/.exec(line);
-    if (m) return m[1];
+/**
+ * A key's default value from the .reg file `reg export` writes (UTF-16LE, with a byte-order mark):
+ * the `@="…"` line, its \\ and \" undone; null when there is none or it isn't a plain string
+ * (`@=hex(2):…`). Read from the file, not from `reg query`'s output, which comes in the console's
+ * OEM code page (949 on Korean Windows) and garbles a Hangul path.
+ */
+export function regExportDefaultValue(file: Buffer): string | null {
+  const bom = file[0] === 0xff && file[1] === 0xfe ? 2 : 0;
+  const text = file.subarray(bom).toString("utf16le");
+  for (const line of text.split(/\r?\n/)) {
+    const m = /^@="((?:[^"\\]|\\.)*)"\s*$/.exec(line);
+    if (m) return m[1].replace(/\\(.)/g, "$1");
   }
   return null;
 }
 
-/** Reads a key's default value (read-only); null when the key or its value is missing. */
-const defaultRegQuery = (key: string): string | null => {
+/**
+ * Reads a key's default value through `reg export` into a temporary file, deleted after; null
+ * when the key or its value is missing. The registry itself is only read.
+ */
+export function readRegDefault(key: string): string | null {
+  const dir = mkdtempSync(join(tmpdir(), "mcp-teams-reg-"));
   try {
-    return regDefaultValue(execFileSync(regExe(), ["query", key, "/ve"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], windowsHide: true }));
+    const file = join(dir, "key.reg");
+    execFileSync(regExe(), ["export", key, file, "/y"], { stdio: "ignore", windowsHide: true });
+    return regExportDefaultValue(readFileSync(file));
   } catch {
     return null;
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
   }
-};
+}
 
 const hostLauncherName = (platform: NodeJS.Platform) => (platform === "win32" ? "mcp-teams-hub.bat" : "mcp-teams-hub");
 
@@ -248,7 +263,7 @@ type ReadOptions = Pick<NativeHostOptions, "home" | "platform" | "env" | "regQue
  */
 function readRegistrations(o: ReadOptions): (RegisteredHost & { target: Target })[] {
   const { home, platform, env } = resolveOptions(o);
-  const regQuery = o.regQuery ?? defaultRegQuery;
+  const regQuery = o.regQuery ?? readRegDefault;
   const found: (RegisteredHost & { target: Target })[] = [];
   for (const target of targets(home, platform, env)) {
     const manifest = join(target.dir, MANIFEST_FILE);

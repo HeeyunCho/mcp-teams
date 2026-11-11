@@ -1,13 +1,16 @@
 // #123 PR 4: setup registers the native-messaging host for the browsers it finds: a host manifest
 // and a host launcher next to it (macOS/Linux, per browser), or one manifest and a .bat in
 // %LOCALAPPDATA%\mcp-teams plus an HKCU key per browser (Windows). Everything on temporary homes,
-// with `reg` replaced: nothing here writes to the real registry or home.
+// with `reg` replaced: nothing here writes to the real registry or home, except one Windows-only
+// test of reg.exe itself on a key of its own under HKCU\Software\mcp-teams-test-<random>, deleted after.
+import { execFileSync } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { EXTENSION_ID } from "../../src/extension.js";
-import { batPath, HOST_NAME, hostLauncherScript, installNativeHost, nativeHostReport, NonAsciiBatPathError, regDefaultValue, regExe, registeredHosts } from "../../src/nativehost.js";
+import { batPath, HOST_NAME, hostLauncherScript, installNativeHost, nativeHostReport, NonAsciiBatPathError, readRegDefault, regExe, regExportDefaultValue, registeredHosts } from "../../src/nativehost.js";
 
 const json = (path: string) => JSON.parse(readFileSync(path, "utf8"));
 
@@ -370,9 +373,48 @@ describe("#123: reg itself", () => {
     expect(regExe({})).toBe("C:\\Windows\\System32\\reg.exe");
   });
 
-  it("#123: reads a key's default value out of reg query's output, whatever the language of (Default)", () => {
-    const out = "\r\nHKEY_CURRENT_USER\\Software\\Google\\Chrome\\NativeMessagingHosts\\com.mcp_teams.hub\r\n    (기본값)    REG_SZ    C:\\Users\\alex\\AppData\\Local\\mcp-teams\\com.mcp_teams.hub.json\r\n\r\n";
-    expect(regDefaultValue(out)).toBe("C:\\Users\\alex\\AppData\\Local\\mcp-teams\\com.mcp_teams.hub.json");
-    expect(regDefaultValue("\r\nHKEY_CURRENT_USER\\Software\\x\r\n    (Default)    REG_SZ    \r\n")).toBeNull();
+  // reg query prints in the console's OEM code page (949 on Korean Windows), which garbles a Hangul
+  // path; reg export writes a UTF-16LE .reg file whatever the code page.
+  /** A .reg file as reg export writes it: UTF-16LE with a byte-order mark, CRLF lines. */
+  const regFile = (...lines: string[]) =>
+    Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from(["Windows Registry Editor Version 5.00", "", ...lines, "", ""].join("\r\n"), "utf16le")]);
+  const KEY_LINE = "[HKEY_CURRENT_USER\\Software\\Google\\Chrome\\NativeMessagingHosts\\com.mcp_teams.hub]";
+
+  it("#123: reads a key's default value out of a UTF-16LE reg export, a Hangul path and \\\\ escapes included", () => {
+    const file = regFile(KEY_LINE, '@="C:\\\\Users\\\\홍길동\\\\AppData\\\\Local\\\\mcp-teams\\\\com.mcp_teams.hub.json"');
+    expect(regExportDefaultValue(file)).toBe("C:\\Users\\홍길동\\AppData\\Local\\mcp-teams\\com.mcp_teams.hub.json");
+  });
+
+  it('#123: undoes \\" too, and ignores named values', () => {
+    expect(regExportDefaultValue(regFile(KEY_LINE, '"Other"="x"', '@="C:\\\\a \\"b\\"\\\\c.json"'))).toBe('C:\\a "b"\\c.json');
+  });
+
+  it("#123: no default value, or one that isn't a plain string: null", () => {
+    expect(regExportDefaultValue(regFile(KEY_LINE))).toBeNull();
+    expect(regExportDefaultValue(regFile(KEY_LINE, '"Other"="x"'))).toBeNull();
+    expect(regExportDefaultValue(regFile(KEY_LINE, "@=hex(2):43,00,3a,00,00,00"))).toBeNull();
+    expect(regExportDefaultValue(Buffer.alloc(0))).toBeNull();
+  });
+});
+
+// The real reg.exe, on a key of the test's own (created and deleted here), never the browsers'.
+describe.runIf(process.platform === "win32")("#123: readRegDefault against the real registry", () => {
+  const key = `HKCU\\Software\\mcp-teams-test-${randomBytes(6).toString("hex")}`;
+  const reg = (args: string[]) => execFileSync(regExe(), args, { stdio: "ignore", windowsHide: true });
+
+  afterEach(() => {
+    try {
+      reg(["delete", key, "/f"]);
+    } catch {
+      // Not created (or already gone).
+    }
+  });
+
+  // Four reg.exe starts: well over vitest's 5 s default on a loaded machine.
+  it("#123: a Hangul path round-trips, and a missing key reads as null", { timeout: 30_000 }, () => {
+    const path = "C:\\Users\\홍길동\\AppData\\Local\\mcp-teams\\com.mcp_teams.hub.json";
+    expect(readRegDefault(key)).toBeNull();
+    reg(["add", key, "/ve", "/t", "REG_SZ", "/d", path, "/f"]);
+    expect(readRegDefault(key)).toBe(path);
   });
 });
