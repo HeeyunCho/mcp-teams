@@ -77,9 +77,11 @@ describe("knownClients and planClients", () => {
     const mac = Object.fromEntries(knownClients("/Users/a", "darwin", {}).map((c) => [c.name, posix.join(c.dir, c.file)]));
     expect(mac["Claude Desktop"]).toBe("/Users/a/Library/Application Support/Claude/claude_desktop_config.json");
     expect(mac["VS Code"]).toBe("/Users/a/Library/Application Support/Code/User/mcp.json");
+    expect(mac["Antigravity CLI"]).toBe("/Users/a/.gemini/config/mcp_config.json");
     expect(mac.Codex).toBe("/Users/a/.codex/config.toml");
     const win = Object.fromEntries(knownClients("C:/Users/a", "win32", { APPDATA: "C:/Users/a/AppData/Roaming" }).map((c) => [c.name, c.dir]));
     expect(win["Claude Desktop"]).toBe("C:\\Users\\a\\AppData\\Roaming\\Claude");
+    expect(win["Antigravity CLI"]).toBe("C:\\Users\\a\\.gemini\\antigravity-cli");
   });
 
   it("plans only for installed apps, and applying keeps a backup", () => {
@@ -94,6 +96,23 @@ describe("knownClients and planClients", () => {
     expect(existsSync(join(home, ".cursor", "mcp.json.mcp-teams.bak"))).toBe(true);
     expect(readFileSync(join(home, ".codex", "config.toml"), "utf8")).toContain("[mcp_servers.teams]");
     expect(planClients(cmd, knownClients(home, "linux", {})).map((p) => p.status)).toEqual(["unchanged", "unchanged"]);
+  });
+
+  it("plans for Antigravity CLI and writes to config/mcp_config.json", () => {
+    const home = mkdtempSync(join(tmpdir(), "mcp-teams-home-"));
+    mkdirSync(join(home, ".gemini", "antigravity-cli"), { recursive: true });
+    mkdirSync(join(home, ".gemini", "config"), { recursive: true });
+    writeFileSync(join(home, ".gemini", "config", "mcp_config.json"), JSON.stringify({ mcpServers: { existing: { command: "e", args: [] } } }));
+    const plans = planClients(cmd, knownClients(home, "linux", {}));
+    expect(plans.map((p) => [p.client.name, p.status])).toEqual([["Gemini CLI", "added"], ["Antigravity CLI", "added"]]);
+    const antigravityPlan = plans.find((p) => p.client.name === "Antigravity CLI")!;
+    applyPlan(antigravityPlan);
+    expect(JSON.parse(readFileSync(join(home, ".gemini", "config", "mcp_config.json"), "utf8")).mcpServers).toEqual({
+      existing: { command: "e", args: [] },
+      teams: cmd,
+    });
+    expect(existsSync(join(home, ".gemini", "config", "mcp_config.json.mcp-teams.bak"))).toBe(true);
+    expect(planClients(cmd, knownClients(home, "linux", {})).find((p) => p.client.name === "Antigravity CLI")?.status).toBe("unchanged");
   });
 });
 
