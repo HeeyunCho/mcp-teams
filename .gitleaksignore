@@ -2,3 +2,7 @@
 # extension id (see src/extension.ts). It is public by design, not a secret.
 bf083c56db8f2c6ef4caea4e20bcbb81eb221ffe:extension/manifest.json:generic-api-key:3
 extension/manifest.json:generic-api-key:3
+# test/unit/serverLog.test.ts's TOKEN is a made-up JWT ({"alg":"RS256"}.{"oid":"0000"}."signature"),
+# shaped like one on purpose so the test proves a token never reaches server.log (#143).
+43928d93f39c6491d170297e193f9fffd87bb6b3:test/unit/serverLog.test.ts:jwt:140
+test/unit/serverLog.test.ts:jwt:140
