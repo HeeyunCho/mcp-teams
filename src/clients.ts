@@ -94,6 +94,7 @@ export function knownClients(home = homedir(), platform = process.platform, env 
     { name: "VS Code", dir: p.join(appData, "Code", "User"), file: "mcp.json", format: "json", section: "servers", extra: { type: "stdio" } },
     { name: "Windsurf", dir: p.join(home, ".codeium", "windsurf"), file: "mcp_config.json", format: "json", section: "mcpServers" },
     { name: "Gemini CLI", dir: p.join(home, ".gemini"), file: "settings.json", format: "json", section: "mcpServers" },
+    { name: "Antigravity CLI", dir: p.join(home, ".gemini", "antigravity-cli"), file: p.join("..", "config", "mcp_config.json"), format: "json", section: "mcpServers" },
     { name: "Codex", dir: p.join(home, ".codex"), file: "config.toml", format: "toml" },
   ];
 }

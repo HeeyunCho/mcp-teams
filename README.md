@@ -49,7 +49,7 @@ Teams reports the call's length, not each person's time in it, so attendance lis
 | Attendance | Who joined each call, from the meeting chat | Yes, from Teams attendance reports |
 | AI meeting recap | No | Yes, with a Copilot or Teams Premium license |
 | Works when Conditional Access blocks cloud apps | Yes: requests come from your browser | No, if the policy blocks Anthropic's servers |
-| AI apps | Claude Code, Claude Desktop, Cursor, VS Code, Windsurf, Gemini CLI, Codex | Claude only |
+| AI apps | Claude Code, Claude Desktop, Cursor, VS Code, Windsurf, Gemini CLI, Antigravity CLI, Codex | Claude only |
 
 ### Sending always needs your click
 
@@ -117,7 +117,7 @@ npx mcp-teams setup
 
 `setup` does the rest and can be run again at any time:
 
-- It registers the server with the AI apps it finds: Claude Code, Claude Desktop, Cursor, VS Code (Copilot), Windsurf, Gemini CLI and Codex. It shows what it will change and asks first (`--yes` skips the question). It only adds or updates its own `teams` entry, and keeps a `.mcp-teams.bak` copy of each file it changes. For other MCP clients, register `npx -y mcp-teams@latest` as a stdio server.
+- It registers the server with the AI apps it finds: Claude Code, Claude Desktop, Cursor, VS Code (Copilot), Windsurf, Gemini CLI, Antigravity CLI and Codex. It shows what it will change and asks first (`--yes` skips the question). It only adds or updates its own `teams` entry, and keeps a `.mcp-teams.bak` copy of each file it changes. For other MCP clients, register `npx -y mcp-teams@latest` as a stdio server.
 - It installs the extension in `~/.mcp-teams/extension`.
 - It opens the Extensions page of Chrome and/or Edge, and that folder. The one manual step is in the browser you use Teams in: turn on *Developer mode* and click *Load unpacked* on the folder.
 - It waits until the extension connects and Teams answers, then says *Ready*.
