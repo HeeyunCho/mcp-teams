@@ -91,6 +91,46 @@ describe("worker connection", () => {
     expect(worker.pendingSendCount()).toBe(0);
   });
 
+  it("#148: a hub that closes while the worker computes its proof gets no hello (nothing is sent on a closed socket)", async () => {
+    // A hub that challenges, then closes (as the real one does when its auth timeout runs out)
+    // once the worker is computing its hello's proof.
+    const received: any[] = [];
+    const hubs: WebSocket[] = [];
+    const server = new WebSocketServer({ host: "127.0.0.1", port: 0 });
+    wss = server;
+    server.on("connection", (ws: WebSocket) => {
+      hubs.push(ws);
+      ws.on("message", (raw) => received.push(JSON.parse(raw.toString())));
+      ws.send(JSON.stringify({ type: "challenge", nonce: "challenge-1" }));
+    });
+    await new Promise<void>((r) => server.once("listening", () => r()));
+    const { port } = server.address() as { port: number };
+    // A slow proof (a busy machine); the close lands while it is computed.
+    const sign = crypto.subtle.sign.bind(crypto.subtle);
+    vi.spyOn(crypto.subtle, "sign").mockImplementation(async (...args: Parameters<SubtleCrypto["sign"]>) => {
+      for (const h of hubs) h.close(4401, "auth timeout");
+      await new Promise((r) => setTimeout(r, 100));
+      return sign(...args);
+    });
+    // Every send, with the socket's state at the time.
+    const sends: number[] = [];
+    const nativeSend = NativeWebSocket.prototype.send;
+    vi.spyOn(NativeWebSocket.prototype, "send").mockImplementation(function (this: globalThis.WebSocket, ...args: Parameters<globalThis.WebSocket["send"]>) {
+      sends.push(this.readyState);
+      return nativeSend.apply(this, args);
+    });
+    const fake = createFakeChrome({ local: { token: TOKEN, port } });
+    const worker = await loadWorker(fake);
+    worker.registerListeners();
+    vi.stubGlobal("WebSocket", NativeWebSocket);
+    for (const l of fake.chrome.runtime.onStartup.listeners) l();
+    // Polled before the retry (half a second after the close) connects again.
+    await vi.waitFor(async () => expect(await fake.pageMessage("popup.html", { type: "popup:status" })).toMatchObject({ state: "unauthorized" }), { timeout: 2_000 });
+    await new Promise((r) => setTimeout(r, 300)); // the proof has long finished
+    expect(sends.filter((s) => s !== NativeWebSocket.OPEN)).toEqual([]);
+    expect(received.filter((m) => m.type === "hello")).toEqual([]);
+  });
+
   it("2.1c: a connection refused after the worker already reconnected leaves the newer connection's state alone", async () => {
     // The first connection gets a forged welcome; the pairing changes while it is checked, and the
     // worker's new connection (with the new token) is proven and connected before that check ends.
