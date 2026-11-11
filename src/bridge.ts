@@ -200,8 +200,18 @@ export interface NativeHostOptions {
 
 type Timings = Required<BridgeTimings>;
 
-/** Sizes and timings, and where it meets the native host. */
-export interface BridgeOptions extends BridgeTimings, NativeHostOptions {}
+/** Metadata about the bridge's state for a server's server.log (#143): never message text. */
+export type DiagnoseEvent = (event: string, fields?: Record<string, string | number | undefined>) => void;
+
+/** Sizes and timings, where it meets the native host, and where it reports its changes. */
+export interface BridgeOptions extends BridgeTimings, NativeHostOptions {
+  /**
+   * Told of role changes ("role": role, via, hub), the hand-over to a newer server ("handover": to),
+   * the connected extensions ("extensions": count, transport), an extension's close
+   * ("extension-closed": code, transport) and the hub's, for a peer ("hub-closed": code).
+   */
+  diagnose?: DiagnoseEvent;
+}
 
 export const DEFAULT_BRIDGE_OPTIONS: Readonly<Timings> = Object.freeze({
   maxMessageBytes: MAX_MESSAGE_BYTES,
@@ -533,7 +543,17 @@ function describeSocketError(err: NodeJS.ErrnoException, limit: number): string 
 }
 
 export class ExtensionBridge {
-  role: BridgeRole = "none";
+  private currentRole: BridgeRole = "none";
+  /** hub, peer, or none (between the two). A change is reported to `diagnose`. */
+  get role(): BridgeRole {
+    return this.currentRole;
+  }
+  set role(role: BridgeRole) {
+    if (role === this.currentRole) return;
+    this.currentRole = role;
+    const via = role === "none" ? undefined : this.isHost || (role === "peer" && this.hubOnSocket) ? "socket" : "tcp";
+    this.report("role", { role, via, hub: role === "peer" ? logVersion(this.hubVersion) : undefined });
+  }
   /** The extension calls go to (with several browsers: the preferred one). */
   extension?: ExtensionInfo;
   /** Every connected extension, one per browser profile. */
@@ -579,6 +599,7 @@ export class ExtensionBridge {
   private legacyReloaded = false; // hub: an extension of 0.2.0 or older was told to reload
   private readonly opts: Timings;
   private readonly native: NativeHostOptions;
+  private readonly diagnose?: DiagnoseEvent;
   private boundPort?: number; // the port it got when it first listened (port 0 picks a free one); kept for later takeovers
 
   /** The 4th argument is the options, or (as before) just the largest message size. */
@@ -589,11 +610,27 @@ export class ExtensionBridge {
     options: BridgeOptions | number = {},
   ) {
     const given: BridgeOptions = typeof options === "number" ? { maxMessageBytes: options } : options;
-    const { hubSocket, hostSocket, socketNeedsProof, features, onExtensionsChange, onEvent, ...timings } = given;
+    const { hubSocket, hostSocket, socketNeedsProof, features, onExtensionsChange, onEvent, diagnose, ...timings } = given;
+    this.diagnose = diagnose;
     // A key given as undefined keeps its default (spreading it would overwrite the default).
     const defined = Object.fromEntries(Object.entries(timings).filter(([, v]) => v !== undefined));
     this.opts = { ...DEFAULT_BRIDGE_OPTIONS, ...defined };
     this.native = { hubSocket: hostSocket ? undefined : hubSocket, hostSocket, socketNeedsProof, features, onExtensionsChange, onEvent };
+  }
+
+  /** Tells `diagnose` (server.log, #143); a log that fails must never reach the bridge. */
+  private report(event: string, fields?: Record<string, string | number | undefined>) {
+    try {
+      this.diagnose?.(event, fields);
+    } catch {
+      // logging never stops the bridge
+    }
+  }
+
+  /** The connected extensions, for server.log: how many, and by which transports. */
+  private reportExtensions() {
+    const transports = [...new Set(this.extensions.map((e) => e.transport ?? "unknown"))].sort().join(",");
+    this.report("extensions", { count: this.extensions.length, transport: transports || undefined });
   }
 
   /** The native host (#123): the hub on its hub socket, never a peer. */
@@ -861,9 +898,11 @@ export class ExtensionBridge {
       if (this.sockets.has(ws)) this.rejectAll(describeSocketError(err, this.maxMessageBytes), ws);
     });
 
-    ws.on("close", () => {
+    ws.on("close", (code?: number) => {
       clearTimeout(authTimer);
       this.peers.delete(ws);
+      const closing = this.sockets.get(ws);
+      if (closing) this.report("extension-closed", { code, transport: closing.transport });
       // A peer that went away can't be told the outcome of its calls: withdraw them.
       for (const ac of this.peerCalls.get(ws)?.values() ?? []) ac.abort();
       this.peerCalls.delete(ws);
@@ -918,6 +957,7 @@ export class ExtensionBridge {
           }
         }
         s.close(4000, "replaced");
+        this.report("extension-closed", { code: 4000, transport: i.transport });
         // Its close event comes later and no longer finds it, so fail its calls now.
         this.sockets.delete(s);
         this.dropTurns(s);
@@ -940,6 +980,7 @@ export class ExtensionBridge {
     this.extension = (this.preferred && this.sockets.get(this.preferred)) ?? this.extensions.at(-1);
     this.broadcastState();
     this.native.onExtensionsChange?.(this.extensions);
+    this.reportExtensions();
   }
 
   /**
@@ -1026,6 +1067,7 @@ export class ExtensionBridge {
     while ((this.pending.size || this.queued) && Date.now() < end && !this.closed) await new Promise((r) => setTimeout(r, 500));
     if (this.closed || this.role !== "hub") return void (this.steppingDown = false);
     console.error(`[mcp-teams ${this.serverVersion}] handing the bridge to mcp-teams ${newer}`);
+    this.report("handover", { to: logVersion(newer) });
     this.restartHub(LOST_CALL.updated, this.opts.retryMs);
     this.steppingDown = false;
   }
@@ -1058,6 +1100,7 @@ export class ExtensionBridge {
     this.extension = undefined;
     this.extensions = [];
     this.native.onExtensionsChange?.(this.extensions);
+    this.reportExtensions();
     for (const l of listeners) void l.close();
   }
 
@@ -1295,6 +1338,7 @@ export class ExtensionBridge {
           this.hubChecksSend = this.hubCapabilities.features.includes("checksSend") || msg.checksSend === true;
           this.extension = msg.extension ?? undefined;
           this.extensions = msg.extensions ?? (msg.extension ? [msg.extension] : []);
+          this.reportExtensions();
           heartbeatMs = Number(msg.heartbeatMs) > 0 ? Number(msg.heartbeatMs) : 0;
           if (heartbeatMs) watch();
           resolve(true);
@@ -1303,6 +1347,7 @@ export class ExtensionBridge {
         } else if (msg.type === "ext-state") {
           this.extension = msg.extension ?? undefined;
           this.extensions = msg.extensions ?? (msg.extension ? [msg.extension] : []);
+          this.reportExtensions();
         } else if (msg.type === "response" && typeof msg.id === "string") {
           this.settle(msg);
         }
@@ -1337,6 +1382,8 @@ export class ExtensionBridge {
         this.hubChecksSend = false;
         this.extension = undefined;
         this.extensions = [];
+        this.report("hub-closed", { code });
+        this.reportExtensions();
         this.role = "none";
         this.rejectAll(drained ? NOT_SENT.hubClosing : LOST_CALL.hubRestarted);
         if (!this.closed) {
