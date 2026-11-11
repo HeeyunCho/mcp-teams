@@ -20,7 +20,8 @@
     "scripting",
     "tabs",
     "webRequest",
-    "alarms"
+    "alarms",
+    "nativeMessaging"
   ],
   "host_permissions": [
     "https://teams.cloud.microsoft/*",
