@@ -7,7 +7,8 @@
  * Ported from mcp-newoutlook src/hub.ts log() and traffic() (commit 127715c), as functions of
  * their own so the rotation and what a line holds can be tested without a host process.
  */
-import { appendFileSync, mkdirSync, renameSync, statSync } from "node:fs";
+import { randomBytes } from "node:crypto";
+import { appendFileSync, mkdirSync, readFileSync, renameSync, statSync, unlinkSync } from "node:fs";
 import { dirname } from "node:path";
 
 /** hub.log moves to hub.log.1 once it is larger than this. */
@@ -16,16 +17,45 @@ export const HUB_LOG_MAX_BYTES = 1024 * 1024;
 export type LogFields = Record<string, string | number | undefined>;
 export type Log = (event: string, fields?: LogFields) => void;
 
+/**
+ * Moves `file` to `file`.1 once it is larger than maxBytes, safely while other processes append
+ * and rotate too (#143: about ten servers share server.log). Renaming straight to .1 could, when
+ * two processes saw the big file at once, move the other's fresh small file over the rotated one
+ * and lose it. So this first claims the file under a name of its own (only one rename of it can
+ * succeed), and moves the claim to .1 only when it is the big file; a small one (another process
+ * rotated first) goes back by appending it.
+ */
+function rotate(file: string, maxBytes: number) {
+  try {
+    if (statSync(file).size <= maxBytes) return;
+  } catch {
+    return; // no log yet
+  }
+  const claim = `${file}.${process.pid}-${randomBytes(4).toString("hex")}.rotating`;
+  try {
+    renameSync(file, claim);
+  } catch {
+    return; // another process moved it first
+  }
+  try {
+    if (statSync(claim).size > maxBytes) return void renameSync(claim, `${file}.1`);
+  } catch {
+    // couldn't move it to .1: put it back below
+  }
+  try {
+    appendFileSync(file, readFileSync(claim), { mode: 0o600 });
+    unlinkSync(claim);
+  } catch {
+    // left as the .rotating file: nothing is lost
+  }
+}
+
 /** A logger appending to `file`. Logging never throws: a log it can't write must not stop the host. */
 export function hubLog(file: string, maxBytes = HUB_LOG_MAX_BYTES): Log {
   return (event, fields = {}) => {
     try {
       mkdirSync(dirname(file), { recursive: true, mode: 0o700 });
-      try {
-        if (statSync(file).size > maxBytes) renameSync(file, `${file}.1`);
-      } catch {
-        // no log yet
-      }
+      rotate(file, maxBytes);
       const extra = Object.entries(fields)
         .filter(([, v]) => v !== undefined)
         .map(([k, v]) => `${k}=${v}`)
