@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -166,6 +166,27 @@ describe("#24: quote", () => {
     try {
       const out = execFileSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-EncodedCommand", encoded], { encoding: "utf8" });
       expect(JSON.parse(out)).toEqual(args);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  // A quoted first word is a string to PowerShell, not a command: pasted as printed,
+  // `"C:\Program Files\nodejs\node.exe" x` fails with "Unexpected token". The node here
+  // is this one, copied into a folder with a space so its path gets quoted. (Not a hard
+  // link: that shares the running node.exe, and Windows then refuses to delete it.)
+  it.runIf(process.platform === "win32")('#138: PowerShell runs the "No AI app found" command when node\'s path is quoted', { timeout: 60_000 }, () => {
+    const dir = mkdtempSync(join(tmpdir(), "quote first-"));
+    const node = join(dir, "node.exe");
+    copyFileSync(process.execPath, node);
+    const script = join(dir, "argv.js");
+    writeFileSync(script, "process.stdout.write(JSON.stringify(process.argv.slice(2)));");
+    const hint = noAppHint({ command: node, args: [script, "C:\\Users\\Alex Doe\\x", "-y"] }, "win32");
+    const command = hint.slice(hint.indexOf(": ") + 2);
+    const encoded = Buffer.from(command, "utf16le").toString("base64");
+    try {
+      const out = execFileSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-EncodedCommand", encoded], { encoding: "utf8" });
+      expect(JSON.parse(out)).toEqual(["C:\\Users\\Alex Doe\\x", "-y"]);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
