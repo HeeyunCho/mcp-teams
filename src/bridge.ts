@@ -380,7 +380,7 @@ export function isNewer(a: unknown, b: unknown): boolean {
  * src/bridge.ts BridgeSocket (commit 7ef8ac9), without its binary sends (Teams has no binary path).
  *
  * Events, as the ws WebSocket emits them: "message" (one whole message: Buffer or string),
- * "close" (code), "error" (err; the connection closes afterwards), "ping" (the other side's
+ * "close" (code, reason), "error" (err; the connection closes afterwards), "ping" (the other side's
  * heartbeat, which a peer watches) and "pong" (the answer to ping()).
  */
 export interface BridgeSocket {
@@ -406,6 +406,27 @@ export const OPEN = WebSocket.OPEN;
  */
 export type Via = "tcp" | "socket" | "native";
 
+/**
+ * The reasons the hub closes a connection with before accepting it, or a peer that is too slow
+ * (#156). server.log's handshake-closed names one of these, or "other": the reason a close event
+ * carries is the one the client sent back, so its own text is never logged.
+ */
+export const CLOSE_REASONS: ReadonlySet<string> = new Set([
+  "auth timeout",
+  "bad token",
+  "not now",
+  "another copy of the extension is connected",
+  "extension update required",
+  "extensions connect to the native host by native messaging",
+  "too slow",
+]);
+
+/** A close event's reason (a Buffer from ws, a string from a wrapped transport) as server.log may write it. */
+export function closeReason(reason: unknown): string {
+  const text = Buffer.isBuffer(reason) ? reason.toString("utf8") : typeof reason === "string" ? reason : "";
+  return CLOSE_REASONS.has(text) ? text : "other";
+}
+
 /** Where a hub listens, once it listens. */
 export interface BridgeListener {
   /** The TCP port it got (the free one, when asked for port 0); none for a listener without a port. */
@@ -418,9 +439,10 @@ export interface BridgeListener {
 export interface ListenHandlers {
   /**
    * A new connection, not yet authenticated. `via`: the kind of listener that took it. `origin`:
-   * the Origin it sent (none: a local process).
+   * the Origin it sent (none: a local process). `port`: the TCP port it connected from, for
+   * server.log (none on a local socket).
    */
-  connection(conn: BridgeSocket, from: { via: Via; origin?: string }): void;
+  connection(conn: BridgeSocket, from: { via: Via; origin?: string; port?: number }): void;
   /** The listener failed after it started listening. */
   error(err: Error): void;
 }
@@ -464,7 +486,7 @@ export function webSocketTransport({ port, maxMessageBytes }: { port: number; ma
           wss.close();
           reject(err);
         });
-        wss.on("connection", (ws, req) => handlers.connection(ws, { via: "tcp", origin: req.headers.origin }));
+        wss.on("connection", (ws, req) => handlers.connection(ws, { via: "tcp", origin: req.headers.origin, port: req.socket.remotePort }));
       }),
     connect: () => new WebSocket(`ws://127.0.0.1:${port}`, { maxPayload: maxMessageBytes }),
   };
@@ -860,8 +882,11 @@ export class ExtensionBridge {
     });
   }
 
-  private onConnection(ws: BridgeSocket, { via, origin }: { via: Via; origin?: string }) {
+  private onConnection(ws: BridgeSocket, { via, origin, port }: { via: Via; origin?: string; port?: number }) {
     let authed = false;
+    // For server.log's handshake-closed (#156): how long it was open, and which hello it sent.
+    const openedAt = Date.now();
+    let saw: "hello" | "peer-hello" | "none" = "none";
     const authTimer = setTimeout(() => !authed && ws.close(4401, "auth timeout"), this.opts.authTimeoutMs);
     const challenge = newNonce();
     ws.send(JSON.stringify({ type: "challenge", nonce: challenge }));
@@ -876,6 +901,7 @@ export class ExtensionBridge {
       if (!msg || typeof msg !== "object") return;
       if (!authed) {
         if (msg.type !== "hello" && msg.type !== "peer-hello") return void ws.close(4401, "bad token");
+        saw = msg.type;
         // The native host takes extensions only on native messaging (or relayed on its socket): on
         // its TCP port it serves peers only (ADR decision 4, #123 decision 9).
         if (via === "tcp" && this.isHost && msg.type === "hello") {
@@ -911,14 +937,15 @@ export class ExtensionBridge {
       if (this.sockets.has(ws)) this.rejectAll(describeSocketError(err, this.maxMessageBytes), ws);
     });
 
-    ws.on("close", (code?: number) => {
+    ws.on("close", (code?: number, reason?: Buffer | string) => {
       clearTimeout(authTimer);
       this.peers.delete(ws);
       const closing = this.sockets.get(ws);
       // Turned away before it was accepted (bad token, auth timeout, an old extension told to
       // reload, another copy connected, an extension on the host's TCP port): the "waiting for
-      // extension" case (#111, #124) would otherwise leave no line.
-      if (!this.accepted.has(ws)) this.report("handshake-closed", { code, via });
+      // extension" case (#111, #124) would otherwise leave no line. Several share 4401, so it
+      // says which (#156): the reason from CLOSE_REASONS, the time open, and the hello it sent.
+      if (!this.accepted.has(ws)) this.report("handshake-closed", { code, reason: closeReason(reason), via, ms: Date.now() - openedAt, hello: saw, port });
       else if (closing && this.unanswered.has(ws)) this.report("extension-dropped", { reason: "no-pong", transport: closing.transport });
       else if (closing) this.report("extension-closed", { code, transport: closing.transport });
       // A peer that went away can't be told the outcome of its calls: withdraw them.

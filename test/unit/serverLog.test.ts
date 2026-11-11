@@ -302,6 +302,41 @@ describe("#143 review: connects, handshakes and drops", () => {
     ]);
   });
 
+  it("#156: says why a handshake was refused, how long it was open, which hello it sent and its port", () => {
+    const { log, lines } = setup();
+    log.bridge("handshake-closed", { code: 4401, reason: "auth timeout", via: "tcp", ms: 5001, hello: "none", port: 51234 });
+    log.bridge("handshake-closed", { code: 4409, reason: "another copy of the extension is connected", via: "tcp", ms: 12, hello: "hello", port: 51240 });
+    log.bridge("handshake-closed", { code: 4401, reason: "bad token", via: "socket", ms: 3, hello: "peer-hello" });
+    expect(events(lines)).toEqual([
+      'handshake-closed v=0.3.62 role=none code=4401 reason="auth timeout" via=tcp ms=5001 hello=none port=51234',
+      'handshake-closed v=0.3.62 role=none code=4409 reason="another copy of the extension is connected" via=tcp ms=12 hello=hello port=51240',
+      'handshake-closed v=0.3.62 role=none code=4401 reason="bad token" via=socket ms=3 hello=peer-hello',
+    ]);
+  });
+
+  it("#156: writes a refusal's reason outside the bridge's own close reasons as other, and an unknown hello as -", () => {
+    const { log, lines } = setup();
+    log.bridge("handshake-closed", { code: 4401, reason: 'bad token" token=abc', via: "tcp", ms: 1, hello: "hello" });
+    log.bridge("handshake-closed", { code: 1000, reason: "closing", via: "tcp", ms: 2, hello: "welcome", port: "51234 x=y" });
+    log.bridge("handshake-closed", { code: 1006, reason: "", via: "tcp", ms: 3, hello: "none" });
+    expect(events(lines)).toEqual([
+      "handshake-closed v=0.3.62 role=none code=4401 reason=other via=tcp ms=1 hello=hello",
+      "handshake-closed v=0.3.62 role=none code=1000 reason=other via=tcp ms=2 hello=- port=-",
+      "handshake-closed v=0.3.62 role=none code=1006 reason=other via=tcp ms=3 hello=none",
+    ]);
+  });
+
+  it("#156: logs the same refusal from a retrying extension once, though its time open and port differ", () => {
+    const { log, lines } = setup();
+    log.bridge("handshake-closed", { code: 4401, reason: "bad token", via: "tcp", ms: 4, hello: "hello", port: 50001 });
+    log.bridge("handshake-closed", { code: 4401, reason: "bad token", via: "tcp", ms: 7, hello: "hello", port: 50002 }); // 30 s later
+    log.bridge("handshake-closed", { code: 4401, reason: "auth timeout", via: "tcp", ms: 5002, hello: "none", port: 50003 });
+    expect(events(lines)).toEqual([
+      'handshake-closed v=0.3.62 role=none code=4401 reason="bad token" via=tcp ms=4 hello=hello port=50001',
+      'handshake-closed v=0.3.62 role=none code=4401 reason="auth timeout" via=tcp ms=5002 hello=none port=50003',
+    ]);
+  });
+
   it("writes only event names of lowercase words and dashes", () => {
     const { log, lines } = setup();
     log.bridge("Sam Roe\nforged", {});

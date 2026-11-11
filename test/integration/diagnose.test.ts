@@ -9,6 +9,9 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { afterEach, describe, expect, it } from "vitest";
+import WebSocket from "ws";
+import { proof } from "../../src/bridge.js";
+import { EXTENSION_ORIGIN } from "../../src/extension.js";
 import { diagnosticLog } from "../../src/serverLog.js";
 import { registerTools } from "../../src/tools.js";
 import { bridgeHarness, TOKEN, type BridgeHarness } from "../helpers/bridgeHarness.js";
@@ -64,7 +67,7 @@ describe("#143: the bridge's diagnostic events", () => {
     await h.session("1.0.0", { diagnose });
     await expect(h.extension({ token: "not-the-token", reconnect: false })).rejects.toThrow(/4401/);
     await until(() => events.some((e) => e.event === "handshake-closed"), 3_000, "the refused handshake");
-    expect(events.find((e) => e.event === "handshake-closed")).toEqual({ event: "handshake-closed", fields: { code: 4401, via: "tcp" } });
+    expect(events.find((e) => e.event === "handshake-closed")).toMatchObject({ event: "handshake-closed", fields: { code: 4401, reason: "bad token", via: "tcp", hello: "hello" } });
     expect(events.some((e) => e.event === "extension-closed")).toBe(false);
   });
 
@@ -121,6 +124,65 @@ describe("#143: the bridge's diagnostic events", () => {
     await h.extension({ handle: () => ({ ok: 1 }) });
     await until(() => hub.connected, 3_000, "the extension");
     expect(await hub.call("status", {})).toEqual({ ok: 1 });
+  });
+});
+
+/**
+ * A raw client on the hub's port that answers the challenge with `hello` (when given) and sends
+ * nothing else. Resolves, once the hub closed it, with the port it connected from and the code.
+ */
+function refusedClient(port: number, hello?: Record<string, unknown>, origin?: string) {
+  return new Promise<{ port: number; code: number }>((resolve, reject) => {
+    const socket = new WebSocket(`ws://127.0.0.1:${port}`, origin ? { origin } : {});
+    let from = 0;
+    socket.on("open", () => (from = (socket as any)._socket.localPort));
+    socket.on("message", (raw) => {
+      const msg = JSON.parse(raw.toString());
+      if (msg.type === "challenge" && hello) socket.send(JSON.stringify(hello));
+    });
+    socket.on("error", reject);
+    socket.on("close", (code) => resolve({ port: from, code }));
+  });
+}
+
+// #156: several refusals share 4401, so handshake-closed says which one it was (from the close
+// reasons the bridge itself sends), how long the connection was open, and which hello it sent.
+describe("#156: why a handshake was refused", () => {
+  const AUTH_MS = 300;
+  const closed = async (events: Event[]) => {
+    await until(() => events.some((e) => e.event === "handshake-closed"), 5_000, "the refused handshake");
+    return events.find((e) => e.event === "handshake-closed")!.fields;
+  };
+
+  it("says a client that sent no hello hit the auth timeout, after authTimeoutMs, and the port it came from", async () => {
+    h = await bridgeHarness();
+    const { events, diagnose } = recorder();
+    await h.session("1.0.0", { diagnose, authTimeoutMs: AUTH_MS });
+    const client = await refusedClient(h.port, undefined, EXTENSION_ORIGIN);
+    const fields = await closed(events);
+    expect(client.code).toBe(4401);
+    expect(fields).toMatchObject({ code: 4401, reason: "auth timeout", via: "tcp", hello: "none", port: client.port });
+    expect(fields.ms).toBeGreaterThanOrEqual(AUTH_MS);
+    expect(Object.keys(fields)).toEqual(["code", "reason", "via", "ms", "hello", "port"]);
+  });
+
+  it("says a hello with a wrong proof had a bad token, well before the auth timeout", async () => {
+    h = await bridgeHarness();
+    const { events, diagnose } = recorder();
+    await h.session("1.0.0", { diagnose, authTimeoutMs: 10_000 });
+    await refusedClient(h.port, { type: "hello", proof: proof("not-the-token", "client", "x"), nonce: "n", version: "0.3.66" }, EXTENSION_ORIGIN);
+    const fields = await closed(events);
+    expect(fields).toMatchObject({ code: 4401, reason: "bad token", via: "tcp", hello: "hello" });
+    expect(fields.ms).toBeLessThan(10_000);
+  });
+
+  it("says which hello it was: a peer-hello with a wrong proof", async () => {
+    h = await bridgeHarness();
+    const { events, diagnose } = recorder();
+    await h.session("1.0.0", { diagnose, authTimeoutMs: 10_000 });
+    await refusedClient(h.port, { type: "peer-hello", proof: proof("not-the-token", "client", "x"), nonce: "n", version: "1.0.0" });
+    const fields = await closed(events);
+    expect(fields).toMatchObject({ code: 4401, reason: "bad token", via: "tcp", hello: "peer-hello" });
   });
 });
 
