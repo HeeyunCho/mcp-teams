@@ -3,7 +3,7 @@
 import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { diagnosticLog, watchState } from "../../src/serverLog.js";
 import { until } from "../helpers/timing.js";
 
@@ -378,6 +378,31 @@ describe("#143 review: the background watch (hub only)", () => {
     expect(logged).toHaveLength(1); // the 2nd failure in a row is counted, not logged
     expect(logged[0]).toMatch(/^teams v=0\.3\.62 role=none status=unreadable kind=timeout ms=\d+ failures=1$/);
     expect(Number(/ ms=(\d+)/.exec(logged[0])?.[1])).toBeGreaterThanOrEqual(25); // how long the read took
+  });
+
+  it("#153 review: waits 15 s for the status, so a healthy 6 s answer is a slow success, not a timeout", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval", "performance"] });
+    try {
+      const { log, lines } = setup();
+      const asked: number[] = [];
+      // The bridge's own rule: no answer within timeoutMs is a timeout. This extension answers in 6 s.
+      const bridge = {
+        role: "hub",
+        connected: true,
+        backgroundStatus: (timeoutMs: number) =>
+          new Promise((resolve, reject) => {
+            asked.push(timeoutMs);
+            if (timeoutMs < 6_000) setTimeout(() => reject(new Error("Extension call 'status' timed out")), timeoutMs);
+            else setTimeout(() => resolve(status), 6_000);
+          }),
+      };
+      stops.push(watchState({ bridge, diagnostics: log, onDisk: () => ({ restartNeeded: false }), everyMs: 60_000 }));
+      await vi.advanceTimersByTimeAsync(60_000 + 6_000);
+      expect(asked).toEqual([15_000]);
+      expect(lines().map((l) => l.replace(/^\S+ pid=\d+ /, ""))).toEqual(["teams v=0.3.62 role=none tabs=1 captured=yes services=chatsvc account=none ms=6000 slow=yes"]);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("logs restartNeeded from the watch too, on any role, without a call", async () => {

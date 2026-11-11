@@ -24,9 +24,10 @@ export const SERVER_LOG_FILE = join(CONFIG_DIR, "server.log");
 export const SLOW_TOOL_MS = 20_000;
 
 /**
- * A status read that takes longer than this is logged even when the state didn't change (#153):
- * half the background read's 5 s limit, so reads that come close to it show before they time out,
- * and get_version's reads (up to a minute) show long before a tool counts as slow.
+ * A status read that takes longer than this is logged even when the state didn't change (#153).
+ * The extension answers status in milliseconds when it is well, so 2.5 s is clearly unwell: the
+ * background read's slow answers show long before its 15 s limit, and get_version's reads (up to a
+ * minute) long before a tool counts as slow (20 s).
  */
 export const SLOW_STATUS_MS = 2_500;
 
@@ -292,8 +293,12 @@ export function diagnosticLog(options: DiagnosticLogOptions): DiagnosticLog {
 
 /** How often the background watch reads the Teams state and the build on disk. */
 export const WATCH_MS = 60_000;
-/** How long the background watch waits for the extension's status. */
-const WATCH_STATUS_TIMEOUT_MS = 5_000;
+/**
+ * How long the background watch waits for the extension's status. It runs once a minute and blocks
+ * nothing; at 5 s, healthy answers that took ~5.1 s were logged as timeouts (#153), now they show
+ * as slow (SLOW_STATUS_MS).
+ */
+const WATCH_STATUS_TIMEOUT_MS = 15_000;
 
 export interface WatchStateOptions {
   bridge: { readonly role: string; readonly connected: boolean; backgroundStatus(timeoutMs: number): Promise<unknown> };
