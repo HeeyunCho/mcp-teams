@@ -177,14 +177,15 @@ describe("#24: quote", () => {
   // link: that shares the running node.exe, and Windows then refuses to delete it.)
   it.runIf(process.platform === "win32")('#138: PowerShell runs the "No AI app found" command when node\'s path is quoted', { timeout: 60_000 }, () => {
     const dir = mkdtempSync(join(tmpdir(), "quote first-"));
-    const node = join(dir, "node.exe");
-    copyFileSync(process.execPath, node);
-    const script = join(dir, "argv.js");
-    writeFileSync(script, "process.stdout.write(JSON.stringify(process.argv.slice(2)));");
-    const hint = noAppHint({ command: node, args: [script, "C:\\Users\\Alex Doe\\x", "-y"] }, "win32");
-    const command = hint.slice(hint.indexOf(": ") + 2);
-    const encoded = Buffer.from(command, "utf16le").toString("base64");
     try {
+      const node = join(dir, "node.exe");
+      copyFileSync(process.execPath, node);
+      const script = join(dir, "argv.js");
+      writeFileSync(script, "process.stdout.write(JSON.stringify(process.argv.slice(2)));");
+      const hint = noAppHint({ command: node, args: [script, "C:\\Users\\Alex Doe\\x", "-y"] }, "win32");
+      const command = hint.slice(hint.indexOf(": ") + 2);
+      expect(command.startsWith('& "')).toBe(true);
+      const encoded = Buffer.from(command, "utf16le").toString("base64");
       const out = execFileSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-EncodedCommand", encoded], { encoding: "utf8" });
       expect(JSON.parse(out)).toEqual(["C:\\Users\\Alex Doe\\x", "-y"]);
     } finally {
