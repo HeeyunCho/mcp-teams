@@ -13,6 +13,7 @@ import type { ExtensionBridge } from "./bridge.js";
 import { applyPlan, planClients, type Plan, type ServerCommand } from "./clients.js";
 import { EXTENSION_ORIGIN, installedVersion, syncExtension, writePairing } from "./extension.js";
 import { loadConfig } from "./config.js";
+import { installNativeHost, type InstallResult } from "./nativehost.js";
 
 const SERVER_SCRIPT = fileURLToPath(new URL("./index.js", import.meta.url));
 const EXTENSION_WAIT_MS = 10 * 60_000;
@@ -355,12 +356,41 @@ async function connectExtension(bridge: ExtensionBridge, serverVersion: string):
   return true;
 }
 
+// ------------------------------------------------------------------ native host
+
+/** What setup says about a native host registration (#123): done (ok) and still to do (todo). */
+export function describeNativeHost({ installed, failed = [], missingHub, nonAsciiPath }: InstallResult, node: string = process.execPath): { ok: string[]; todo: string[] } {
+  const port = "The extension uses the local port.";
+  if (missingHub) return { ok: [], todo: [`Native host not registered: dist/hub.js is missing (build first: npm run build). ${port}`] };
+  if (nonAsciiPath !== undefined) return { ok: [], todo: [`Native host not registered: ${nonAsciiPath} has characters a Windows .bat can't hold. ${port}`] };
+  const todos = failed.map((f) => `Native host for ${f.browser} not registered (${f.error}). The extension uses the local port there.`);
+  if (!installed.length && !failed.length) todos.push(`Native host not registered: no Chrome or Edge profile found. ${port}`);
+  const okLines = installed.map((i) => {
+    const moved = i.nodeWasMissing !== undefined ? ` (it started ${i.nodeWasMissing}, which no longer exists; now ${node})` : "";
+    return `Native host ${i.changed ? "registered" : "up to date"} for ${i.browser}: ${i.registryKey ?? i.manifest}${moved}`;
+  });
+  return { ok: okLines, todo: todos };
+}
+
+/**
+ * Registers the native host (ADR 0001) with the browsers found, so the extension can reach the hub
+ * without the TCP port, which stays as the fallback. Only with "nativeHost": true (#123; PR 5
+ * turns it on by default): off, setup leaves native messaging alone.
+ */
+function registerNativeHost() {
+  const said = describeNativeHost(installNativeHost());
+  for (const line of said.ok) ok(line);
+  for (const line of said.todo) todo(line);
+  console.log("");
+}
+
 // ------------------------------------------------------------------ setup
 
 export async function setup(bridge: ExtensionBridge, serverVersion: string, { yes = false } = {}): Promise<boolean> {
   console.log(`mcp-teams ${serverVersion} setup\n`);
   await registerApps(yes);
   console.log("");
+  if (loadConfig().nativeHost) registerNativeHost();
   if (!(await connectExtension(bridge, serverVersion))) return false;
 
   // Opens Teams in a background tab if none is open, and waits for its session.
