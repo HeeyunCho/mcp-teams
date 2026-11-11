@@ -24,10 +24,17 @@ export type Log = (event: string, fields?: LogFields) => void;
  * and lose it. So this first claims the file under a name of its own (only one rename of it can
  * succeed), and moves the claim to .1 only when it is the big file; a small one (another process
  * rotated first) goes back by appending it.
+ *
+ * When .1 can't be replaced (on Windows, another program such as a virus scanner or a viewer holds
+ * it open), the big claim stays as `<file>.<pid>-<random>.rotating` rather than going back: copying
+ * a megabyte back would make every following line read and write it again. Such a file is an older
+ * part of the log, safe to read or delete.
+ *
+ * `seenSize`: the size this process saw (tests: one seen just before another process rotated).
  */
-function rotate(file: string, maxBytes: number) {
+export function rotate(file: string, maxBytes: number, seenSize?: number) {
   try {
-    if (statSync(file).size <= maxBytes) return;
+    if ((seenSize ?? statSync(file).size) <= maxBytes) return;
   } catch {
     return; // no log yet
   }
@@ -37,10 +44,19 @@ function rotate(file: string, maxBytes: number) {
   } catch {
     return; // another process moved it first
   }
+  let big: boolean;
   try {
-    if (statSync(claim).size > maxBytes) return void renameSync(claim, `${file}.1`);
+    big = statSync(claim).size > maxBytes;
   } catch {
-    // couldn't move it to .1: put it back below
+    return; // can't tell: left as the .rotating file, nothing is lost
+  }
+  if (big) {
+    try {
+      renameSync(claim, `${file}.1`);
+    } catch {
+      // .1 is held: the claim stays aside (see above), and the live log starts afresh
+    }
+    return;
   }
   try {
     appendFileSync(file, readFileSync(claim), { mode: 0o600 });
