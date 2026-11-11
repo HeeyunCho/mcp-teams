@@ -224,6 +224,30 @@ export function registeredHosts(o: Pick<NativeHostOptions, "home" | "platform" |
   return readRegistrations(home, platform, env).map(({ browser, node, nodeExists }) => ({ browser, node, nodeExists }));
 }
 
+/** What get_version shows about the native host's registration (with "nativeHost": true). */
+export interface NativeHostReport {
+  registered: HostBrowser[];
+  /** The Nodes registrations start that no longer exist. */
+  nodeMissing?: string[];
+  hint?: string;
+}
+
+/** get_version's view of the registrations: which browsers, and what to do when one can't start. */
+export function nativeHostReport(o: Pick<NativeHostOptions, "home" | "platform" | "env"> = {}): NativeHostReport {
+  const hosts = registeredHosts(o);
+  const registered = hosts.map((h) => h.browser);
+  if (!hosts.length) {
+    return { registered, hint: "The native host isn't registered with any browser, so the extension uses the local port. Run `npx mcp-teams setup` to register it." };
+  }
+  const missing = [...new Set(hosts.flatMap((h) => (h.node !== null && h.nodeExists === false ? [h.node] : [])))];
+  if (!missing.length) return { registered };
+  return {
+    registered,
+    nodeMissing: missing,
+    hint: `The native host starts ${missing.join(" and ")}, which no longer exists (moved by nvm or fnm?), so the browser can't start it and the extension uses the local port. Run \`npx mcp-teams setup\` again.`,
+  };
+}
+
 /** Registers the host for every browser whose profile folder exists (setup). */
 export function installNativeHost(o: NativeHostOptions = {}): InstallResult {
   const { home, platform, env } = resolveOptions(o);
