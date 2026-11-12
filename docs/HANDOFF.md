@@ -1,8 +1,35 @@
-# Handoff: mcp-teams after #154 (updated 2026-11-11 on the Windows PC)
+# Handoff: mcp-teams after #158 and #159 (updated 2026-11-12 on the Windows PC)
 
-Repo: GitHub `HeeyunCho/mcp-teams`. PRs 1–4 of #123 (the native-messaging host) are on `main`, all **off by default** (`nativeHost` off). Next is PR 5, which turns it on. The last release is 0.3.66 (`367f198`, #154); 0.3.65 (`6504879`) has #150.
+Repo: GitHub `HeeyunCho/mcp-teams`. PRs 1–4 of #123 (the native-messaging host) are on `main`, all **off by default** (`nativeHost` off). Next is PR 5, which turns it on. The last release is 0.3.69 (`d35759e`, #159); 0.3.68 (`60f005f`) has #158, 0.3.67 (`aa90cf4`) has #157, 0.3.66 (`367f198`) has #154.
 
-## Now (2026-11-11)
+## Now (2026-11-12)
+
+| PR | Change | State |
+|---|---|---|
+| #157 | `npx mcp-teams setup` also registers the `teams` server with **Antigravity CLI**: detected by `~/.gemini/antigravity-cli`, written to `~/.gemini/config/mcp_config.json` (`mcpServers`). `src/clients.ts`, `test/unit/clients.test.ts`, README | Merged as `ee5de35`, released in 0.3.67 (`aa90cf4`) |
+| #158 | Fixes #148: after awaiting `teams.pairingProof(...)`, the challenge branch in `extension/background.js` checks `ws === socket && readyState === OPEN` again before sending `hello`, as the welcome branch already did. Test: the `#148` case in `test/integration/workerConnection.test.ts` | Merged as `4f2fcc3`, released in 0.3.68 (`60f005f`). #148 is closed |
+| #159 | Fixes #156, part of #149: `handshake-closed` in `server.log` also logs `reason`, `ms`, `hello` and `port` (below) | Merged as `b7e7e11`, released in 0.3.69 (`d35759e`). Closes #156. Local: full `npm test` 909 passed; affected files on Node 20.20.2 78/78. CI: gitleaks and test-windows passed; Linux `test` first failed on the #152 rotation race (2999 of 3000), passed on re-run |
+
+### #159, why a handshake was refused
+
+- **Line:** `handshake-closed v=… role=hub code=4401 reason="auth timeout" via=tcp ms=308 hello=none port=53724`. Field order `code reason via ms hello port`.
+- **`reason`:** the reason the hub refused with, recorded by `refuse()` in `src/bridge.ts` (a stalled client never answers the close, so its event would say 1006). `serverLog.ts` checks it against `CLOSE_REASONS` and writes `other` for anything else, so nothing a client sends is logged. `code` is the code the hub refused with; when the client left first, the event's code and `reason=other`.
+- **`ms`:** time since the connection opened. **`hello`:** `hello`, `peer-hello` or `none`. **`port`:** the TCP remote port (none on the socket and native transports).
+- **De-duplication:** an extension retrying a bad token every 30 s still logs once; the change check ignores `ms` and `port`.
+- **Review** (fresh subagents, Standards and Spec): no blockers. Fixed before merge: the unused `native.ts` close-reason change reverted, the duplicate reason check in `bridge.ts` (`closeReason`) removed, the PR body corrected. Posted on #156 as follow-ups:
+  - `"not now"` and `"too slow"` are in `CLOSE_REASONS` but close accepted connections, so they never reach `handshake-closed`;
+  - logging the refusal code loses a stalled worker's `1006`;
+  - slugs instead of quoted reason text would drop `write()`'s special case and decouple the log from the wire text;
+  - `"hello" | "peer-hello" | "none"` is spelled out in both `bridge.ts` and `serverLog.ts`;
+  - a legacy extension that leaves during its 1 s before 4426 logs `reason=other`, undocumented.
+
+### #160, no captured session (Teams tab asleep)
+
+- The hourly Hub health check on 2026-11-12 at 07:51 CET filed #160 (`needs-triage`): first `get_version` said "Browser extension reconnected; try again."; 60 s later the bridge was connected (0.3.66 everywhere, `versionsMatch`), one Teams tab, `sessionCaptured: false`, all four services null, `lastTeamsCall: null`.
+- The note said the tab had made no calls since the extension started watching, so it may be asleep (Chrome's Memory Saver). Likely the same family as #122 and the csa/mt captures below: after an extension reload nothing is captured until the Teams tab makes calls again.
+- To triage: add `teams.cloud.microsoft` to Chrome's "Always keep these sites active", and check whether the health check ran right after an extension reload (`server.log`'s `extension-connected` lines).
+
+## Earlier on 2026-11-11
 
 | PR | Change | State |
 |---|---|---|
@@ -28,10 +55,10 @@ Repo: GitHub `HeeyunCho/mcp-teams`. PRs 1–4 of #123 (the native-messaging host
 - Inferred cause (not proven): slow answers from the real Chrome worker, near the `extension-closed code=1001` closes that come every few minutes.
 - The `account=changed` came from an earlier successful read with no account.
 
-### Open bugs from today
+### Open bugs from 2026-11-11
 
-- **#148** (`needs-triage`): the extension sends `hello` on a socket the hub closed during the pairing proof (`background.js:2138` in 0.3.60, `:2278` on main). Chrome logs "WebSocket is already in CLOSING or CLOSED state". The challenge handler checks `readyState` before awaiting the pairing token and proof. The user saw it again on the Errors page; those entries may be stale (old line numbers) until "Clear all".
-- **#149** (follow-up from #145's review): keep-alive drops write no `hub.log` line. Other system tests on `FAST.keepAliveMs` (200 ms; linger, takeover, `extensionNative`) to audit one by one.
+- **#148:** fixed by #158 (0.3.68), closed. Old entries on the extension's Errors page stay until "Clear all".
+- **#149** (follow-up from #145's review): #159 covers its handshake part. Still open: keep-alive drops write no `hub.log` line. Other system tests on `FAST.keepAliveMs` (200 ms; linger, takeover, `extensionNative`) to audit one by one.
 - **#152** (`bug`, `tests`): `server.log` rotation lost 3 of 3,000 lines on Linux CI with ten processes (`test/system/serverLog.test.ts`). It is the double-rotation window in `rotate()` (`src/hubLog.ts`): a process claims a small file, appends it back, and unlinks the claim after a late line landed in it. The issue lists three possible fixes.
 - **#142** (`needs-triage`): an hourly Hub health report on 2026-11-10 17:44Z, `restartNeeded` with server 0.3.57 running and 0.3.58 on disk. That is the known stale-server case (#111/#96).
 
@@ -111,25 +138,28 @@ Repo: GitHub `HeeyunCho/mcp-teams`. PRs 1–4 of #123 (the native-messaging host
   - Today both were seen captured from the Teams page (`chatsvc`, and `substrate` at 12:49:54Z), but not as this check; `csa`/`mt` were not (see "csa/mt captures" in Now).
 - **#124** (`needs-info`): the extension stayed disconnected while a hub listened. The 2026-11-10 16:45 episode is in Earlier. `server.log` (#147) will show the `handshake-closed` and `extension-*` lines next time.
 - **#111/#96** (`ready-for-human`): close with the native host and launcher (#123, ADR 0002). #142 is another instance.
-- **#148, #149, #152:** see "Open bugs from today" in Now.
-- **Closed:** #76 (#137), #134 (#136), #138 (#144), #143 (#147), #145 (#150), #153 (#154).
+- **#149, #152:** see "Open bugs from 2026-11-11" in Now.
+- **#160** (`needs-triage`): see "#160" in Now.
+- **Closed:** #76 (#137), #134 (#136), #138 (#144), #143 (#147), #145 (#150), #148 (#158), #153 (#154), #156 (#159).
 - **Outlook:** the pipe-name collision for non-ASCII usernames is mcp-newoutlook#178.
 
 ## Next up
 
-1. **The csa/mt capture issue:** read the user's DevTools Network result, then file the issue (hypothesis a or b in Now) and fix it.
-2. **Fixes for #148, #149 and #152.**
+1. **The csa/mt capture issue, with #160:** read the user's DevTools Network result, then file the issue (hypothesis a or b in Now), link #160 to it, and fix it.
+2. **Fixes for #152 and the rest of #149;** the #156 follow-ups from the #159 review.
 3. **#123 PR 5:** turn `nativeHost` on by default, with setup registering by default; `feat!:` → 0.4.0. It waits for the manual checks on Windows and the Mac (including Chrome's permission warning from #146). Read the #123 comments first.
 4. **Versioned launcher (0.5.0, ADR 0002).** Open the issue from the ADR first.
 5. The manual Chrome check on #122; `ready-for-agent` leftovers on #77 and #103 (above).
 
 Run `gh issue list` for the full backlog. #21 and #96 are the umbrella issues that PRs reference as "Part of".
 
-## This Windows PC (checked 2026-11-11)
+## This Windows PC (checked 2026-11-12)
 
 - **Live install:** `C:\Orca_Project\mcp-teams` is the live install. Every session's `teams` server runs its `dist/index.js`, and Chrome's Teams extension loads a copy of its `extension/` folder.
   - Rebuilt on 2026-11-11 at 12:41 on 0.3.65 (`5ef6c32bb59a`). The user then reconnected every session (`C:\PM_HUB_DB` last), restarted Claude Desktop, reloaded the extension and signed in. All 12 servers ran 0.3.65 by 13:05; the hub moved to the NAVERWORKS session (pid 75600).
   - Rebuilt again after #154 at 14:54 on 0.3.66 (`367f198`, build `e06bb586f16f`). All 13 running servers predate it (Claude Code sessions in PM-HUB, Jev-Agentic-Loops, Downloads, system-manager, mcp-atlassian, local-plugins, mcp-teams, mcp-newoutlook, NAVERWORKS (the hub, pid 75600), C:PM_HUB_DB and one more started 14:38; Claude Desktop's two) and need `/mcp` → teams → Reconnect, the hub's session last.
+  - Rebuilt on 2026-11-12 at 11:32 on 0.3.68 (`60f005f`, `npm ci` + `npm run build`, build `cddbbae74f1c`), then `node dist/index.js reload-extension` ("hub restarted"; `~/.mcp-teams/extension` is 0.3.68). All 12 running servers predate it and still ran 0.3.66: Claude Code sessions in PM-HUB, Downloads (two), filemanager, mcp-newoutlook, mcp-teams, MeetNotes, `C:\PM_HUB_DB`, a `claude -p` run, local-plugins (the hub, pid 87248), and Claude Desktop's two. Each needs `/mcp` → teams → Reconnect, local-plugins last. Right after the reload `get_version` showed extension 0.3.68 with `restartNeeded: true` and the status read timed out.
+  - After #159 the checkout was pulled to 0.3.69 (`d35759e`) but **not rebuilt**: `dist/` is 0.3.68 while `extension/manifest.json` says 0.3.69. The next starting server syncs that 0.3.69 extension. Rebuild (`npm ci`, `npm run build`, `node dist/index.js reload-extension`) before reconnecting sessions.
   - **Watch out during hand-overs:** old servers kept taking port 47393 back. A new hub stepped down 0.3.58 hubs about 10 times in 3 s.
   - **Chrome loads the extension from `~/.mcp-teams/extension`,** which a *starting* server syncs from the checkout (`syncExtension` in `src/index.ts`). A rebuild alone doesn't update it. `node dist/index.js reload-extension` syncs it (on this PC it answers "hub restarted"; the extension reloads and reconnects within about 5 s). The `reload_extension` tool only reloads from the copy.
   - **Running servers keep their old code** until each session reconnects with `/mcp`. Reconnect the hub's session last; the hub moves between sessions. To list stale servers, compare each `node … mcp-teams/dist/index.js` process's start time with `dist/index.js`'s write time; `~/.claude/sessions/<parent pid>.json` gives a Claude Code session's folder.
