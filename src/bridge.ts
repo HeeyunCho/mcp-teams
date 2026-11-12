@@ -408,8 +408,8 @@ export type Via = "tcp" | "socket" | "native";
 
 /**
  * The reasons the hub closes a connection with before accepting it, or a peer that is too slow
- * (#156). server.log's handshake-closed names one of these, or "other": the reason a close event
- * carries is the one the client sent back, so its own text is never logged.
+ * (#156). server.log's handshake-closed names the one the hub refused a connection with, or
+ * "other" when the hub didn't refuse it (the client closed first): what a client sends is never logged.
  */
 export const CLOSE_REASONS: ReadonlySet<string> = new Set([
   "auth timeout",
@@ -421,7 +421,7 @@ export const CLOSE_REASONS: ReadonlySet<string> = new Set([
   "too slow",
 ]);
 
-/** A close event's reason (a Buffer from ws, a string from a wrapped transport) as server.log may write it. */
+/** A refusal's reason (a Buffer from ws, a string from a wrapped transport) as server.log may write it. */
 export function closeReason(reason: unknown): string {
   const text = Buffer.isBuffer(reason) ? reason.toString("utf8") : typeof reason === "string" ? reason : "";
   return CLOSE_REASONS.has(text) ? text : "other";
@@ -630,7 +630,7 @@ export class ExtensionBridge {
   private alive = new WeakSet<BridgeSocket>(); // hub: extensions and peers that answered the last ping
   private accepted = new WeakSet<BridgeSocket>(); // hub: connections accepted as an extension or a peer (server.log)
   private unanswered = new WeakSet<BridgeSocket>(); // hub: extensions dropped for not answering a ping (server.log)
-  private refusedWith = new WeakMap<BridgeSocket, string>(); // hub: the reason it turned a connection away with (server.log, #156)
+  private refusedWith = new WeakMap<BridgeSocket, { code: number; reason: string }>(); // hub: how it turned a connection away (server.log, #156)
   private backlogged = new WeakSet<BridgeSocket>(); // hub: peers over maxPeerBufferedBytes at the last tick
   private legacyReloaded = false; // hub: an extension of 0.2.0 or older was told to reload
   private readonly opts: Timings;
@@ -884,11 +884,12 @@ export class ExtensionBridge {
   }
 
   /**
-   * Turns a connection away, remembering why for server.log (#156): the close event carries the
-   * reason the other side sent back, which a stalled client (the auth-timeout case) never sends.
+   * Turns a connection away, remembering how for server.log (#156): the close event carries the
+   * code and reason the other side sent back, which a stalled client (the auth-timeout case) never
+   * sends (its event says 1006), and which a client could set to anything.
    */
   private refuse(ws: BridgeSocket, code: number, reason: string) {
-    this.refusedWith.set(ws, reason);
+    this.refusedWith.set(ws, { code, reason });
     ws.close(code, reason);
   }
 
@@ -947,15 +948,17 @@ export class ExtensionBridge {
       if (this.sockets.has(ws)) this.rejectAll(describeSocketError(err, this.maxMessageBytes), ws);
     });
 
-    ws.on("close", (code?: number, reason?: Buffer | string) => {
+    ws.on("close", (code?: number) => {
       clearTimeout(authTimer);
       this.peers.delete(ws);
       const closing = this.sockets.get(ws);
       // Turned away before it was accepted (bad token, auth timeout, an old extension told to
       // reload, another copy connected, an extension on the host's TCP port): the "waiting for
       // extension" case (#111, #124) would otherwise leave no line. Several share 4401, so it
-      // says which (#156): the reason from CLOSE_REASONS, the time open, and the hello it sent.
-      if (!this.accepted.has(ws)) this.report("handshake-closed", { code, reason: closeReason(this.refusedWith.get(ws) ?? reason), via, ms: Date.now() - openedAt, hello: saw, port });
+      // says which (#156): the code and reason the hub refused it with (the event's code, and
+      // reason "other", when the client left first), the time open, and the hello it sent.
+      const refused = this.refusedWith.get(ws);
+      if (!this.accepted.has(ws)) this.report("handshake-closed", { code: refused?.code ?? code, reason: refused ? closeReason(refused.reason) : "other", via, ms: Date.now() - openedAt, hello: saw, port });
       else if (closing && this.unanswered.has(ws)) this.report("extension-dropped", { reason: "no-pong", transport: closing.transport });
       else if (closing) this.report("extension-closed", { code, transport: closing.transport });
       // A peer that went away can't be told the outcome of its calls: withdraw them.

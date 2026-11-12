@@ -7,7 +7,9 @@
  *
  * Metadata only: event names and values this code chose, versions as version characters, errors by
  * name and code. Never message text, names, tokens, chat ids, regions or the signed-in account (only
- * whether it changed). Every value is cut to a few safe characters, so nothing can forge a line.
+ * whether it changed). Every value is cut to a few safe characters, so nothing can forge a line;
+ * the one exception is handshake-closed's reason, written quoted, and only as one of the bridge's own
+ * fixed close reasons (CLOSE_REASONS) or "other" (#156).
  * States are logged when they change, not on every status read. Logging never throws.
  */
 import { join } from "node:path";

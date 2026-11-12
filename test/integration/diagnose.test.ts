@@ -192,14 +192,26 @@ describe("#156: why a handshake was refused", () => {
     const socket = new WebSocket(`ws://127.0.0.1:${h.port}`, { origin: EXTENSION_ORIGIN });
     socket.on("error", () => {});
     // After the challenge, the next bytes are the hub's close frame: drop the connection without
-    // sending a close back, so the hub's close event carries no reason of its own.
+    // sending a close back, so the hub's close event carries no code or reason of its own (1006).
+    // ws has no public way to stop it answering a close, so this reaches into its socket.
     socket.once("message", () => {
       const raw = (socket as any)._socket;
       raw.removeAllListeners("data");
       raw.once("data", () => raw.destroy());
     });
     const fields = await closed(events);
-    expect(fields).toMatchObject({ reason: "auth timeout", via: "tcp", hello: "none" });
+    expect(fields).toMatchObject({ code: 4401, reason: "auth timeout", via: "tcp", hello: "none" });
+  });
+
+  it("logs reason other when the client closed first, even with one of the hub's own reasons", async () => {
+    h = await bridgeHarness();
+    const { events, diagnose } = recorder();
+    await h.session("1.0.0", { diagnose, authTimeoutMs: 10_000 });
+    const socket = new WebSocket(`ws://127.0.0.1:${h.port}`, { origin: EXTENSION_ORIGIN });
+    socket.on("error", () => {});
+    socket.once("message", () => socket.close(4401, "bad token")); // the client's words, not the hub's
+    const fields = await closed(events);
+    expect(fields).toMatchObject({ code: 4401, reason: "other", via: "tcp", hello: "none" });
   });
 });
 
