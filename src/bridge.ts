@@ -406,6 +406,23 @@ export const OPEN = WebSocket.OPEN;
  */
 export type Via = "tcp" | "socket" | "native";
 
+/**
+ * The reasons the hub closes a connection with before accepting it, or a peer that is too slow
+ * (#156). server.log's handshake-closed names the one the hub refused a connection with, or
+ * "other" when the hub didn't refuse it (the client closed first): what a client sends is never logged.
+ * serverLog checks the reason against this set. "not now" and "too slow" close connections that
+ * were already accepted, so they never reach a handshake-closed line.
+ */
+export const CLOSE_REASONS: ReadonlySet<string> = new Set([
+  "auth timeout",
+  "bad token",
+  "not now",
+  "another copy of the extension is connected",
+  "extension update required",
+  "extensions connect to the native host by native messaging",
+  "too slow",
+]);
+
 /** Where a hub listens, once it listens. */
 export interface BridgeListener {
   /** The TCP port it got (the free one, when asked for port 0); none for a listener without a port. */
@@ -418,9 +435,10 @@ export interface BridgeListener {
 export interface ListenHandlers {
   /**
    * A new connection, not yet authenticated. `via`: the kind of listener that took it. `origin`:
-   * the Origin it sent (none: a local process).
+   * the Origin it sent (none: a local process). `port`: the TCP port it connected from, for
+   * server.log (none on a local socket).
    */
-  connection(conn: BridgeSocket, from: { via: Via; origin?: string }): void;
+  connection(conn: BridgeSocket, from: { via: Via; origin?: string; port?: number }): void;
   /** The listener failed after it started listening. */
   error(err: Error): void;
 }
@@ -464,7 +482,7 @@ export function webSocketTransport({ port, maxMessageBytes }: { port: number; ma
           wss.close();
           reject(err);
         });
-        wss.on("connection", (ws, req) => handlers.connection(ws, { via: "tcp", origin: req.headers.origin }));
+        wss.on("connection", (ws, req) => handlers.connection(ws, { via: "tcp", origin: req.headers.origin, port: req.socket.remotePort }));
       }),
     connect: () => new WebSocket(`ws://127.0.0.1:${port}`, { maxPayload: maxMessageBytes }),
   };
@@ -608,6 +626,7 @@ export class ExtensionBridge {
   private alive = new WeakSet<BridgeSocket>(); // hub: extensions and peers that answered the last ping
   private accepted = new WeakSet<BridgeSocket>(); // hub: connections accepted as an extension or a peer (server.log)
   private unanswered = new WeakSet<BridgeSocket>(); // hub: extensions dropped for not answering a ping (server.log)
+  private refusedWith = new WeakMap<BridgeSocket, { code: number; reason: string }>(); // hub: how it turned a connection away (server.log, #156)
   private backlogged = new WeakSet<BridgeSocket>(); // hub: peers over maxPeerBufferedBytes at the last tick
   private legacyReloaded = false; // hub: an extension of 0.2.0 or older was told to reload
   private readonly opts: Timings;
@@ -860,9 +879,22 @@ export class ExtensionBridge {
     });
   }
 
-  private onConnection(ws: BridgeSocket, { via, origin }: { via: Via; origin?: string }) {
+  /**
+   * Turns a connection away, remembering how for server.log (#156): the close event carries the
+   * code and reason the other side sent back, which a stalled client (the auth-timeout case) never
+   * sends (its event says 1006), and which a client could set to anything.
+   */
+  private refuse(ws: BridgeSocket, code: number, reason: string) {
+    this.refusedWith.set(ws, { code, reason });
+    ws.close(code, reason);
+  }
+
+  private onConnection(ws: BridgeSocket, { via, origin, port }: { via: Via; origin?: string; port?: number }) {
     let authed = false;
-    const authTimer = setTimeout(() => !authed && ws.close(4401, "auth timeout"), this.opts.authTimeoutMs);
+    // For server.log's handshake-closed (#156): how long it was open, and which hello it sent.
+    const openedAt = Date.now();
+    let saw: "hello" | "peer-hello" | "none" = "none";
+    const authTimer = setTimeout(() => !authed && this.refuse(ws, 4401, "auth timeout"), this.opts.authTimeoutMs);
     const challenge = newNonce();
     ws.send(JSON.stringify({ type: "challenge", nonce: challenge }));
 
@@ -875,14 +907,15 @@ export class ExtensionBridge {
       }
       if (!msg || typeof msg !== "object") return;
       if (!authed) {
-        if (msg.type !== "hello" && msg.type !== "peer-hello") return void ws.close(4401, "bad token");
+        if (msg.type !== "hello" && msg.type !== "peer-hello") return void this.refuse(ws, 4401, "bad token");
+        saw = msg.type;
         // The native host takes extensions only on native messaging (or relayed on its socket): on
         // its TCP port it serves peers only (ADR decision 4, #123 decision 9).
         if (via === "tcp" && this.isHost && msg.type === "hello") {
           this.native.onEvent?.("refused", { reason: "extension on the TCP port" });
-          return void ws.close(4403, "extensions connect to the native host by native messaging");
+          return void this.refuse(ws, 4403, "extensions connect to the native host by native messaging");
         }
-        if (via === "native" && msg.type !== "hello") return void ws.close(4401, "bad token");
+        if (via === "native" && msg.type !== "hello") return void this.refuse(ws, 4401, "bad token");
         // Clients up to 0.2.0 send the token itself (peers, or an extension paired by hand).
         // Only on TCP: the bare token, and a proof without the socket label (see ProofRole).
         const proven =
@@ -892,7 +925,7 @@ export class ExtensionBridge {
         if (!proven && !trusted) {
           // Our extension up to 0.2.0 says hello with neither; it is only told to reload.
           if (via === "tcp" && msg.type === "hello" && origin === TRUSTED_EXTENSION_ORIGIN && msg.token == null && msg.proof == null) return this.reloadLegacy(ws);
-          return void ws.close(4401, "bad token");
+          return void this.refuse(ws, 4401, "bad token");
         }
         authed = true;
         clearTimeout(authTimer);
@@ -917,8 +950,11 @@ export class ExtensionBridge {
       const closing = this.sockets.get(ws);
       // Turned away before it was accepted (bad token, auth timeout, an old extension told to
       // reload, another copy connected, an extension on the host's TCP port): the "waiting for
-      // extension" case (#111, #124) would otherwise leave no line.
-      if (!this.accepted.has(ws)) this.report("handshake-closed", { code, via });
+      // extension" case (#111, #124) would otherwise leave no line. Several share 4401, so it
+      // says which (#156): the code and reason the hub refused it with (the event's code, and
+      // reason "other", when the client left first), the time open, and the hello it sent.
+      const refused = this.refusedWith.get(ws);
+      if (!this.accepted.has(ws)) this.report("handshake-closed", { code: refused?.code ?? code, reason: refused?.reason ?? "other", via, ms: Date.now() - openedAt, hello: saw, port });
       else if (closing && this.unanswered.has(ws)) this.report("extension-dropped", { reason: "no-pong", transport: closing.transport });
       else if (closing) this.report("extension-closed", { code, transport: closing.transport });
       // A peer that went away can't be told the outcome of its calls: withdraw them.
@@ -958,7 +994,7 @@ export class ExtensionBridge {
     const ours = origin === TRUSTED_EXTENSION_ORIGIN;
     const others = [...this.sockets].filter(([s]) => s !== ws);
     if (!ours && others.some(([, i]) => i.origin === TRUSTED_EXTENSION_ORIGIN)) {
-      ws.close(4409, "another copy of the extension is connected");
+      this.refuse(ws, 4409, "another copy of the extension is connected");
       return;
     }
     const key = (i: ExtensionInfo) => i.instance ?? `${i.origin}|${i.browser}`;
@@ -1047,7 +1083,7 @@ export class ExtensionBridge {
       this.legacyReloaded = true;
       ws.send(JSON.stringify({ type: "request", id: randomUUID(), method: "reload", params: {}, timeoutMs: 10_000 }));
     }
-    setTimeout(() => ws.close(4426, "extension update required"), 1_000).unref();
+    setTimeout(() => this.refuse(ws, 4426, "extension update required"), 1_000).unref();
   }
 
   private acceptPeer(ws: BridgeSocket, peerVersion: unknown, welcome: object, via: Via) {

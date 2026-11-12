@@ -7,11 +7,13 @@
  *
  * Metadata only: event names and values this code chose, versions as version characters, errors by
  * name and code. Never message text, names, tokens, chat ids, regions or the signed-in account (only
- * whether it changed). Every value is cut to a few safe characters, so nothing can forge a line.
+ * whether it changed). Every value is cut to a few safe characters, so nothing can forge a line;
+ * the one exception is handshake-closed's reason, written quoted, and only as one of the bridge's own
+ * fixed close reasons (CLOSE_REASONS) or "other" (#156).
  * States are logged when they change, not on every status read. Logging never throws.
  */
 import { join } from "node:path";
-import { isLostCall, LOST_CALL, NOT_READ, NOT_SENT } from "./bridge.js";
+import { CLOSE_REASONS, isLostCall, LOST_CALL, NOT_READ, NOT_SENT } from "./bridge.js";
 import { CONFIG_DIR } from "./config.js";
 import { errorFields, hubLog, logVersion, type Log, type LogFields } from "./hubLog.js";
 import type { RestartState } from "./buildInfo.js";
@@ -101,7 +103,18 @@ const FIELDS: Record<string, (v: string) => string> = {
   count: (v) => (/^\d{1,4}$/.test(v) ? v : "-"),
   failures: (v) => (/^\d{1,9}$/.test(v) ? v : "-"), // status reads in a row that failed (#153)
   after: (v) => (/^\d{1,9}$/.test(v) ? v : "-"), // the failures before the read that recovered
+  hello: (v) => (v === "hello" || v === "peer-hello" || v === "none" ? v : "-"), // the hello a refused handshake sent (#156)
+  port: (v) => (/^\d{1,5}$/.test(v) ? v : "-"), // the TCP port a refused handshake came from (#156)
 };
+
+/**
+ * A refused handshake's reason (#156): one of the bridge's own close reasons, quoted (they have
+ * spaces), or other. Checked on the value as given, since safe() would drop the spaces.
+ */
+const handshakeReason = (v: string | number) => (CLOSE_REASONS.has(String(v)) ? `"${v}"` : "other");
+
+/** A refused handshake's fields that differ on every retry: left out when judging whether it changed. */
+const PER_ATTEMPT = new Set(["ms", "port"]);
 
 /**
  * Failed status reads in a row, and slow ones, are logged at the 1st and then every this many (#153):
@@ -168,15 +181,18 @@ export function diagnosticLog(options: DiagnosticLogOptions): DiagnosticLog {
   const write = (event: string, fields: LogFields = {}) => {
     try {
       const out: LogFields = { v: version, role: safe(options.role()) };
-      for (const [k, v] of Object.entries(fields)) if (v !== undefined && Object.hasOwn(FIELDS, k)) out[k] = FIELDS[k](safe(v));
+      for (const [k, v] of Object.entries(fields)) {
+        if (v === undefined || !Object.hasOwn(FIELDS, k)) continue;
+        out[k] = event === "handshake-closed" && k === "reason" ? handshakeReason(v) : FIELDS[k](safe(v));
+      }
       append(EVENT.test(event) ? event : "other", out);
     } catch {
       // logging must never stop the server
     }
   };
   const last = new Map<string, string>(); // event → its last fields, to log a state only when it changes
-  const onChange = (event: string, fields: LogFields) => {
-    const key = JSON.stringify(fields);
+  const onChange = (event: string, fields: LogFields, ignore?: ReadonlySet<string>) => {
+    const key = JSON.stringify(ignore ? Object.fromEntries(Object.entries(fields).filter(([k]) => !ignore.has(k))) : fields);
     if (last.get(event) === key) return;
     last.set(event, key);
     write(event, fields);
@@ -218,8 +234,8 @@ export function diagnosticLog(options: DiagnosticLogOptions): DiagnosticLog {
       if (event === "role" || event === "extension-connected") reconnected = true;
       if (event === "role" || event === "extensions") return onChange(event, fields);
       // An extension with a bad token retries every 30 s: its refusal is logged when it changes,
-      // and again after something connected.
-      if (event === "handshake-closed") return onChange(event, fields);
+      // and again after something connected. Its time open and port differ on every try (#156).
+      if (event === "handshake-closed") return onChange(event, fields, PER_ATTEMPT);
       if (event === "extension-connected") last.delete("handshake-closed");
       write(event, fields);
     },
