@@ -143,10 +143,10 @@ export class NativePort extends EventEmitter implements BridgeSocket {
     queueMicrotask(() => this.readyState === OPEN && this.emit("pong"));
   }
 
-  close(code = 1000, reason?: string): void {
+  close(code = 1000, _reason?: string): void {
     if (this.readyState === CLOSED) return;
     this.readyState = CLOSED;
-    this.emit("close", code, reason);
+    this.emit("close", code);
   }
 
   terminate(): void {

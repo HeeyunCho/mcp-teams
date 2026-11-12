@@ -380,7 +380,7 @@ export function isNewer(a: unknown, b: unknown): boolean {
  * src/bridge.ts BridgeSocket (commit 7ef8ac9), without its binary sends (Teams has no binary path).
  *
  * Events, as the ws WebSocket emits them: "message" (one whole message: Buffer or string),
- * "close" (code, reason), "error" (err; the connection closes afterwards), "ping" (the other side's
+ * "close" (code), "error" (err; the connection closes afterwards), "ping" (the other side's
  * heartbeat, which a peer watches) and "pong" (the answer to ping()).
  */
 export interface BridgeSocket {
@@ -410,6 +410,8 @@ export type Via = "tcp" | "socket" | "native";
  * The reasons the hub closes a connection with before accepting it, or a peer that is too slow
  * (#156). server.log's handshake-closed names the one the hub refused a connection with, or
  * "other" when the hub didn't refuse it (the client closed first): what a client sends is never logged.
+ * serverLog checks the reason against this set. "not now" and "too slow" close connections that
+ * were already accepted, so they never reach a handshake-closed line.
  */
 export const CLOSE_REASONS: ReadonlySet<string> = new Set([
   "auth timeout",
@@ -420,12 +422,6 @@ export const CLOSE_REASONS: ReadonlySet<string> = new Set([
   "extensions connect to the native host by native messaging",
   "too slow",
 ]);
-
-/** A refusal's reason (a Buffer from ws, a string from a wrapped transport) as server.log may write it. */
-export function closeReason(reason: unknown): string {
-  const text = Buffer.isBuffer(reason) ? reason.toString("utf8") : typeof reason === "string" ? reason : "";
-  return CLOSE_REASONS.has(text) ? text : "other";
-}
 
 /** Where a hub listens, once it listens. */
 export interface BridgeListener {
@@ -958,7 +954,7 @@ export class ExtensionBridge {
       // says which (#156): the code and reason the hub refused it with (the event's code, and
       // reason "other", when the client left first), the time open, and the hello it sent.
       const refused = this.refusedWith.get(ws);
-      if (!this.accepted.has(ws)) this.report("handshake-closed", { code: refused?.code ?? code, reason: refused ? closeReason(refused.reason) : "other", via, ms: Date.now() - openedAt, hello: saw, port });
+      if (!this.accepted.has(ws)) this.report("handshake-closed", { code: refused?.code ?? code, reason: refused?.reason ?? "other", via, ms: Date.now() - openedAt, hello: saw, port });
       else if (closing && this.unanswered.has(ws)) this.report("extension-dropped", { reason: "no-pong", transport: closing.transport });
       else if (closing) this.report("extension-closed", { code, transport: closing.transport });
       // A peer that went away can't be told the outcome of its calls: withdraw them.
