@@ -8,7 +8,7 @@
  * their own so the rotation and what a line holds can be tested without a host process.
  */
 import { randomBytes } from "node:crypto";
-import { appendFileSync, mkdirSync, readFileSync, renameSync, statSync, unlinkSync } from "node:fs";
+import { appendFileSync, closeSync, mkdirSync, openSync, renameSync, statSync, unlinkSync } from "node:fs";
 import { dirname } from "node:path";
 
 /** hub.log moves to hub.log.1 once it is larger than this. */
@@ -17,18 +17,23 @@ export const HUB_LOG_MAX_BYTES = 1024 * 1024;
 export type LogFields = Record<string, string | number | undefined>;
 export type Log = (event: string, fields?: LogFields) => void;
 
+/** A rotation lock older than this was left by a process that died while rotating. */
+const STALE_LOCK_MS = 30_000;
+
 /**
  * Moves `file` to `file`.1 once it is larger than maxBytes, safely while other processes append
  * and rotate too (#143: about ten servers share server.log). Renaming straight to .1 could, when
  * two processes saw the big file at once, move the other's fresh small file over the rotated one
- * and lose it. So this first claims the file under a name of its own (only one rename of it can
- * succeed), and moves the claim to .1 only when it is the big file; a small one (another process
- * rotated first) goes back by appending it.
+ * and lose it. So only the process that created `<file>.lock` (exclusively) rotates, and only when
+ * the file is still big under the lock; one that finds the lock taken skips rotating for this line
+ * (a later line tries again). Nothing is copied back or deleted: a line another process writes
+ * late, through the log it opened before the move, lands in the moved file and is kept (#152:
+ * setting a small file aside, appending it back and deleting it lost such lines).
  *
  * When .1 can't be replaced (on Windows, another program such as a virus scanner or a viewer holds
- * it open), the big claim stays as `<file>.<pid>-<random>.rotating` rather than going back: copying
- * a megabyte back would make every following line read and write it again. Such a file is an older
- * part of the log, safe to read or delete.
+ * it open), the big log moves aside as `<file>.<pid>-<random>.rotating` instead, and the live log
+ * starts afresh. Such a file is an older part of the log, safe to read or delete. A lock left by a
+ * process that died while rotating is removed once it is STALE_LOCK_MS old.
  *
  * `seenSize`: the size this process saw (tests: one seen just before another process rotated).
  */
@@ -38,31 +43,33 @@ export function rotate(file: string, maxBytes: number, seenSize?: number) {
   } catch {
     return; // no log yet
   }
-  const claim = `${file}.${process.pid}-${randomBytes(4).toString("hex")}.rotating`;
+  const lock = `${file}.lock`;
   try {
-    renameSync(file, claim);
+    closeSync(openSync(lock, "wx", 0o600));
   } catch {
-    return; // another process moved it first
-  }
-  let big: boolean;
-  try {
-    big = statSync(claim).size > maxBytes;
-  } catch {
-    return; // can't tell: left as the .rotating file, nothing is lost
-  }
-  if (big) {
+    // Another process is rotating, or one died doing so.
     try {
-      renameSync(claim, `${file}.1`);
+      if (Date.now() - statSync(lock).mtimeMs > STALE_LOCK_MS) unlinkSync(lock);
     } catch {
-      // .1 is held: the claim stays aside (see above), and the live log starts afresh
+      // gone already, or can't be removed now: a later line tries again
     }
     return;
   }
   try {
-    appendFileSync(file, readFileSync(claim), { mode: 0o600 });
-    unlinkSync(claim);
+    if (statSync(file).size <= maxBytes) return; // another process rotated first
+    try {
+      renameSync(file, `${file}.1`);
+    } catch {
+      renameSync(file, `${file}.${process.pid}-${randomBytes(4).toString("hex")}.rotating`); // .1 is held
+    }
   } catch {
-    // left as the .rotating file: nothing is lost
+    // can't move it now: it keeps growing until a later line can
+  } finally {
+    try {
+      unlinkSync(lock);
+    } catch {
+      // removed once it is stale
+    }
   }
 }
 
