@@ -1,6 +1,6 @@
 // The native host's log (#123 decision 6): ~/.mcp-teams/hub.log (0600), rotated to hub.log.1
 // once it passes 1 MB, with metadata only (type, method, ok, bytes, ms), never message text.
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync, existsSync } from "node:fs";
+import { closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync, writeSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -84,16 +84,49 @@ describe("#143: rotation with other processes and other programs", () => {
     expect(lineCount(dir)).toBe(100);
   });
 
-  it("puts a small log back when another process rotated first, so its lines stay in the live log", () => {
+  // #152: a process that opened the log before another one's rotation writes its line late, into
+  // whatever file the log was moved to. That file must stay part of the log.
+  it("#152: leaves a small log in place when another process rotated first, with a line written late through a log opened before", () => {
     const dir = tempDir();
     const file = join(dir, "hub.log");
     writeFileSync(`${file}.1`, "x".repeat(2_000)); // the other process's rotation
     writeFileSync(file, "a line written since\n");
+    const late = openSync(file, "a"); // a third process, about to append
     // This process saw the big log just before the other one moved it.
     rotate(file, 1_000, 2_000);
-    expect(readFileSync(file, "utf8")).toBe("a line written since\n");
+    writeSync(late, "a late line\n");
+    closeSync(late);
+    expect(readFileSync(file, "utf8")).toBe("a line written since\na late line\n");
     expect(statSync(`${file}.1`).size).toBe(2_000);
     expect(readdirSync(dir).sort()).toEqual(["hub.log", "hub.log.1"]);
+  });
+
+  it("#152: keeps a line written late into the log this process moved to .1", () => {
+    const dir = tempDir();
+    const file = join(dir, "hub.log");
+    writeFileSync(file, "x".repeat(2_000));
+    const late = openSync(file, "a"); // another process, about to append
+    rotate(file, 1_000);
+    writeSync(late, "a late line\n");
+    closeSync(late);
+    expect(readFileSync(`${file}.1`, "utf8")).toBe(`${"x".repeat(2_000)}a late line\n`);
+    expect(existsSync(file)).toBe(false);
+    expect(readdirSync(dir).sort()).toEqual(["hub.log.1"]);
+  });
+
+  it("#152: skips rotating while another process holds the lock, but not for one that died rotating", () => {
+    const dir = tempDir();
+    const file = join(dir, "hub.log");
+    writeFileSync(file, "x".repeat(2_000));
+    writeFileSync(`${file}.lock`, ""); // another process is rotating
+    rotate(file, 1_000);
+    expect(readdirSync(dir).sort()).toEqual(["hub.log", "hub.log.lock"]);
+    const minuteAgo = new Date(Date.now() - 60_000);
+    utimesSync(`${file}.lock`, minuteAgo, minuteAgo); // it died a minute ago
+    rotate(file, 1_000);
+    rotate(file, 1_000);
+    expect(readdirSync(dir).sort()).toEqual(["hub.log.1"]);
+    expect(statSync(`${file}.1`).size).toBe(2_000);
   });
 });
 

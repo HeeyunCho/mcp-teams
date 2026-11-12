@@ -102,7 +102,7 @@ Repo: GitHub `HeeyunCho/mcp-teams`. PRs 1–4 of #123 (the native-messaging host
 - **Events:** `start`/`exit`, `role`, `handover`, `extension-connected` (with `ext=`), `extension-closed`, `extension-dropped reason=no-pong`, `handshake-closed` (4401/4403/4409/4426), `hub-closed`, `teams` on change (with `stale=`), `restart-needed`, failed tools and tools over 20 s.
 - The hub reads the Teams state in the background every 60 s, so a night with no tool calls still shows the Teams state.
 - Metadata only: fixed fields, each checked against a pattern; no message text, names, tokens or ids.
-- **Rotation** (`src/hubLog.ts`, shared with `hub.log`): each process claims the file before moving it to `.1`. A real race lost lines before (967 of 3,000 kept). A claim that can't replace `.1` (for example antivirus holding it) stays aside as `<file>.<pid>-<random>.rotating`.
+- **Rotation** (`src/hubLog.ts`, shared with `hub.log`): only the process that creates `<file>.lock` exclusively moves the log to `.1` (#152; before that, each process claimed the file and a small claim was appended back, which lost a late line). A real race lost lines before #143 (967 of 3,000 kept). A log that can't replace `.1` (for example antivirus holding it) moves aside as `<file>.<pid>-<random>.rotating`. A lock older than 30 s is treated as left by a dead process and removed.
 - **Follow-ups (not blocking):**
   - clean up old `.rotating` files;
   - a repeated refusal logs once, so "still failing" and "stopped trying" look the same;

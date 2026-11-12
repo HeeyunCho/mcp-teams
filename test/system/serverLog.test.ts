@@ -29,7 +29,8 @@ const run = (args: string[], env: Record<string, string> = {}) =>
 describe("#143: many processes appending to one log", () => {
   // Two processes that see the big file at once both rotate it; renaming straight to .1, the second
   // moved the first's fresh file over the rotated one and lost ~2,000 of these lines (a run on
-  // Windows). Each now claims the file under its own name first (hubLog's rotate).
+  // Windows). Claiming the file under a name of its own first still lost a late line now and then
+  // (#152); now only the process holding <file>.lock rotates (hubLog's rotate).
   it("keeps every line whole and loses none when ten processes cross the size cap together", async () => {
     const dir = tempDir();
     const file = join(dir, "server.log");
