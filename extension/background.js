@@ -2275,6 +2275,7 @@ async function connect() {
         challenged = true;
         if (!secret) return refuse(noPairing);
         const proof = await teams.pairingProof(secret, "client", msg.nonce);
+        if (ws !== socket || socket.readyState !== WebSocket.OPEN) return; // closed or replaced meanwhile: nobody to say hello to
         socket.send(JSON.stringify({ type: "hello", proof, nonce, version: VERSION, browser: browserName(), instance, capabilities: CAPABILITIES }));
       } else if (msg.type === "welcome" && !checking) {
         const who = native ? "The native host" : `The program on port ${port || DEFAULT_PORT}`;
