@@ -141,8 +141,15 @@ export interface BridgeTimings {
   maxMessageBytes?: number;
   /** How often the hub pings each extension (also keeps the MV3 service worker alive) and each peer. */
   keepAliveMs?: number;
-  /** How long a server that is neither hub nor peer waits before trying again. */
+  /**
+   * How long a server that is neither hub nor peer first waits before trying again. The wait
+   * doubles after each failed attempt up to retryMaxMs, with ±50% jitter, and starts again from
+   * this once the server is hub or peer: a dozen servers facing a port held by something else
+   * don't hit it several times a second in lockstep.
+   */
   retryMs?: number;
+  /** The longest wait between those attempts (before jitter). */
+  retryMaxMs?: number;
   /** How long joining an existing hub may take. */
   joinTimeoutMs?: number;
   /** How long a new connection has to prove the token. */
@@ -211,12 +218,15 @@ export interface BridgeOptions extends BridgeTimings, NativeHostOptions {
    * ("extension-closed": code, transport) and the hub's, for a peer ("hub-closed": code).
    */
   diagnose?: DiagnoseEvent;
+  /** The jitter source for the role=none retry, in [0, 1) (default Math.random; tests pin it). */
+  random?: () => number;
 }
 
 export const DEFAULT_BRIDGE_OPTIONS: Readonly<Timings> = Object.freeze({
   maxMessageBytes: MAX_MESSAGE_BYTES,
   keepAliveMs: 20_000,
   retryMs: 2_000,
+  retryMaxMs: 30_000,
   joinTimeoutMs: 3_000,
   authTimeoutMs: 5_000,
   pickStatusTimeoutMs: 3_000,
@@ -617,6 +627,7 @@ export class ExtensionBridge {
   private keepAlive?: NodeJS.Timeout;
   private peerBeat?: NodeJS.Timeout; // hub: pings the peers
   private retry?: NodeJS.Timeout;
+  private retryBackoffMs?: number; // the next role=none wait before jitter; unset: retryMs
   private closed = false;
   private steppingDown = false;
   /** Hub: its session ended and it drains before closing (#112); it starts no new call. */
@@ -632,6 +643,7 @@ export class ExtensionBridge {
   private readonly opts: Timings;
   private readonly native: NativeHostOptions;
   private readonly diagnose?: DiagnoseEvent;
+  private readonly random: () => number;
   private boundPort?: number; // the port it got when it first listened (port 0 picks a free one); kept for later takeovers
 
   /** The 4th argument is the options, or (as before) just the largest message size. */
@@ -642,8 +654,9 @@ export class ExtensionBridge {
     options: BridgeOptions | number = {},
   ) {
     const given: BridgeOptions = typeof options === "number" ? { maxMessageBytes: options } : options;
-    const { hubSocket, hostSocket, socketNeedsProof, features, onExtensionsChange, onEvent, diagnose, ...timings } = given;
+    const { hubSocket, hostSocket, socketNeedsProof, features, onExtensionsChange, onEvent, diagnose, random, ...timings } = given;
     this.diagnose = diagnose;
+    this.random = random ?? Math.random;
     // A key given as undefined keeps its default (spreading it would overwrite the default).
     const defined = Object.fromEntries(Object.entries(timings).filter(([, v]) => v !== undefined));
     this.opts = { ...DEFAULT_BRIDGE_OPTIONS, ...defined };
@@ -742,7 +755,9 @@ export class ExtensionBridge {
     if (await this.join(this.tcpTransport)) return (this.setRole("peer"), this.watchHost());
     this.role = "none";
     clearTimeout(this.retry);
-    this.retry = setTimeout(() => void this.start(), this.opts.retryMs);
+    const backoff = this.retryBackoffMs ?? this.opts.retryMs;
+    this.retryBackoffMs = Math.min(backoff * 2, this.opts.retryMaxMs);
+    this.retry = setTimeout(() => void this.start(), backoff * (0.5 + this.random()));
     this.retry.unref();
   }
 
@@ -755,6 +770,7 @@ export class ExtensionBridge {
   private setRole(role: BridgeRole) {
     this.role = role;
     this.listenError = undefined;
+    this.retryBackoffMs = undefined;
   }
 
   // ------------------------------------------------------------------ hub
