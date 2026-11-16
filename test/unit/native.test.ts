@@ -105,6 +105,36 @@ describe("#123: native framing", () => {
     expect(got).toEqual(["ok", "fine"]);
   });
 
+  it("keeps its place in the stream when onFrame throws: the rest of the chunk waits for the next push", () => {
+    const got: string[] = [];
+    const d = new FrameDecoder((f) => {
+      const s = f.toString("utf8");
+      if (s === "boom") throw new Error("listener failed");
+      got.push(s);
+    });
+    const all = Buffer.concat([encodeFrame("boom"), encodeFrame("after"), encodeFrame("third")]);
+    // One chunk holds "boom", "after" and the start of "third"; the next chunk the rest.
+    const cut = all.length - 3;
+    expect(() => d.push(all.subarray(0, cut))).toThrow("listener failed");
+    d.push(all.subarray(cut));
+    expect(got).toEqual(["after", "third"]);
+  });
+
+  it("keeps byte order when onFrame pushes again: the outer chunk's rest comes before the new bytes", () => {
+    const got: string[] = [];
+    const later = Buffer.concat([encodeFrame("third")]);
+    let pushed = false;
+    const d: FrameDecoder = new FrameDecoder((f) => {
+      got.push(f.toString("utf8"));
+      if (!pushed) {
+        pushed = true;
+        d.push(later);
+      }
+    });
+    d.push(Buffer.concat([encodeFrame("first"), encodeFrame("second")]));
+    expect(got).toEqual(["first", "second", "third"]);
+  });
+
   describe("a 20 MB frame arriving in 64 KB chunks (stdin's read size)", () => {
     afterEach(() => vi.restoreAllMocks());
 
@@ -149,8 +179,8 @@ describe("#123: native framing", () => {
       expect(got).toHaveLength(2);
       expect(got[0].equals(payload)).toBe(true);
       expect(got[1].toString("utf8")).toBe("next");
-      // Linear: each byte is copied a small, fixed number of times (once is the minimum).
-      expect(copied).toBeLessThanOrEqual(3 * all.length);
+      // Each payload byte is copied once (#168); only the 4-byte headers may be copied besides.
+      expect(copied).toBeLessThanOrEqual(all.length);
     });
   });
 
