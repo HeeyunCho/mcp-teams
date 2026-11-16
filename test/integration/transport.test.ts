@@ -149,10 +149,11 @@ describe("the role=none retry", () => {
     for (const ms of [1_000, 2_000, 4_000, 8_000, 8_000, 8_000]) await nextAfter(ms);
   });
 
-  it("puts up to 50% jitter either way on each wait", async () => {
-    // Waits of 1, 2, 4 and 8 s; random 0 -> 0.5x, 0.75 -> 1.25x, 1 -> 1.5x, 0.25 -> 0.75x
-    const { nextAfter } = await heldBridge([0, 0.75, 1, 0.25]);
-    for (const ms of [500, 2_500, 6_000, 6_000]) await nextAfter(ms);
+  it("puts up to 50% jitter either way on each wait, never past retryMaxMs", async () => {
+    // Waits of 1, 2, 4, 8 and 8 s; random 0 -> 0.5x, 0.75 -> 1.25x, 0.99 -> 1.49x, 0.25 -> 0.75x,
+    // and 0.9 -> 1.4x, which would be 11.2 s, so the cap: 8 s.
+    const { nextAfter } = await heldBridge([0, 0.75, 0.99, 0.25, 0.9]);
+    for (const ms of [500, 2_500, 5_960, 6_000, 8_000]) await nextAfter(ms);
   });
 
   it("caps the wait at 30 s by default", () => {

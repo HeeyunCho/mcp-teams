@@ -757,7 +757,8 @@ export class ExtensionBridge {
     clearTimeout(this.retry);
     const backoff = this.retryBackoffMs ?? this.opts.retryMs;
     this.retryBackoffMs = Math.min(backoff * 2, this.opts.retryMaxMs);
-    this.retry = setTimeout(() => void this.start(), backoff * (0.5 + this.random()));
+    // ±50% jitter, so a dozen servers don't retry in step; no wait exceeds retryMaxMs (#171).
+    this.retry = setTimeout(() => void this.start(), Math.min(backoff * (0.5 + this.random()), this.opts.retryMaxMs));
     this.retry.unref();
   }
 
