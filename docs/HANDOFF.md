@@ -1,8 +1,15 @@
-# Handoff: mcp-teams after #163 (updated 2026-11-12 evening on the Windows PC)
+# Handoff: mcp-teams after #166 (updated 2026-11-16 on the Windows PC)
 
-Repo: GitHub `HeeyunCho/mcp-teams`. PRs 1–4 of #123 (the native-messaging host) are on `main`, all **off by default** (`nativeHost` off). Next is PR 5, which turns it on. The last release is 0.3.70 (`d5cacdd`, #163); 0.3.69 (`d35759e`) has #159, 0.3.68 (`60f005f`) has #158, 0.3.67 (`aa90cf4`) has #157, 0.3.66 (`367f198`) has #154.
+Repo: GitHub `HeeyunCho/mcp-teams`. PRs 1–4 of #123 (the native-messaging host) are on `main`, all **off by default** (`nativeHost` off). Next is PR 5, which turns it on. The last release is 0.3.71 (`9bf7434`, #165 and #166, dependency bumps only); 0.3.70 (`d5cacdd`) has #163, 0.3.69 (`d35759e`) has #159, 0.3.68 (`60f005f`) has #158, 0.3.67 (`aa90cf4`) has #157, 0.3.66 (`367f198`) has #154.
 
-## Now (2026-11-12)
+## Now (2026-11-16)
+
+| PR | Change | State |
+|---|---|---|
+| #166 | Dependabot: `hono` 4.13.13 → 4.13.18 (lockfile only; it comes in through `@modelcontextprotocol/sdk`). Closes Dependabot alerts #8–#12 (`csrf()` and `text/ping`, `mount()` path bypass, `css` helper escaping, RegExpRouter wildcard middleware, `validator('form')` with multipart) | Merged as `b76983d`. Its Version bump run failed by design: #165 had merged meanwhile, so the atomic push was refused and #165's run released both |
+| #165 | Dependabot: `@hono/node-server` 2.1.4 → 2.1.8 (lockfile only, same path). Closes Dependabot alerts #6–#7 (backslash read as a path separator, unhandled `ECONNRESET` during a WebSocket upgrade) | Merged as `425dddb`, released in 0.3.71 (`9bf7434`, tag `v0.3.71`, on npm) by `version.yml`. No Dependabot alerts open after it |
+
+## Earlier on 2026-11-12
 
 | PR | Change | State |
 |---|---|---|
@@ -152,7 +159,7 @@ Repo: GitHub `HeeyunCho/mcp-teams`. PRs 1–4 of #123 (the native-messaging host
 
 ## Next up
 
-1. **Get every server onto 0.3.70** (see "This Windows PC"): rebuild, `reload-extension`, then a full restart of each session (`/mcp` → Reconnect did not replace any process on 2026-11-12), Claude Desktop last. Then check `server.log` for the first `handshake-closed` lines with `reason`/`ms`/`hello`/`port` (written only by a hub of 0.3.69 or later).
+1. **Get every server onto 0.3.71** (see "This Windows PC"): rebuild, `reload-extension`, then a full restart of each session (`/mcp` → Reconnect did not replace any process on 2026-11-12), Claude Desktop last. Then check `server.log` for the first `handshake-closed` lines with `reason`/`ms`/`hello`/`port` (written only by a hub of 0.3.69 or later).
 2. **The rest of #149** (keep-alive drops leave no `hub.log` line; the system tests on the 200 ms test heartbeat), the #156 follow-ups from the #159 review, and the #152 follow-ups from #163.
 3. **Worker restarts emptying the captures** (Now, "#160"): open an issue if it should be worked on.
 4. **#123 PR 5:** turn `nativeHost` on by default, with setup registering by default; `feat!:` → 0.4.0. It waits for the manual checks on Windows and the Mac (including Chrome's permission warning from #146). Read the #123 comments first.
@@ -170,6 +177,7 @@ Run `gh issue list` for the full backlog. #21 and #96 are the umbrella issues th
   - Rebuilt on 2026-11-12 at 13:48 on 0.3.69 (`f4324ad`, build `e691dd5ba895`), then `reload-extension`; `~/.mcp-teams/extension` is 0.3.69. The 0.3.69 reload made the hub change hands twice in a second (12:48:38Z, `hub-closed code=1012`); Claude Desktop's 0.3.68 server (pid 105344) ended up as hub again.
   - **The user's `/mcp` → teams → Reconnect in every session (about 14:00) replaced no process:** the same pids ran on, with no new `start` line in `server.log`. At about 15:00 all 14 servers were older than the build: the hub 105344 (0.3.68, Desktop), two `claude -p` runs on 0.3.68 logging `restart-needed onDisk=0.3.69`, and 0.3.66 for the rest (PM-HUB, Downloads, filemanager, local-plugins, mcp-newoutlook, mcp-teams, MeetNotes, `C:\PM_HUB_DB`, Desktop's pid 8380, two more `claude -p` runs). Restart each session fully instead (or check whether `/mcp` offers a restart), Claude Desktop last.
   - **After #163 the checkout was pulled to 0.3.70 (`d5cacdd`) but not rebuilt:** `dist/` is 0.3.69 while `extension/manifest.json` says 0.3.70. Rebuild (`npm ci`, `npm run build`, `node dist/index.js reload-extension`) before restarting sessions.
+  - Rebuilt on 2026-11-16 at 12:34 CET on 0.3.71 (`9bf7434`, `npm ci` + `npm run build`, build `cd024402cd0a`; `hono` 4.13.18, `@hono/node-server` 2.1.8), then `node dist/index.js reload-extension` ("hub restarted"); the extension came back as 0.3.71 at 11:38:40Z. All 12 running servers predate the build and still run 0.3.70. **The hub is the `mcp-atlassian` Claude Code session (pid 60680), not Claude Desktop.** The others: Claude Code in local-plugins, PM-HUB, NAVERWORKS, `C:\PM_HUB_DB`, everything-compare, mcp-newoutlook and mcp-teams; Claude Desktop's two (7944, 44968); a `claude -p` run under a non-interactive PowerShell (36424); and a pm-hub-sync `claude -p` run (64328). Restart each one fully, the hub's session last.
   - **Watch out during hand-overs:** old servers kept taking port 47393 back. A new hub stepped down 0.3.58 hubs about 10 times in 3 s.
   - **Chrome loads the extension from `~/.mcp-teams/extension`,** which a *starting* server syncs from the checkout (`syncExtension` in `src/index.ts`). A rebuild alone doesn't update it. `node dist/index.js reload-extension` syncs it (on this PC it answers "hub restarted"; the extension reloads and reconnects within about 5 s). The `reload_extension` tool only reloads from the copy.
   - **Running servers keep their old code** until each session reconnects with `/mcp`. Reconnect the hub's session last; the hub moves between sessions. To list stale servers, compare each `node … mcp-teams/dist/index.js` process's start time with `dist/index.js`'s write time; `~/.claude/sessions/<parent pid>.json` gives a Claude Code session's folder.
