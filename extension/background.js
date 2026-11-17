@@ -1218,10 +1218,11 @@ async function sharepointGet(url, ctx = null) {
   return sendTo(gateKey("sharepoint", origin), await guarded(findTab(), ctx), findTab, url, "GET", {}, null, ctx, true);
 }
 
-// "<accountKey of chatsvc>\n<transcript URL>" -> parsed transcript; a finished transcript doesn't
-// change, but what one user may read isn't another's. Bounded by size: each counts the length
-// of the response text it was parsed from, least recently used out first, and one longer than
-// the cap isn't kept at all.
+// "<accountKey of chatsvc>\n<transcript URL>" -> slim transcript (teams.slimTranscript: only the
+// entries' text, speaker, offsets and language, #178); a finished transcript doesn't change, but
+// what one user may read isn't another's. Bounded by size: each counts the UTF-8 bytes of the
+// strings it keeps plus a fixed cost per entry, about what it takes on the heap; least recently
+// used out first, and one bigger than the cap isn't kept at all.
 const TRANSCRIPTS_MAX_BYTES = 8 * 1024 * 1024;
 const transcripts = new teams.ByteCache(TRANSCRIPTS_MAX_BYTES);
 
@@ -1236,11 +1237,11 @@ async function transcriptOf(info, session, ctx = null) {
     throw new Error(`The transcript of "${info.title}" (${session.start}) is no longer available to you (HTTP ${res.status}): the organizer may have deleted it or not shared it.`);
   }
   if (res.status >= 400) throw new Error(`OneDrive HTTP ${res.status} while reading the transcript.`);
-  const json = JSON.parse(res.text);
+  const { transcript, bytes } = teams.slimTranscript(JSON.parse(res.text));
   // Not kept for an account that signed in while it was read.
-  if (key !== `${accountKey(await getCapture("chatsvc")) ?? ""}\n${session.transcriptUrl}`) return json;
-  transcripts.set(key, json, res.text.length);
-  return json;
+  if (key !== `${accountKey(await getCapture("chatsvc")) ?? ""}\n${session.transcriptUrl}`) return transcript;
+  transcripts.set(key, transcript, bytes);
+  return transcript;
 }
 
 /** A meeting chat by id, title or subject. */
