@@ -248,6 +248,8 @@ const TRAFFIC_ONLY_TYPES = ["websocket", "ping"];
  * The traffic log hears these types too, so api_traffic shows a feature that talks over them, and
  * the wss:// URLs Chrome reports handshakes under (#200). Only the handshake or beacon is seen, never
  * what a socket carries; a handshake's onCompleted, if Chrome reports one, gives its status (101).
+ * A socket opened before recording started (trouter opens at page load) is never seen: anything
+ * sent over it later leaves no request here.
  */
 const trafficFilter = { urls: [...teams.TRAFFIC_URLS, ...teams.TRAFFIC_WS_URLS], types: ["xmlhttprequest", "other", "media", ...TRAFFIC_ONLY_TYPES] };
 
