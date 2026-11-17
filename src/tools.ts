@@ -215,7 +215,7 @@ export function registerTools(server: McpServer, bridge: ExtensionBridge, config
         transport: bridge.extension ? (bridge.extension.transport ?? "websocket") : null,
         // #123 decision 11: with "nativeHost": true, which browsers have the host registered, and
         // whether the Node its launcher starts has gone (nvm, fnm): then setup must run again.
-        ...(config.nativeHost ? { nativeHost: nativeHostReport(options.nativeHost) } : {}),
+        ...(config.nativeHost ? { nativeHost: await nativeHostReport(options.nativeHost) } : {}),
         // The port the bridge uses (with port 0 configured, the free one it got).
         port: bridge.port,
         teams,

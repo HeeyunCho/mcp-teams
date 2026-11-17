@@ -3,8 +3,14 @@
 import { closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync, writeSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { errorFields, HUB_LOG_MAX_BYTES, hubLog, logVersion, rotate, trafficLogger } from "../../src/hubLog.js";
+
+// The real fs, with the calls the logger makes counted (#170: not three blocking calls a line).
+vi.mock("node:fs", async (importOriginal) => {
+  const fs = await importOriginal<typeof import("node:fs")>();
+  return { ...fs, mkdirSync: vi.fn(fs.mkdirSync), statSync: vi.fn(fs.statSync) };
+});
 
 const dirs: string[] = [];
 afterEach(() => {
@@ -15,6 +21,11 @@ const tempDir = () => {
   dirs.push(d);
   return d;
 };
+
+const lineCount = (dir: string) =>
+  readdirSync(dir)
+    .filter((f) => f.startsWith("hub.log") && statSync(join(dir, f)).isFile())
+    .reduce((n, f) => n + readFileSync(join(dir, f), "utf8").split("\n").filter(Boolean).length, 0);
 
 describe("#123: hub.log", () => {
   it("writes one line per event: time, pid, event, then its fields", () => {
@@ -67,11 +78,6 @@ describe("#123: hub.log", () => {
 });
 
 describe("#143: rotation with other processes and other programs", () => {
-  const lineCount = (dir: string) =>
-    readdirSync(dir)
-      .filter((f) => f.startsWith("hub.log") && statSync(join(dir, f)).isFile())
-      .reduce((n, f) => n + readFileSync(join(dir, f), "utf8").split("\n").filter(Boolean).length, 0);
-
   it("while .1 can't be replaced (held open by another program), leaves the rotated log aside once instead of copying it back on every line", () => {
     const dir = tempDir();
     const file = join(dir, "hub.log");
@@ -127,6 +133,44 @@ describe("#143: rotation with other processes and other programs", () => {
     rotate(file, 1_000);
     expect(readdirSync(dir).sort()).toEqual(["hub.log.1"]);
     expect(statSync(`${file}.1`).size).toBe(2_000);
+  });
+});
+
+describe("#170: fewer blocking file calls a line", () => {
+  const callsOn = (fn: unknown, path: string) => vi.mocked(fn as (p: string) => unknown).mock.calls.filter(([p]) => p === path).length;
+
+  it("makes its folder once and checks the log's size far less than once a line", () => {
+    const dir = join(tempDir(), "home");
+    const file = join(dir, "hub.log");
+    const log = hubLog(file);
+    vi.mocked(mkdirSync).mockClear();
+    vi.mocked(statSync).mockClear();
+    for (let i = 0; i < 100; i++) log("line", { i });
+    expect(callsOn(mkdirSync, dir)).toBe(1);
+    expect(callsOn(statSync, file)).toBeLessThanOrEqual(5);
+    expect(readFileSync(file, "utf8").split("\n").filter(Boolean)).toHaveLength(100);
+  });
+
+  it("rotates within 50 lines once another process grew the log past the cap", () => {
+    const dir = tempDir();
+    const file = join(dir, "hub.log");
+    const log = hubLog(file, 10_000);
+    log("first");
+    writeFileSync(file, `${"x".repeat(99)}\n`.repeat(200), { flag: "a" }); // another process's 200 lines, 20 KB
+    for (let i = 0; i < 50; i++) log("line", { i });
+    expect(statSync(`${file}.1`).size).toBeGreaterThan(20_000);
+    expect(statSync(file).size).toBeLessThan(10_000);
+    expect(lineCount(dir)).toBe(1 + 200 + 50);
+  });
+
+  it("makes its folder again when it was removed while the logger lived", () => {
+    const dir = join(tempDir(), "home");
+    const file = join(dir, "hub.log");
+    const log = hubLog(file);
+    log("before");
+    rmSync(dir, { recursive: true });
+    log("after");
+    expect(readFileSync(file, "utf8")).toMatch(/^\S+ pid=\d+ after\n$/);
   });
 });
 

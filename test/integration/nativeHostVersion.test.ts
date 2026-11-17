@@ -45,9 +45,9 @@ const bridge = {
   call: () => Promise.reject(new Error("No Teams tab is open.")),
 } as unknown as Parameters<typeof registerTools>[1];
 
-async function version(nativeHost: boolean) {
+async function version(nativeHost: boolean, read: Parameters<typeof installNativeHost>[0] = where()) {
   const server = new McpServer({ name: "mcp-teams", version: "0.0.0" });
-  registerTools(server, bridge, { port: 0, token: TOKEN, nativeHost }, { nativeHost: where() });
+  registerTools(server, bridge, { port: 0, token: TOKEN, nativeHost }, { nativeHost: read });
   client = new Client({ name: "test", version: "0.0.0" });
   const [a, b] = InMemoryTransport.createLinkedPair();
   await Promise.all([server.connect(a), client.connect(b)]);
@@ -83,6 +83,19 @@ describe("#123: get_version and the native host's registration", () => {
       nodeMissing: [node],
       hint: `The native host starts ${node}, which no longer exists (moved by nvm or fnm?), so the browser can't start it and the extension uses the local port. Run \`npx mcp-teams setup\` again.`,
     });
+  });
+
+  // #180: on Windows the HKCU keys are read through reg.exe without blocking the hub's event loop,
+  // so the read answers later; get_version waits for it and reports the same.
+  it("#180: on, Windows: waits for a registry read that answers later", async () => {
+    const env = { USERPROFILE: home, LOCALAPPDATA: join(home, "AppData", "Local") };
+    mkdirSync(join(home, "AppData", "Local", "Google", "Chrome", "User Data"), { recursive: true });
+    const keys = new Map<string, string>();
+    const reg = (args: string[]) => void (args[0] === "add" && keys.set(args[1], args[6]));
+    installNativeHost({ home, platform: "win32", env, node: fakeNode(), hubScript: hub, reg });
+    mkdirSync(join(home, "AppData", "Local", "Microsoft", "Edge", "User Data"), { recursive: true }); // after setup: no key
+    const regQuery = (key: string) => new Promise<string | null>((resolve) => setTimeout(() => resolve(keys.get(key) ?? null), 20));
+    expect((await version(true, { home, platform: "win32", env, regQuery })).nativeHost).toMatchObject({ registered: ["Chrome"], keyMissing: ["Edge"] });
   });
 
   it("#123: on, registered nowhere: says setup registers it", async () => {
