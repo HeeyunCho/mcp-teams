@@ -18,7 +18,6 @@
   "permissions": [
     "storage",
     "scripting",
-    "tabs",
     "webRequest",
     "alarms",
     "nativeMessaging"
@@ -28,20 +27,7 @@
     "https://teams.microsoft.com/*",
     "https://*.ng.msg.teams.microsoft.com/*",
     "https://substrate.office.com/*",
-    "https://*.cloud.microsoft/*",
-    "https://*.microsoft.com/*",
-    "https://*.office.com/*",
-    "https://*.office.net/*",
-    "https://*.sharepoint.com/*",
-    "https://*.svc.ms/*",
-    "https://*.skype.com/*",
-    "wss://*.cloud.microsoft/*",
-    "wss://*.microsoft.com/*",
-    "wss://*.office.com/*",
-    "wss://*.office.net/*",
-    "wss://*.sharepoint.com/*",
-    "wss://*.svc.ms/*",
-    "wss://*.skype.com/*"
+    "https://*.sharepoint.com/*"
   ],
   "action": {
     "default_title": "mcp-teams",
