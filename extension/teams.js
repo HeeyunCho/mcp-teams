@@ -1136,13 +1136,32 @@ export function transcriptLines(json, { fromSeconds = 0 } = {}) {
   return lines.map((l) => `[${l.at}] ${l.who}: ${l.text}`);
 }
 
+/** A string's length in UTF-8 bytes (a lone surrogate counts 2, not the 3 of its U+FFFD). */
+function utf8Bytes(s) {
+  let n = s.length;
+  for (let i = 0; i < s.length; i++) {
+    const c = s.charCodeAt(i);
+    if (c >= 0x80) n += c >= 0x800 && (c < 0xd800 || c > 0xdfff) ? 2 : 1;
+  }
+  return n;
+}
+
+/**
+ * What a slim transcript entry costs beyond its strings' UTF-8 bytes: the object, its string
+ * headers and its slot in the array. Measured at about 110-120 bytes on Node's heap (64-bit
+ * pointers), which is more than Chrome's compressed pointers need, so it errs high (#178).
+ */
+const TRANSCRIPT_ENTRY_BYTES = 128;
+
 /**
  * What transcriptLines, transcriptSpeakers, searchTranscript and read_transcript's language read
  * of a transcript, in the same shape: each entry's text, speaker and offsets, and the first
  * spokenLanguageTag on its entry. Stream's other fields (ids, confidence, ...) are dropped (#178).
+ * `bytes` is its size: the UTF-8 bytes of the strings it keeps, plus TRANSCRIPT_ENTRY_BYTES per entry.
  */
 export function slimTranscript(json) {
   const entries = [];
+  let bytes = 0;
   let language = false;
   for (const e of json?.entries ?? []) {
     const slim = {};
@@ -1153,9 +1172,11 @@ export function slimTranscript(json) {
       slim.spokenLanguageTag = String(e.spokenLanguageTag);
       language = true;
     }
+    bytes += TRANSCRIPT_ENTRY_BYTES;
+    for (const v of Object.values(slim)) bytes += utf8Bytes(v);
     entries.push(slim);
   }
-  return { transcript: { entries }, bytes: 0 };
+  return { transcript: { entries }, bytes };
 }
 
 /** Speakers of a transcript with how long each spoke, most first. */
