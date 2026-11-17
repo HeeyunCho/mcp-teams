@@ -73,17 +73,58 @@ export function rotate(file: string, maxBytes: number, seenSize?: number) {
   }
 }
 
-/** A logger appending to `file`. Logging never throws: a log it can't write must not stop the host. */
+/** A logger checks the log's real size at least once every this many lines, to notice other processes' lines. */
+const STAT_EVERY_LINES = 50;
+
+/**
+ * A logger appending to `file`. Logging never throws: a log it can't write must not stop the host.
+ *
+ * #170: a line is one blocking file call, not three. The folder is made on the first line, and
+ * again only after an append finds it gone. The log's size is kept in memory (the size last read
+ * plus this logger's own bytes since), and read again only once that passes maxBytes or every
+ * STAT_EVERY_LINES lines, so lines other processes appended are noticed too. The estimate only
+ * saves a stat: rotate() still re-checks the real size under the lock (#152/#163).
+ */
 export function hubLog(file: string, maxBytes = HUB_LOG_MAX_BYTES): Log {
+  let dirMade = false;
+  let size = 0; // estimated
+  let linesSinceStat = STAT_EVERY_LINES; // read the size on the first line
+  const realSize = () => {
+    linesSinceStat = 0;
+    try {
+      return statSync(file).size;
+    } catch {
+      return 0; // no log yet, or moved by another process
+    }
+  };
+  const makeDir = () => {
+    mkdirSync(dirname(file), { recursive: true, mode: 0o700 });
+    dirMade = true;
+  };
   return (event, fields = {}) => {
     try {
-      mkdirSync(dirname(file), { recursive: true, mode: 0o700 });
-      rotate(file, maxBytes);
+      if (!dirMade) makeDir();
+      if (size > maxBytes || linesSinceStat >= STAT_EVERY_LINES) {
+        size = realSize();
+        if (size > maxBytes) {
+          rotate(file, maxBytes, size);
+          size = realSize();
+        }
+      }
       const extra = Object.entries(fields)
         .filter(([, v]) => v !== undefined)
         .map(([k, v]) => `${k}=${v}`)
         .join(" ");
-      appendFileSync(file, `${new Date().toISOString()} pid=${process.pid} ${event}${extra ? ` ${extra}` : ""}\n`, { mode: 0o600 });
+      const line = `${new Date().toISOString()} pid=${process.pid} ${event}${extra ? ` ${extra}` : ""}\n`;
+      try {
+        appendFileSync(file, line, { mode: 0o600 });
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+        makeDir(); // the folder was removed since
+        appendFileSync(file, line, { mode: 0o600 });
+      }
+      size += Buffer.byteLength(line);
+      linesSinceStat++;
     } catch {
       // logging must never stop the host
     }
