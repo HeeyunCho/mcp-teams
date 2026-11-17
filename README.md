@@ -36,6 +36,8 @@ A conversation can be given as an id (`19:…`), as `Team/Channel`, as a chat ti
 
 Meeting data comes from the meeting chat. Teams posts an event there for each call, saying who joined and when, and a message for each recording and transcript. Transcripts are stored in the organizer's OneDrive, so `read_transcript` reads them with your SharePoint sign-in in a SharePoint tab. If none is open, it opens your OneDrive in a pinned background tab. You can read the transcripts of meetings you were invited to, as in Teams. There is one only when someone turned on transcription in the meeting.
 
+`search_transcripts` searches up to 20 meetings (`meetings`, default 10), newest first, and makes at most 100 Teams requests per call: meeting chat pages and transcripts, not counting what it already has cached. Across meetings it reads only the newest 5 pages of each meeting chat, where the latest calls are; a chat longer than that is listed in `chatsCut`. A search of one meeting (`meeting`) reads its chat as far as `get_meeting` does. When the 100 requests run out, the result has `stoppedBy: "budget"`, says how many meetings (`notSearched`) or transcripts (`transcriptsNotSearched`) weren't searched, and returns the matches found so far. Searching again within a minute gets further, because what the first search read is cached.
+
 Teams reports the call's length, not each person's time in it, so attendance lists who joined. Meeting chats of another organization's meetings (`external: true`) usually can't be read once you've left, which is how Teams works too.
 
 ### Compared with Microsoft's Microsoft 365 connector for Claude
