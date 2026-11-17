@@ -470,6 +470,16 @@ describe("traffic log", () => {
   });
 });
 
+// Chrome reports a request to a webRequest listener only on a host the extension has permission for,
+// so every pattern the traffic log listens on is also a host permission (#200: the wss:// ones too).
+describe("#200: the manifest's host permissions", () => {
+  it("cover every pattern the traffic log listens on, https:// and wss://", () => {
+    const { host_permissions } = JSON.parse(readFileSync("extension/manifest.json", "utf8"));
+    expect(teams.TRAFFIC_WS_URLS).toContain("wss://*.microsoft.com/*");
+    expect(host_permissions).toEqual(expect.arrayContaining([...teams.TRAFFIC_URLS, ...teams.TRAFFIC_WS_URLS]));
+  });
+});
+
 describe("versions", () => {
   const read = (f: string) => JSON.parse(readFileSync(f, "utf8"));
 
