@@ -98,7 +98,7 @@ describe("#103: the Teams tab's last calls", () => {
     at("2026-10-01T10:00:00Z");
     await teamsCalls(fake, "https://config.teams.microsoft.com/config/v1/fictional");
     at("2026-10-01T10:00:05Z");
-    await fake.fire("beforeSendHeaders", { url: "https://go.trouter.teams.microsoft.com/v4/c", type: "websocket" });
+    await fake.fire("beforeSendHeaders", { url: "wss://go.trouter.teams.microsoft.com/v4/c", type: "websocket" });
     await fake.fire("beforeSendHeaders", {
       url: `${BASES.chatsvc}/v1/fictional/beacon`,
       method: "POST",
