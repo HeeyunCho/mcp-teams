@@ -1,4 +1,4 @@
-# Handoff: mcp-teams after #175, the 2026-11-17 triage, the closure audit and the #22/#23/#35 rechecks (updated 2026-11-17 on the Windows PC)
+# Handoff: mcp-teams after #175, the 2026-11-17 triage, the closure audit and the rechecks of #22, #23, #35, #21, #111, #96 and #122 (updated 2026-11-17 on the Windows PC)
 
 Repo: GitHub `HeeyunCho/mcp-teams`. PRs 1–4 of #123 (the native-messaging host) are on `main`, all **off by default** (`nativeHost` off). Next is PR 5, which turns it on. The last release is 0.3.72 (`71f49e2`, #174 and #175); 0.3.71 (`9bf7434`) has #165 and #166 (dependency bumps only), 0.3.70 (`d5cacdd`) has #163, 0.3.69 (`d35759e`) has #159, 0.3.68 (`60f005f`) has #158, 0.3.67 (`aa90cf4`) has #157, 0.3.66 (`367f198`) has #154.
 
@@ -64,6 +64,20 @@ Labels and comments only, no code. Each issue was checked against `main` at 0.3.
   - **#23:** the harness's freePort race is done (#43). Its three concrete items moved to **#185** (`tests`, `ready-for-agent`): `scripts/measure-memory.mjs:244-252` still picks a port and frees it, no load loop is committed or documented, and the Node 20 `readMessagesCut` flake. Kept in #23: which Node versions CI runs, and live checks of chatsvc message ids and channel features.
   - **#35:** the main item (#41) and items A and E are done; #86 also did `waitForCapture`'s listeners after a cancel without saying so. Its concrete leftovers moved to five `ready-for-agent` issues: **#186** (tests: queued turns through a hub restart, peer drops and rejoins, a closed last Teams tab), **#187** (tests: deterministic heartbeat and fair-share tests, tidier send-window and worker tests), **#188** (`send-safety`: not-sent reporting and wording), **#189** (extension worker: name lookups, `waitForCapture`'s unhandled rejection, the 401 tab, `pageFetch`'s origin check) and **#190** (measure-memory leftovers, a worker-cache heap check, `docs/testing.md` gaps). Kept in #35, needing a decision: items C and D, positional parameters (the `sendTo` part is #183), the `tooLarge` cast, the duplicated 2 s floor, the `lostCall` source-scan blind spots, a dropped peer's slots freed early, `hubTurn`'s single `resume`, item F, and three concrete items whose right change isn't clear.
   - **#25** lists #22, #23, #35, #183 and #185–#190 under "Older follow-ups rechecked against 0.3.72".
+- **#22's concrete items are now #192** (`send-safety`, `tests`, `ready-for-agent`):
+  - two missing peer tests;
+  - the "(unknown)" refusal at `src/bridge.ts:1572-1573`, which must stay a "nothing was sent" refusal;
+  - one version parser instead of the `x.y.z` regex written out three times;
+  - the refusal naming the browser;
+  - test tidying (the tests should import the existing `MIN_SEND_EXTENSION`).
+
+  Gap 2 and the `hubInfo` question stay in #22.
+- **#21, #111, #96 and #122 rechecked against 0.3.72** ([#21](https://github.com/HeeyunCho/mcp-teams/issues/21#issuecomment-6944021813), [#111](https://github.com/HeeyunCho/mcp-teams/issues/111#issuecomment-6944022775), [#96](https://github.com/HeeyunCho/mcp-teams/issues/96#issuecomment-6944023424), [#122](https://github.com/HeeyunCho/mcp-teams/issues/122#issuecomment-6944024021)). All four stay open and `ready-for-human`.
+  - **#21:** the ADRs, the handshake (#115), hub draining (#112) and #123 PRs 1–4 are done. New finding, filed as **#193** (`bug`, `ready-for-agent`): over TCP, one oversized answer fails every call on that extension or peer. There's no size check before the WebSocket send (`extension/background.js:2306`; the native path has one since `702669a`), and the bridge calls `rejectAll` (`src/bridge.ts:961`, and `:1432` on a peer). It goes with #169, since lowering the limit makes it likelier. Also left: #123 PR 5's manual checks, no issue yet for the ADR 0002 launcher, and whether to drop the idea of gating send safety on a declared feature.
+  - **#111:** it happened again on 0.3.72 today (`restart-needed v=0.3.71 onDisk=0.3.72` at 06:59:39Z; 0.3.70/0.3.71 servers passed the hub around until their sessions ended, the last at 09:21:48Z), but Teams stayed reachable. A hub still hands over only to a newer x.y.z version (`src/bridge.ts:1129`). It needs #123 PR 5 and the launcher, then one release watched recovering on its own.
+  - **#96:** detection and the reported version are done (#97). Nothing triggers a takeover after a pull or build, and takeovers compare x.y.z only (`src/bridge.ts:375`). This also needs #123 PR 5 and the launcher.
+  - **#122:** #129 is done. Only the user's manual Chrome check is left. As partial evidence, `get_version` on 0.3.72 shows all four services captured, and since #129 only the Teams page can set them.
+  - **#25** lists all of these, with #192 and #193, under "Older follow-ups rechecked against 0.3.72".
 - **Repo tidy:** Dependabot #166 had merged on 2026-11-16, but its branch `dependabot/npm_and_yarn/hono-4.13.18` was left on origin. Its head (`8b43592`) is in `main`, so the branch was deleted (it can be restored from #166). origin now has only `main`. Locally, the `wt-diag` scratchpad worktree and the five merged `worktree-agent-*` branches were removed.
 
 ## Earlier on 2026-11-16
@@ -212,14 +226,15 @@ Labels and comments only, no code. Each issue was checked against `main` at 0.3.
 - **#77** (`ready-for-agent`, [rechecked 2026-11-17](https://github.com/HeeyunCho/mcp-teams/issues/77#issuecomment-6943292684)): two item 1 leftovers (a cursor carries no account; a switch before the first page isn't caught) and three #141 test nits (7/7c race a real 1 s Retry-After if the process stalls over 1 s; the 2b `setTimeout` spy matches exactly 1000 ms; `requestWithTurn` has no `deadline`).
 - **#183** (`ready-for-human`, split out of #77): the unsure guard copied at four send paths, the hand-kept `READS` list, `sendTo`'s 12 parameters, and `OLD_TOKEN_WINDOW_MS` also setting how long the unsure state lasts.
 - **#103** (`ready-for-human` since 2026-11-17, [checklist](https://github.com/HeeyunCho/mcp-teams/issues/103#issuecomment-6943293165)): the three leftovers are done (#139). Still open: refactor notes from the #107 review (the `getVersion` test setup duplicated, now in four test files; `{at, host}` spelled out in five places, including `src/serverLog.ts`; the "signed in" rule copied, `teamsCalls` naming three things) and behaviour notes (the 5-minute gap in the stuck rule, background-tab calls counting as Teams-tab calls).
-- **#22** (`ready-for-human`): **gap 2 needs your decision** (fail a replaced connection's calls at once, or give them a grace period); see "#22, #23 and #35 rechecked" in Now.
+- **#22** (`ready-for-human`): **gap 2 needs your decision** (fail a replaced connection's calls at once, or give them a grace period); see "#22, #23 and #35 rechecked" in Now. Its concrete items are #192 (`ready-for-agent`).
 - **#23** and **#35** (`ready-for-human`): only decision and live-check items are left; their concrete work is #185 and #186–#190 (`ready-for-agent`).
-- **#122** (`ready-for-human`): only the manual Chrome check after #129 is left:
+- **#21** (`ready-for-human`, the Phase 4 umbrella): left are #123 PR 5, the launcher issue to open, and the send-safety gating question. **#193** (`ready-for-agent`): over TCP, one oversized answer fails every call on the connection; do it with or before #169.
+- **#122** (`ready-for-human`, rechecked 2026-11-17): only the user's manual Chrome check after #129 is left:
   1. run `api_traffic` with `record: true`, use Teams search for a minute, call `api_traffic` again;
   2. confirm `substrate` and `chatsvc` are still captured. Close #122 once it passes.
   - Today both were seen captured from the Teams page (`chatsvc`, and `substrate` at 12:49:54Z), but not as this check; `csa`/`mt` were not (see "csa/mt captures" in Now).
 - **#124** (`needs-info`): the extension stayed disconnected while a hub listened. The 2026-11-10 16:45 episode is in Earlier. The short 0.3.72 drop and what's still needed are in "Triage round" in Now.
-- **#111/#96** (`ready-for-human`): close with the native host and launcher (#123, ADR 0002). #142 (`ready-for-human`) is another instance and collects the health check's reports.
+- **#111/#96** (`ready-for-human`, rechecked 2026-11-17): close with the native host and launcher (#123, ADR 0002). #111 happened again on 0.3.72 today without taking Teams down. #142 (`ready-for-human`) is another instance and collects the health check's reports.
 - **#162** (`ready-for-human`): no Teams capture for about 29 min on 0.3.72; see "Triage round" in Now.
 - **#149, #170, #172** (`ready-for-agent`): see "Triage round" in Now. **#182** (`ready-for-agent`): event-loop delay logging for #173's cause-unknown items.
 - **#173** (`ready-for-human`, the audit's tracking issue): its low findings are split into #177–#180 (`ready-for-agent`). **#169** (`ready-for-agent`, reopened; see "Triage round"): the 256 MB limit is unchanged. #168's 64 MiB (done) and #169 matter before `nativeHost` is on by default.
@@ -230,11 +245,11 @@ Labels and comments only, no code. Each issue was checked against `main` at 0.3.
 
 1. **Get every server onto 0.3.72** (see "This Windows PC"): rebuild, `reload-extension`, then a full restart of each session (`/mcp` → Reconnect did not replace any process on 2026-11-12), Claude Desktop last. Then check `server.log` for the first `handshake-closed` lines with `reason`/`ms`/`hello`/`port` (written only by a hub of 0.3.69 or later).
 2. **The rest of #149** (keep-alive drops leave no `hub.log` line; the system tests on the 200 ms test heartbeat), the #156 follow-ups from the #159 review, and the #152 follow-ups from #163.
-3. **The audit's `ready-for-agent` fixes:** #170, #172, #177–#180 (split out of #173) and #182 (event-loop delay logging). Settle #169's 256 MB limit before #123 PR 5.
+3. **The audit's `ready-for-agent` fixes:** #170, #172, #177–#180 (split out of #173) and #182 (event-loop delay logging). Settle #169's 256 MB limit before #123 PR 5, together with #193 (an oversized answer over TCP failing every call).
 4. **Worker restarts emptying the captures** (Now, "#160"): open an issue if it should be worked on.
 5. **#123 PR 5:** turn `nativeHost` on by default, with setup registering by default; `feat!:` → 0.4.0. It waits for the manual checks on Windows and the Mac (including Chrome's permission warning from #146). Read the #123 comments first.
 6. **Versioned launcher (0.5.0, ADR 0002).** Open the issue from the ADR first.
-7. The manual Chrome check on #122; the `ready-for-agent` leftovers on #77, #185 and #186–#190; the `ready-for-human` decisions on #103, #183, #22's gap 2, #23 and #35 (above).
+7. The manual Chrome check on #122; the `ready-for-agent` leftovers on #77, #185, #186–#190 and #192; the `ready-for-human` decisions on #103, #183, #22's gap 2, #23 and #35 (above).
 
 Run `gh issue list` for the full backlog. #21 and #96 are the umbrella issues that PRs reference as "Part of".
 
