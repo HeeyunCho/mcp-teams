@@ -247,6 +247,10 @@ function recordRequest(details) {
   if (!teams.isTeamsOrigin(details.initiator)) return;
   const entry = teams.summarizeRequest(details);
   updateTraffic((list) => teams.recordTraffic(list, entry), { ifRecording: true });
+  // Not a last call (#200): a trouter WebSocket opens once and stays open, and a beacon is
+  // fire-and-forget, often sent as the page goes away, so neither on its own says the tab is active.
+  // The last calls keep counting only the types they counted before.
+  if (details.type === "websocket" || details.type === "ping") return;
   return noteCall(details);
 }
 
