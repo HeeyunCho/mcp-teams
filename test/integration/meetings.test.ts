@@ -226,6 +226,62 @@ describe("meeting chat read once per call", () => {
   });
 });
 
+describe("#178: the transcript cache keeps only what the tools read, and counts that", () => {
+  /** As Stream writes it: ids, a confidence and the language on each entry, and Alex speaking three entries in a row. */
+  const streamTranscript = (extra: Record<string, unknown> = {}) => ({
+    $schema: "http://stream.office.com/schemas/transcript.json",
+    version: "1.0.0",
+    type: "Transcript",
+    entries: ["Alex Doe", "Alex Doe", "Alex Doe", "Sam Roe", "Alex Doe", "Sam Roe"].map((who, i) => ({
+      id: `3c4d5e6f-0000-4000-8000-000000000001/${i + 17}-0`,
+      speechServiceResultId: `0000000${i}-1111-4222-8333-444444444444`,
+      text: `${i === 4 ? "The budget" : "The plan"} for point ${i} is still open.`,
+      speakerId: "00000000-0000-4000-8000-00000000000a@00000000-0000-4000-8000-0000000000ff",
+      speakerDisplayName: who,
+      confidence: 0.9123456,
+      startOffset: `${hms(i * 10)}.4000000`,
+      endOffset: `${hms(i * 10 + 9)}.1000000`,
+      hasBeenEdited: false,
+      roleId: `0000000${i}-aaaa-4bbb-8ccc-dddddddddddd`,
+      spokenLanguageTag: "en-us",
+    })),
+    ...extra,
+  });
+  const transcriptReads = (fake: { sent: SentRequest[] }) => fake.sent.filter((r) => r.service === "sharepoint").length;
+
+  it("#178: read_transcript (with a from inside one speaker's run) and search_transcripts answer the same cold and warm", async () => {
+    const services = { csa: csaWith(1), chatsvc: chatsvcWith(1), sharepoint: () => streamTranscript() };
+    const reads = [
+      ["readTranscript", { meeting: meetingId(1) }],
+      ["readTranscript", { meeting: meetingId(1), from: "00:00:10" }],
+      ["searchTranscripts", { query: "budget", meeting: meetingId(1) }],
+    ] as const;
+    // Cold: each read on a fresh worker, so the transcript comes from OneDrive.
+    const cold = [];
+    for (const [method, params] of reads) cold.push(await (await loadWorker(createFakeChrome({ services }))).handlers[method](params));
+    // Warm: one worker; the first read fills the cache, and the reads after it come from there.
+    const fake = createFakeChrome({ services });
+    const worker = await loadWorker(fake);
+    await worker.handlers.readTranscript({ meeting: meetingId(1) });
+    const warm = [];
+    for (const [method, params] of reads) warm.push(await worker.handlers[method](params));
+    expect(transcriptReads(fake)).toBe(1);
+    expect(warm).toEqual(cold);
+    expect(cold[1].transcript.split("\n")[0]).toBe("[00:00:10] Alex Doe: The plan for point 1 is still open. The plan for point 2 is still open.");
+    expect(cold[0].language).toBe("en-us");
+    expect(cold[2].results[0].matches).toEqual([{ before: "[00:00:30] Sam Roe: The plan for point 3 is still open.", line: "[00:00:40] Alex Doe: The budget for point 4 is still open." }]);
+  });
+
+  it("#178: a transcript whose response is over the 8 MB cap only by what isn't kept (events) is cached", async () => {
+    const big = streamTranscript({ events: [{ id: "e1", eventType: "Started", userDisplayName: "x".repeat(9 * 1024 * 1024) }] });
+    const fake = createFakeChrome({ services: { csa: csaWith(1), chatsvc: chatsvcWith(1), sharepoint: () => big } });
+    const worker = await loadWorker(fake);
+    await worker.handlers.readTranscript({ meeting: meetingId(1) });
+    await worker.handlers.readTranscript({ meeting: meetingId(1), from: "00:00:20" });
+    expect(transcriptReads(fake)).toBe(1);
+  });
+});
+
 describe("3.4: the transcript cache is bounded by bytes", () => {
   const MB = 1024 * 1024;
   /** Meeting n's transcript, padded to about `size` characters of JSON. */
