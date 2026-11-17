@@ -94,3 +94,50 @@ describe("3.4: the traffic log records only while api_traffic turned it on", () 
     expect(await next.chrome.storage.session.get("traffic")).toEqual({});
   });
 });
+
+// #200: the Teams tab also opens WebSockets (trouter) and sends beacons (navigator.sendBeacon, Chrome's
+// "ping" type). Chrome reports a request to a webRequest listener only if the filter's types include its
+// type, and a WebSocket handshake under its wss:// URL, which an https:// pattern doesn't match.
+describe("#200: the traffic log records the Teams tab's websocket and ping requests", () => {
+  const SOCKET = "wss://go.trouter.teams.microsoft.com/v4/c";
+  const BEACON = "https://teams.cloud.microsoft/api/fictional/beacon";
+
+  it("a websocket and a ping from the Teams tab are recorded while recording is on, with their type", async () => {
+    const fake = createFakeChrome();
+    const worker = await loadWorker(fake);
+    worker.registerListeners();
+    await worker.handlers.apiTraffic({ record: true });
+    await fake.fire("beforeSendHeaders", { url: SOCKET, type: "websocket" });
+    await fake.fire("beforeSendHeaders", { url: BEACON, method: "POST", type: "ping" });
+    const r = await worker.handlers.apiTraffic({});
+    expect(r).toMatchObject({ recording: true, recorded: 2 });
+    expect(r.requests).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ method: "GET", host: "go.trouter.teams.microsoft.com", path: "/v4/c", type: "websocket" }),
+        expect.objectContaining({ method: "POST", host: "teams.cloud.microsoft", path: "/api/fictional/beacon", type: "ping" }),
+      ]),
+    );
+  });
+
+  it("a websocket handshake's status (101) is recorded when Chrome reports it completed", async () => {
+    const fake = createFakeChrome();
+    const worker = await loadWorker(fake);
+    worker.registerListeners();
+    await worker.handlers.apiTraffic({ record: true });
+    await fake.fire("beforeSendHeaders", { url: SOCKET, type: "websocket" });
+    await fake.fire("completed", { url: SOCKET, type: "websocket", statusCode: 101 });
+    expect((await worker.handlers.apiTraffic({})).requests).toEqual([expect.objectContaining({ host: "go.trouter.teams.microsoft.com", type: "websocket", status: 101 })]);
+  });
+
+  // The Teams-origin gate stays (#122): Outlook on the web's sockets and beacons are not Teams'.
+  it("a websocket or ping from another origin is not recorded", async () => {
+    const fake = createFakeChrome();
+    const worker = await loadWorker(fake);
+    worker.registerListeners();
+    await worker.handlers.apiTraffic({ record: true });
+    const initiator = "https://outlook.office.com";
+    await fake.fire("beforeSendHeaders", { url: "wss://substrate.office.com/fictional/socket", type: "websocket", initiator });
+    await fake.fire("beforeSendHeaders", { url: "https://outlook.office.com/fictional/beacon", method: "POST", type: "ping", initiator });
+    expect(await worker.handlers.apiTraffic({})).toMatchObject({ recording: true, recorded: 0 });
+  });
+});

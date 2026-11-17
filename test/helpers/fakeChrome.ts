@@ -270,12 +270,17 @@ export function createFakeChrome({ services = {}, captured = [...TEAMS_SERVICES]
 
   const windowRemoved = event<(windowId: number) => void>();
   const runtimeMessage = event<(msg: any, sender: any, sendResponse: (r: unknown) => void) => unknown>();
-  const webRequestBefore: { fn: Fn; patterns: RegExp[] }[] = [];
-  const webRequestCompleted: { fn: Fn; patterns: RegExp[] }[] = [];
-  type WebRequestDetails = { url: string; method?: string; initiator?: string; requestHeaders?: { name: string; value: string }[]; statusCode?: number };
+  /** A webRequest listener: its URL patterns and, if its filter gives them, the request types it hears (#200). */
+  type WebRequestListener = { fn: Fn; patterns: RegExp[]; types?: string[] };
+  const webRequestBefore: WebRequestListener[] = [];
+  const webRequestCompleted: WebRequestListener[] = [];
+  const webRequestListener = (fn: Fn, filter: { urls: string[]; types?: string[] }): WebRequestListener => ({ fn, patterns: filter.urls.map(patternToRegExp), types: filter.types });
+  type WebRequestDetails = { url: string; method?: string; type?: string; initiator?: string; requestHeaders?: { name: string; value: string }[]; statusCode?: number };
+  /** Reports a request, as Chrome does, only to listeners whose filter matches its URL and its type (when the filter gives types). */
   async function fireWebRequest(kind: "beforeSendHeaders" | "completed", details: WebRequestDetails) {
     const list = kind === "completed" ? webRequestCompleted : webRequestBefore;
-    for (const l of list) if (l.patterns.some((p) => p.test(details.url))) await l.fn({ method: "GET", requestHeaders: [], type: "xmlhttprequest", initiator: TEAMS_ORIGIN, ...details });
+    const full = { method: "GET", requestHeaders: [], type: "xmlhttprequest", initiator: TEAMS_ORIGIN, ...details };
+    for (const l of list) if (l.patterns.some((p) => p.test(full.url)) && (!l.types || l.types.includes(full.type))) await l.fn(full);
   }
 
   const tabUpdated = event<(tabId: number, change: { status?: string; url?: string }, tab: Tab) => void>();
@@ -379,8 +384,8 @@ export function createFakeChrome({ services = {}, captured = [...TEAMS_SERVICES]
       onInstalled: event(),
     },
     webRequest: {
-      onBeforeSendHeaders: { addListener: (fn: Fn, filter: { urls: string[] }) => void webRequestBefore.push({ fn, patterns: filter.urls.map(patternToRegExp) }) },
-      onCompleted: { addListener: (fn: Fn, filter: { urls: string[] }) => void webRequestCompleted.push({ fn, patterns: filter.urls.map(patternToRegExp) }) },
+      onBeforeSendHeaders: { addListener: (fn: Fn, filter: { urls: string[]; types?: string[] }) => void webRequestBefore.push(webRequestListener(fn, filter)) },
+      onCompleted: { addListener: (fn: Fn, filter: { urls: string[]; types?: string[] }) => void webRequestCompleted.push(webRequestListener(fn, filter)) },
     },
     storage: { session: storageArea("session", session), local: storageArea("local", local), onChanged: storageChanged },
     tabs: { query: spies.tabsQuery, get: spies.tabsGet, create: spies.tabsCreate, reload: spies.tabsReload, remove: spies.tabsRemove, onUpdated: tabUpdated, onRemoved: tabRemoved },

@@ -847,6 +847,9 @@ export const TRAFFIC_URLS = [
   "https://*.skype.com/*",
 ];
 
+/** The same hosts for WebSocket handshakes, which Chrome reports under their wss:// URL (#200). */
+export const TRAFFIC_WS_URLS = TRAFFIC_URLS.map((u) => u.replace(/^https:/, "wss:"));
+
 const TEAMS_ORIGIN = /^https:\/\/(teams\.cloud\.microsoft|teams\.microsoft\.com)$/i;
 
 /** Whether a request comes from the Teams web app (its page or its workers). */
