@@ -51,4 +51,29 @@ describe("an answer over the limit, over TCP (#193)", () => {
     await expect(people).resolves.toMatchObject({ people: [{ name: "Alex Doe" }] });
     expect(hub.extensions).toHaveLength(1);
   }, 15_000);
+
+  it("a peer: an answer over the limit the peer declared fails only that call, too large; its other call and another peer's carry on", async () => {
+    h = await bridgeHarness(BIG);
+    const hub = await h.session();
+    // readMessages answers with 32 KB; the others answer when the test lets them go.
+    const held: (() => void)[] = [];
+    await h.extension({
+      handle: (req) =>
+        req.method === "readMessages" ? { messages: ["x".repeat(32 * 1024)] } : new Promise((r) => held.push(() => r({ from: "Chrome", method: req.method }))),
+    });
+    const small = await h.session("1.0.0", { maxMessageBytes: LIMIT });
+    const other = await h.session();
+    await until(() => small.connected && other.connected, 3_000, "both peers see the extension");
+
+    const mine = small.call("listChats", {}, 30_000);
+    const theirs = other.call("listTeams", {}, 30_000);
+    mine.catch(() => {}); // awaited below
+    theirs.catch(() => {});
+    await until(() => held.length === 2, 3_000, "both peers' calls reach the extension");
+    await expect(small.call("readMessages", {}, 30_000)).rejects.toThrow(/^The answer was too large to pass on to this session \(.* KB; the limit is 16 KB\)\. Nothing else was affected\./);
+    for (const letGo of held) letGo();
+    await expect(mine).resolves.toEqual({ from: "Chrome", method: "listChats" });
+    await expect(theirs).resolves.toEqual({ from: "Chrome", method: "listTeams" });
+    expect(hub.inFlight).toEqual({ pending: 0, peerCalls: 0 });
+  }, 15_000);
 });
