@@ -17,6 +17,7 @@ import { CLOSE_REASONS, isLostCall, LOST_CALL, NOT_READ, NOT_SENT } from "./brid
 import { CONFIG_DIR } from "./config.js";
 import { errorFields, hubLog, logVersion, type Log, type LogFields } from "./hubLog.js";
 import type { RestartState } from "./buildInfo.js";
+import type { LoopDelay, LoopDelayMonitor } from "./loopDelay.js";
 import { IDLE_MS, isMissingSession } from "./sessionNote.js";
 
 /** Where every server logs: next to config.json (TEAMS_MCP_HOME moves both, for tests). */
@@ -65,6 +66,12 @@ export interface DiagnosticLogOptions {
   slowToolMs?: number;
   slowStatusMs?: number;
   maxBytes?: number;
+  /**
+   * This server's event-loop delay (#182): a failed or slow status read's line gives it for the
+   * window since the watch's last tick (watchState resets it there). For the watch's own read that
+   * is the read itself; for get_version's read, the time since the last tick, up to a period.
+   */
+  loopDelay?: LoopDelayMonitor;
 }
 
 /** A value as server.log writes it: word characters and `.,:-` only, at most 48. */
@@ -105,6 +112,9 @@ const FIELDS: Record<string, (v: string) => string> = {
   after: (v) => (/^\d{1,9}$/.test(v) ? v : "-"), // the failures before the read that recovered
   hello: (v) => (v === "hello" || v === "peer-hello" || v === "none" ? v : "-"), // the hello a refused handshake sent (#156)
   port: (v) => (/^\d{1,5}$/.test(v) ? v : "-"), // the TCP port a refused handshake came from (#156)
+  eld: (v) => (/^\d{1,9}$/.test(v) ? v : "-"), // event-loop delay, p99 ms (#182)
+  eldMax: (v) => (/^\d{1,9}$/.test(v) ? v : "-"), // event-loop delay, max ms
+  elu: (v) => (/^\d{1,3}$/.test(v) ? v : "-"), // event-loop utilisation, %
 };
 
 /**
@@ -171,6 +181,9 @@ function readFailureKind(err: unknown): "timeout" | "closed" | "not-connected" |
   return "error";
 }
 
+/** A loop-delay window as server.log's fields (#182). */
+const delayFields = (d: LoopDelay): LogFields => ({ eld: d.p99Ms, eldMax: d.maxMs, elu: d.elu });
+
 /** LOST_CALL.timedOut's text before and after the method's name. */
 const TIMED_OUT = LOST_CALL.timedOut("\u0000").split("\u0000") as [string, string];
 
@@ -224,6 +237,14 @@ export function diagnosticLog(options: DiagnosticLogOptions): DiagnosticLog {
       return "error";
     }
   };
+  // The loop's delay since the watch's last tick, without starting a new window (#182).
+  const loopDelayNow = (): LogFields => {
+    try {
+      return options.loopDelay ? delayFields(options.loopDelay.read()) : {};
+    } catch {
+      return {};
+    }
+  };
 
   return {
     start: (fields = {}) => write("start", { ...fields, node: process.version }),
@@ -259,7 +280,7 @@ export function diagnosticLog(options: DiagnosticLogOptions): DiagnosticLog {
           const logged = failures === 1 || failures % REPEAT_EVERY === 0 || last.get("teams") !== key || reconnected;
           last.set("teams", key);
           reconnected = false;
-          if (logged) write("teams", { status: "unreadable", kind, ms, failures });
+          if (logged) write("teams", { status: "unreadable", kind, ms, failures, ...loopDelayNow() });
           return;
         }
         const after = failures || undefined; // the read that recovers says how many failed before it
@@ -286,7 +307,7 @@ export function diagnosticLog(options: DiagnosticLogOptions): DiagnosticLog {
         const slowLine = slow && (slowReads === 1 || slowReads % REPEAT_EVERY === 0);
         if (last.get("teams") === key && !changedAccount && !after && !slowLine) return;
         last.set("teams", key);
-        write("teams", { ...state, account: accountField, ms, slow: slow ? "yes" : undefined, after });
+        write("teams", { ...state, account: accountField, ms, slow: slow ? "yes" : undefined, after, ...(slow ? loopDelayNow() : {}) });
       } catch {
         // a status of an unexpected shape is not worth a crash
       }
