@@ -3,7 +3,7 @@
 // reach the native host: the hub socket, or on Windows a named pipe per user (decision 10).
 // Ported from mcp-newoutlook test/unit/native.test.ts (commit 7ef8ac9).
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   CHUNK_DATA_BYTES,
   encodeFrame,
@@ -63,6 +63,125 @@ describe("#123: native framing", () => {
     d.push(Buffer.concat([big.subarray(200), encodeFrame('{"type":"ping"}')]));
     expect(over).toEqual([big.length - 4]);
     expect(got).toEqual([{ type: "ping" }]);
+  });
+
+  it("decodes a length header split after 1, 2 or 3 bytes", () => {
+    for (const cut of [1, 2, 3]) {
+      const got: string[] = [];
+      const d = new FrameDecoder((f) => got.push(f.toString("utf8")));
+      const frame = encodeFrame('{"type":"ping"}');
+      d.push(frame.subarray(0, cut));
+      expect(got).toEqual([]);
+      d.push(frame.subarray(cut));
+      expect(got).toEqual(['{"type":"ping"}']);
+    }
+  });
+
+  it("decodes a frame that ends mid-chunk, with the next frame's start in the same chunk", () => {
+    const got: string[] = [];
+    const d = new FrameDecoder((f) => got.push(f.toString("utf8")));
+    const all = Buffer.concat([encodeFrame('{"a":1}'), encodeFrame('{"b":"two"}'), encodeFrame('{"c":3}')]);
+    // Chunk 1 holds part of frame 1; chunk 2 ends inside frame 2's payload; chunk 3 ends inside frame 3's header.
+    const cuts = [5, 4 + 7 + 4 + 3, 4 + 7 + 4 + 11 + 2, all.length];
+    let at = 0;
+    for (const cut of cuts) d.push(all.subarray(at, (at = cut)));
+    expect(got).toEqual(['{"a":1}', '{"b":"two"}', '{"c":3}']);
+  });
+
+  it("decodes a zero-length frame", () => {
+    const got: Buffer[] = [];
+    const d = new FrameDecoder((f) => got.push(f));
+    d.push(Buffer.concat([encodeFrame(""), encodeFrame("x"), encodeFrame("")]));
+    expect(got.map((f) => f.toString("utf8"))).toEqual(["", "x", ""]);
+  });
+
+  it("skips oversize frames whose headers and bodies arrive in pieces, and decodes the frames between and after them", () => {
+    const got: string[] = [];
+    const over: number[] = [];
+    const d = new FrameDecoder((f) => got.push(f.toString("utf8")), 10, (n) => over.push(n));
+    const all = Buffer.concat([encodeFrame("a".repeat(50)), encodeFrame("ok"), encodeFrame("b".repeat(11)), encodeFrame("fine")]);
+    for (let i = 0; i < all.length; i += 3) d.push(all.subarray(i, i + 3));
+    expect(over).toEqual([50, 11]);
+    expect(got).toEqual(["ok", "fine"]);
+  });
+
+  it("keeps its place in the stream when onFrame throws: the rest of the chunk waits for the next push", () => {
+    const got: string[] = [];
+    const d = new FrameDecoder((f) => {
+      const s = f.toString("utf8");
+      if (s === "boom") throw new Error("listener failed");
+      got.push(s);
+    });
+    const all = Buffer.concat([encodeFrame("boom"), encodeFrame("after"), encodeFrame("third")]);
+    // One chunk holds "boom", "after" and the start of "third"; the next chunk the rest.
+    const cut = all.length - 3;
+    expect(() => d.push(all.subarray(0, cut))).toThrow("listener failed");
+    d.push(all.subarray(cut));
+    expect(got).toEqual(["after", "third"]);
+  });
+
+  it("keeps byte order when onFrame pushes again: the outer chunk's rest comes before the new bytes", () => {
+    const got: string[] = [];
+    const later = Buffer.concat([encodeFrame("third")]);
+    let pushed = false;
+    const d: FrameDecoder = new FrameDecoder((f) => {
+      got.push(f.toString("utf8"));
+      if (!pushed) {
+        pushed = true;
+        d.push(later);
+      }
+    });
+    d.push(Buffer.concat([encodeFrame("first"), encodeFrame("second")]));
+    expect(got).toEqual(["first", "second", "third"]);
+  });
+
+  describe("a 20 MB frame arriving in 64 KB chunks (stdin's read size)", () => {
+    afterEach(() => vi.restoreAllMocks());
+
+    it("is decoded intact, copying its bytes a bounded number of times rather than once per chunk", () => {
+      const size = 20 * 1024 * 1024;
+      const payload = Buffer.alloc(size);
+      for (let i = 0; i < size; i += 4096) payload[i] = (i / 4096) & 0xff;
+      const all = Buffer.concat([encodeFrame(payload), encodeFrame("next")]);
+      const got: Buffer[] = [];
+      const d = new FrameDecoder((f) => got.push(f));
+
+      // Count the bytes copied through Buffer's copying APIs.
+      let copied = 0;
+      const concat = Buffer.concat;
+      vi.spyOn(Buffer, "concat").mockImplementation((list: readonly Uint8Array[], total?: number) => {
+        const out = concat(list, total);
+        copied += out.length;
+        return out;
+      });
+      const copy = Buffer.prototype.copy;
+      vi.spyOn(Buffer.prototype as { copy(...args: unknown[]): number }, "copy").mockImplementation(function (this: Buffer, ...args: unknown[]) {
+        const n = copy.apply(this, args as Parameters<Buffer["copy"]>);
+        copied += n;
+        return n;
+      });
+      const set = Uint8Array.prototype.set;
+      vi.spyOn(Uint8Array.prototype, "set").mockImplementation(function (this: Uint8Array, src: ArrayLike<number>, offset?: number) {
+        copied += src.length;
+        return set.call(this, src, offset);
+      });
+      const from = Buffer.from;
+      vi.spyOn(Buffer, "from").mockImplementation(((...args: unknown[]) => {
+        const out = (from as (...a: unknown[]) => Buffer)(...args);
+        if (args[0] instanceof Uint8Array) copied += out.length;
+        return out;
+      }) as typeof Buffer.from);
+
+      const CHUNK = 64 * 1024;
+      for (let i = 0; i < all.length; i += CHUNK) d.push(all.subarray(i, i + CHUNK));
+      vi.restoreAllMocks();
+
+      expect(got).toHaveLength(2);
+      expect(got[0].equals(payload)).toBe(true);
+      expect(got[1].toString("utf8")).toBe("next");
+      // Each payload byte is copied once (#168); only the 4-byte headers may be copied besides.
+      expect(copied).toBeLessThanOrEqual(all.length);
+    });
   });
 
   it("sends a message up to 1 MB as one frame", () => {

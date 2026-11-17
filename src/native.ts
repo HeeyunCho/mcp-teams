@@ -5,7 +5,7 @@
  * slices that the extension joins. And where servers reach the native host: the hub socket.
  *
  * Ported from mcp-newoutlook src/native.ts (commit 7ef8ac9): encodeFrame, FrameDecoder,
- * toExtensionFrames and NativePort as there; the pipe name per decision 10 of #123 (Outlook's
+ * toExtensionFrames and NativePort as there (FrameDecoder since rewritten to copy each frame once, #168); the pipe name per decision 10 of #123 (Outlook's
  * collides for non-ASCII usernames, HeeyunCho/mcp-newoutlook#178).
  */
 import { createHash, randomUUID } from "node:crypto";
@@ -30,13 +30,25 @@ export function encodeFrame(payload: string | Buffer): Buffer {
 }
 
 /**
- * Reads frames from a byte stream (the host's stdin). A frame over maxBytes is skipped as it
- * arrives, without being buffered, and reported through onOversize.
+ * Reads frames from a byte stream (the host's stdin). Once a frame's length is known, its buffer
+ * is allocated once and filled as chunks arrive, so each byte is copied once however many reads
+ * the frame spans. A frame over maxBytes is skipped as it arrives, without being buffered, and
+ * reported through onOversize.
  */
 export class FrameDecoder {
-  private buf: Buffer = Buffer.alloc(0);
+  /** The length bytes read so far, when a header is split across chunks. */
+  private readonly header = Buffer.alloc(4);
+  private headerFill = 0;
+  /** The frame being filled, once its length is known. */
+  private frame: Buffer | undefined;
+  private frameFill = 0;
   /** Bytes of an oversized frame still to skip. */
   private skipping = 0;
+  /**
+   * The rest of the chunk while onFrame runs. If onFrame throws, or pushes again itself, these
+   * bytes come first in the next push, so the stream never loses its place.
+   */
+  private unread: Buffer | undefined;
 
   constructor(
     private readonly onFrame: (frame: Buffer) => void,
@@ -45,28 +57,62 @@ export class FrameDecoder {
   ) {}
 
   push(chunk: Buffer): void {
-    if (this.skipping) {
-      const n = Math.min(this.skipping, chunk.length);
-      this.skipping -= n;
-      chunk = chunk.subarray(n);
-      if (!chunk.length) return;
+    if (this.unread) {
+      chunk = this.unread.length ? Buffer.concat([this.unread, chunk]) : chunk;
+      this.unread = undefined;
     }
-    this.buf = this.buf.length ? Buffer.concat([this.buf, chunk]) : chunk;
-    while (this.buf.length >= 4) {
-      const len = this.buf.readUInt32LE(0);
-      if (len > this.maxBytes) {
-        this.onOversize?.(len);
-        const have = Math.min(len, this.buf.length - 4);
-        this.skipping = len - have;
-        this.buf = this.buf.subarray(4 + have);
-        if (this.skipping) return;
+    let at = 0;
+    while (at < chunk.length) {
+      if (this.skipping) {
+        const n = Math.min(this.skipping, chunk.length - at);
+        this.skipping -= n;
+        at += n;
         continue;
       }
-      if (this.buf.length < 4 + len) return;
-      const frame = Buffer.from(this.buf.subarray(4, 4 + len));
-      this.buf = this.buf.subarray(4 + len);
-      this.onFrame(frame);
+      if (this.frame) {
+        const n = Math.min(this.frame.length - this.frameFill, chunk.length - at);
+        chunk.copy(this.frame, this.frameFill, at, at + n);
+        this.frameFill += n;
+        at += n;
+        if (this.frameFill === this.frame.length && !this.emit(chunk.subarray(at))) return;
+        continue;
+      }
+      let len: number;
+      if (this.headerFill === 0 && chunk.length - at >= 4) {
+        len = chunk.readUInt32LE(at);
+        at += 4;
+      } else {
+        const n = Math.min(4 - this.headerFill, chunk.length - at);
+        chunk.copy(this.header, this.headerFill, at, at + n);
+        this.headerFill += n;
+        at += n;
+        if (this.headerFill < 4) return;
+        this.headerFill = 0;
+        len = this.header.readUInt32LE(0);
+      }
+      if (len > this.maxBytes) {
+        this.onOversize?.(len);
+        this.skipping = len;
+      } else {
+        this.frame = Buffer.allocUnsafe(len);
+        this.frameFill = 0;
+        if (len === 0 && !this.emit(chunk.subarray(at))) return;
+      }
     }
+  }
+
+  /**
+   * Hands the finished frame to onFrame; `rest` is what's left of the chunk. False when a push
+   * from inside onFrame already took `rest`: the caller then stops.
+   */
+  private emit(rest: Buffer): boolean {
+    const frame = this.frame as Buffer;
+    this.frame = undefined;
+    this.unread = rest;
+    this.onFrame(frame);
+    if (this.unread !== rest) return false;
+    this.unread = undefined;
+    return true;
   }
 }
 

@@ -102,12 +102,15 @@ let queue: Buffer[] = [];
 let sink: (frame: Buffer) => void = (f) => queue.push(f);
 let stdinClosed = false;
 
+/** Chrome's limit for one native-messaging message from the extension to its host (64 MiB): stdin carries no larger frame. */
+const MAX_FROM_EXTENSION_BYTES = 64 * 1024 * 1024;
+
 const decoder = new FrameDecoder(
   (frame) => {
     if (isHello(frame)) hello = frame;
     sink(frame);
   },
-  MAX_MESSAGE_BYTES,
+  MAX_FROM_EXTENSION_BYTES,
   (bytes) => {
     log("oversize", { bytes });
     // As on the WebSocket: the calls on this connection fail with a readable error.
