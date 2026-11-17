@@ -101,10 +101,27 @@ Merged as `a0e2bff`, released as 0.3.73 (`5e5b9d9`, tag `v0.3.73`). Rebuilt here
 - `extension/manifest.json`: `wss://` host permissions for the same seven hosts. The extension is loaded unpacked, so a reload picks them up without a prompt.
 - **A socket opened before recording started is never seen:** only the handshake is visible, and trouter opens at page load. Start recording, then reload the Teams tab.
 - Written test-first by a subagent and reviewed twice by separate subagents. The first review found that `https://` patterns never match `wss://`; that's fixed. The second review found no blockers. Tests: 65 passed in the touched files on Node 26 and Node 20; 515 passed in `test/integration` on Node 20; 927 passed in the full `npm test`. CI passed.
-- **Live check, part done** ([comment](https://github.com/HeeyunCho/mcp-teams/issues/200#issuecomment-6949306279)):
+- **Live check, done as far as Teams allows** ([comment](https://github.com/HeeyunCho/mcp-teams/issues/200#issuecomment-6949306279)):
   - **Seen:** two `websocket` entries with **status 101**. They're on regional hosts (`pub-ent-…-t.trouter.teams.microsoft.com`); `go.trouter.teams.microsoft.com` only answers a pre-connect check, as an `xmlhttprequest`.
   - **Not seen yet: a `ping` entry.** A second try recorded nothing at all, because the extension didn't hear the tab then (see #122 in Resume here) ([comment](https://github.com/HeeyunCho/mcp-teams/issues/200#issuecomment-6949565618)).
   - `lastTeamsCall` not moving on a handshake has no clean live evidence yet; `test/integration/teamsCalls.test.ts` covers it.
+  - **Third try** (the extra tab closed, the main one closed and reopened; [comment](https://github.com/HeeyunCho/mcp-teams/issues/200#issuecomment-6950173042)): 26 entries, including the page load.
+    - `websocket` with status 101 again: `pub-ent-euno-03-t…` count 3, `pub-ent-euno-14-t…` count 2.
+    - **Still no `ping`:** Teams sends its telemetry as XHR POSTs (`teams.events.data.microsoft.com`, `browser.events.data.microsoft.com`), so the web client seems not to use `sendBeacon`.
+    - `lastTeamsCall` stayed on an XHR host, never a trouter host, across five handshakes.
+    - Nothing more to check live.
+
+### A lost send at 13:46:15Z, and the hub's status reads on 0.3.73
+- **The lost send** ([comment on #188](https://github.com/HeeyunCho/mcp-teams/issues/188#issuecomment-6953285362)):
+  - A `send_message` from Claude Desktop's health-check session (pid 9608, a 0.3.72 peer) failed with `kind=lost-call` after ms=182533 at 13:46:15Z.
+  - Around it, the extension dropped twice: `extension-closed` code 1001 at 13:46:29Z and 13:49:08Z, each followed by `handshake-closed` code 4401 (`auth timeout`) and a reconnect.
+  - **The 14:41 CET (13:41Z) health-check report never reached the notes chat.** So "may have been sent" was reported for a call that wasn't, which is #188's territory.
+- **The fresh 0.3.73 hub (pid 44316, from 13:21:18Z) is just as slow** ([comment on #173](https://github.com/HeeyunCho/mcp-teams/issues/173#issuecomment-6953278882)):
+  - By 15:55Z: 17 timeouts (about 15 s each) and 18 slow reads (2720–9895 ms) out of 49 `teams` lines.
+  - Runs of failed reads up to `failures=10`.
+  - A 0.3.73 peer (pid 38116) was slow at the same moment as the hub (15:41:30Z).
+  - So it isn't the old hub process. #182 (event-loop delay logging) is the next step.
+- **Servers at 15:55Z:** six 0.3.72 servers still run (28076, 5068, 6796, 15800, 46912 and 42664), one of them this Claude Code session's. Pid 9608 (Claude Desktop) has exited. The newer servers are 0.3.73.
 
 | PR | Change | State |
 |---|---|---|
