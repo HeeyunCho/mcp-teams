@@ -1136,6 +1136,28 @@ export function transcriptLines(json, { fromSeconds = 0 } = {}) {
   return lines.map((l) => `[${l.at}] ${l.who}: ${l.text}`);
 }
 
+/**
+ * What transcriptLines, transcriptSpeakers, searchTranscript and read_transcript's language read
+ * of a transcript, in the same shape: each entry's text, speaker and offsets, and the first
+ * spokenLanguageTag on its entry. Stream's other fields (ids, confidence, ...) are dropped (#178).
+ */
+export function slimTranscript(json) {
+  const entries = [];
+  let language = false;
+  for (const e of json?.entries ?? []) {
+    const slim = {};
+    for (const field of ["text", "speakerDisplayName", "startOffset", "endOffset"]) {
+      if (e?.[field] != null) slim[field] = String(e[field]);
+    }
+    if (!language && e?.spokenLanguageTag) {
+      slim.spokenLanguageTag = String(e.spokenLanguageTag);
+      language = true;
+    }
+    entries.push(slim);
+  }
+  return { transcript: { entries }, bytes: 0 };
+}
+
 /** Speakers of a transcript with how long each spoke, most first. */
 export function transcriptSpeakers(json) {
   const total = new Map();
