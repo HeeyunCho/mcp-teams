@@ -237,20 +237,25 @@ export function savePendingTraffic() {
 }
 
 /**
- * websocket (a WebSocket handshake, e.g. trouter) and ping (navigator.sendBeacon) too, so api_traffic
- * shows a feature that talks over them (#200). Only the handshake or beacon is seen, never what a
- * socket carries; a handshake's onCompleted, if Chrome reports one, gives its status (101).
+ * Recorded for api_traffic but not a last call (#200): websocket (a WebSocket handshake, e.g.
+ * trouter) and ping (navigator.sendBeacon). A trouter WebSocket opens once and stays open, and a
+ * beacon is fire-and-forget, often sent as the page goes away, so neither on its own says the tab
+ * is active; the last calls keep counting only the types they counted before.
  */
-const trafficFilter = { urls: teams.TRAFFIC_URLS, types: ["xmlhttprequest", "other", "media", "websocket", "ping"] };
+const TRAFFIC_ONLY_TYPES = ["websocket", "ping"];
+
+/**
+ * The traffic log hears these types too, so api_traffic shows a feature that talks over them, and
+ * the wss:// URLs Chrome reports handshakes under (#200). Only the handshake or beacon is seen, never
+ * what a socket carries; a handshake's onCompleted, if Chrome reports one, gives its status (101).
+ */
+const trafficFilter = { urls: [...teams.TRAFFIC_URLS, ...teams.TRAFFIC_WS_URLS], types: ["xmlhttprequest", "other", "media", ...TRAFFIC_ONLY_TYPES] };
 
 function recordRequest(details) {
   if (!teams.isTeamsOrigin(details.initiator)) return;
   const entry = teams.summarizeRequest(details);
   updateTraffic((list) => teams.recordTraffic(list, entry), { ifRecording: true });
-  // Not a last call (#200): a trouter WebSocket opens once and stays open, and a beacon is
-  // fire-and-forget, often sent as the page goes away, so neither on its own says the tab is active.
-  // The last calls keep counting only the types they counted before.
-  if (details.type === "websocket" || details.type === "ping") return;
+  if (TRAFFIC_ONLY_TYPES.includes(details.type)) return;
   return noteCall(details);
 }
 
