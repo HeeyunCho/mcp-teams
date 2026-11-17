@@ -157,4 +157,34 @@ describe("#143: a real server's server.log", () => {
     ext.close(1000);
     await client.close();
   }, 60_000);
+
+  it("#182: a slow status read's line gives the server's event-loop delay and utilisation", async () => {
+    const home = tempDir();
+    writeFileSync(join(home, "config.json"), JSON.stringify({ token: "tok", port: 0 }));
+    const client = new Client({ name: "test", version: "0" });
+    await client.connect(
+      new StdioClientTransport({
+        command: process.execPath,
+        args: ["dist/index.js"],
+        env: { ...process.env, TEAMS_MCP_HOME: home, TEAMS_MCP_WATCH_MS: "100" } as Record<string, string>,
+        stderr: "ignore",
+      }),
+    );
+    const port = JSON.parse(((await client.callTool({ name: "get_version", arguments: {} })) as any).content[0].text).port;
+    const ext = new WebSocket(`ws://127.0.0.1:${port}`, { origin: "chrome-extension://fake" });
+    ext.on("message", (raw) => {
+      const msg = JSON.parse(raw.toString());
+      if (msg.type === "challenge") ext.send(JSON.stringify({ type: "hello", token: "tok", version: "0.3.62", browser: "Chrome" }));
+      // Over 2.5 s: a slow read, whatever this machine's own loop does.
+      if (msg.type === "request" && msg.method === "status")
+        setTimeout(() => ext.send(JSON.stringify({ type: "response", id: msg.id, ok: true, result: { teamsTabs: 1, sessions: [], services: {} } })), 2_700);
+    });
+    const logFile = join(home, "server.log");
+    const teams = () => (existsSync(logFile) ? readFileSync(logFile, "utf8").split("\n").filter((l) => / teams /.test(l)) : []);
+    await until(() => teams().length >= 1, 15_000, "the slow background read");
+    // The values depend on the machine; that they are there, as whole numbers, is the point.
+    expect(teams()[0]).toMatch(/ teams v=\S+ role=hub tabs=1 captured=no services=none account=none ms=\d+ slow=yes eld=\d+ eldMax=\d+ elu=\d+$/);
+    ext.close(1000);
+    await client.close();
+  }, 60_000);
 });

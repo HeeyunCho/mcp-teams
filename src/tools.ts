@@ -144,6 +144,8 @@ export function registerTools(server: McpServer, bridge: ExtensionBridge, config
   };
   // Every status read: server.log keeps the Teams state when it changed, and how long the read took
   // when it was slow or failed (#153: get_version's read may take up to the bridge's default minute).
+  // Such a line's eld/eldMax/elu (#182) cover the time since the background watch's last tick
+  // (up to a period, a minute by default), not only this read: the watch's tick starts each window.
   const status = (timeoutMs: number | undefined, signal: AbortSignal | undefined) => {
     const started = performance.now();
     return bridge.call("status", {}, timeoutMs, signal).then(
