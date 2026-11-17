@@ -53,8 +53,8 @@ Labels and comments only, no code. Each issue was checked against `main` at 0.3.
 | #124 | still `needs-info` | On 0.3.72 the extension closed once (`extension-closed code=1001` at 07:15:00Z on hub 42868) and rejoined at 07:16:03Z, about 63 s. That's too short to show either way. The comment of 2026-11-17 lists what's still needed: a long occurrence on 0.3.66 or later with its `server.log` lines, the extension's service-worker console at that moment, and whether it only follows a release |
 
 - **Split out of #173, all `ready-for-agent` and checked against 0.3.72:** #177 (`bug`: leftover `.rotating` files never deleted, `src/hubLog.ts` `rotate()`), #178 (`performance`: the extension's transcript cache counts response text, not the parsed JSON it keeps), #179 (`performance`: one `search_transcripts` call can make about 1,000 Teams requests; its timeout is 300 s, not the 120 s #173 said), #180 (`performance`: `get_version` blocks on `execFileSync(reg.exe)` when `nativeHost` is on).
-- **Closed issues tidied:** `needs-triage` removed from #168, #169 and #171.
-- **#169 was closed as completed** at 07:09:26Z with no comment and no fixing PR. `get_version` on 0.3.72 still reports `maxMessageBytes: 268435456`, so the 256 MB limit it describes is unchanged. Check whether that was intended before #123 PR 5.
+- **Closed issues tidied:** `needs-triage` removed from #168 and #171 (and from #169, since reopened).
+- **#169 was closed by accident and is reopened** (`ready-for-agent`). Merging #176 closed it at 07:09:27Z, because #176's description said "fix #169" and GitHub reads that as a closing keyword. No commit changed the limit: `src/bridge.ts:136` is still 256 MB, and `get_version` on 0.3.72 reports `maxMessageBytes: 268435456`. **In PR descriptions and commit messages, don't write "fix/fixes/close/resolve #NNN" unless the PR really fixes it.**
 - **Repo tidy:** Dependabot #166 had merged on 2026-11-16, but its branch `dependabot/npm_and_yarn/hono-4.13.18` was left on origin. Its head (`8b43592`) is in `main`, so the branch was deleted (it can be restored from #166). origin now has only `main`. Locally, the `wt-diag` scratchpad worktree and the five merged `worktree-agent-*` branches were removed.
 
 ## Earlier on 2026-11-16
@@ -210,7 +210,7 @@ Labels and comments only, no code. Each issue was checked against `main` at 0.3.
 - **#111/#96** (`ready-for-human`): close with the native host and launcher (#123, ADR 0002). #142 (`ready-for-human`) is another instance and collects the health check's reports.
 - **#162** (`ready-for-human`): no Teams capture for about 29 min on 0.3.72; see "Triage round" in Now.
 - **#149, #170, #172** (`ready-for-agent`): see "Triage round" in Now.
-- **#173** (`ready-for-human`, the audit's tracking issue): its low findings are split into #177–#180 (`ready-for-agent`). **#169** is closed, but its 256 MB limit is unchanged (see "Triage round"). #168's 64 MiB (done) and #169 matter before `nativeHost` is on by default.
+- **#173** (`ready-for-human`, the audit's tracking issue): its low findings are split into #177–#180 (`ready-for-agent`). **#169** (`ready-for-agent`, reopened; see "Triage round"): the 256 MB limit is unchanged. #168's 64 MiB (done) and #169 matter before `nativeHost` is on by default.
 - **Closed:** #76 (#137), #134 (#136), #138 (#144), #143 (#147), #145 (#150), #148 (#158), #152 (#163), #153 (#154), #156 (#159), #160 (transient, `wontfix`), #168 (#174), #171 (#175).
 - **Outlook:** the pipe-name collision for non-ASCII usernames is mcp-newoutlook#178.
 
