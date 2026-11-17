@@ -1,8 +1,43 @@
-# Handoff: mcp-teams after #166 (updated 2026-11-16 on the Windows PC)
+# Handoff: mcp-teams after #175 (updated 2026-11-17 on the Windows PC)
 
-Repo: GitHub `HeeyunCho/mcp-teams`. PRs 1–4 of #123 (the native-messaging host) are on `main`, all **off by default** (`nativeHost` off). Next is PR 5, which turns it on. The last release is 0.3.71 (`9bf7434`, #165 and #166, dependency bumps only); 0.3.70 (`d5cacdd`) has #163, 0.3.69 (`d35759e`) has #159, 0.3.68 (`60f005f`) has #158, 0.3.67 (`aa90cf4`) has #157, 0.3.66 (`367f198`) has #154.
+Repo: GitHub `HeeyunCho/mcp-teams`. PRs 1–4 of #123 (the native-messaging host) are on `main`, all **off by default** (`nativeHost` off). Next is PR 5, which turns it on. The last release is 0.3.72 (`71f49e2`, #174 and #175); 0.3.71 (`9bf7434`) has #165 and #166 (dependency bumps only), 0.3.70 (`d5cacdd`) has #163, 0.3.69 (`d35759e`) has #159, 0.3.68 (`60f005f`) has #158, 0.3.67 (`aa90cf4`) has #157, 0.3.66 (`367f198`) has #154.
 
-## Now (2026-11-16)
+## Now (2026-11-17)
+
+| PR | Change | State |
+|---|---|---|
+| #174 | Fixes #168: the native host's `FrameDecoder` (`src/native.ts`) allocates a frame once its 4-byte length is read and copies stdin chunks into it, instead of `Buffer.concat` per 64 KB chunk (a 20 MB frame copied about 3.4 GB, now 20 MB). `src/hub.ts` limits stdin frames to `MAX_FROM_EXTENSION_BYTES` (64 MiB, Chrome's cap for extension → host) instead of `MAX_MESSAGE_BYTES` (256 MB). Latent while `nativeHost` is off | Merged as `64186d7`. Its Version bump run failed by design (#175 merged meanwhile, atomic push refused); #175's run released both |
+| #175 | Fixes #171: a server in role=none (can neither join nor listen) retries after `retryMs` (2 s) doubling to `retryMaxMs` (30 s), with ±50% jitter capped at `retryMaxMs`, reset by `setRole()` on becoming hub or peer. New options `retryMaxMs` and `random` (jitter source). `docs/testing.md` names its test as the one bridge test on a fake clock | Merged as `aa730db`, released in 0.3.72 (`71f49e2`, tag `v0.3.72`) by `version.yml` |
+
+Both: written test-first by a subagent in an Agent worktree, reviewed by a separate subagent (`/code-review`, Standards and Spec; no blockers), checked on Node v26.3.0 and v20.20.2 (#174: 5 files, 82 passed, 2 skipped; #175: 7 files, 121 passed, 1 skipped), and CI passed (test, test-windows, gitleaks).
+
+### #174, what the review changed
+
+- The first version lost the rest of a chunk when `onFrame` threw (the host's `uncaughtException` handler only logs, so it would read on from the wrong offset), and a `push` from inside `onFrame` read its bytes before the outer chunk's rest. The unread rest is now kept until `onFrame` returns; a test for each. The copy test's bound is one copy per byte.
+- **Nits left:** `MAX_FROM_EXTENSION_BYTES` is private to `hub.ts` while `MAX_TO_EXTENSION_BYTES` is exported from `native.ts`; a frame's buffer (up to 64 MiB) is allocated when its header arrives. The host's welcome still advertises `maxMessageBytes: MAX_MESSAGE_BYTES` (256 MB), which belongs to #169.
+
+### #175, what the review changed
+
+- The cap first applied before the jitter, so a wait at the cap reached about 45 s; it now applies after. The fake-timer test, against `docs/testing.md`'s real-timer rule, is now a documented exception (#171 asked for fake timers).
+- **Trade-off accepted:** after the port holder goes, a role=none server can take up to 30 s to notice, and its calls keep the old `listenError` ("restart the other AI sessions…") until then. A call in role=none could start an attempt early (follow-up if wanted).
+- **Nits left:** only the peer reset path is tested; the "no attempt before" check waits one `setImmediate`; `random` jitters only this retry, not `restartHub` or a peer's 0.1–0.5 s retry; `settle()` could move to `test/helpers/timing.ts`; "role=none" has no GLOSSARY entry.
+
+### The CPU/memory audit (2026-11-16)
+
+A read-only subagent audited `main` at 0.3.71: no unbounded growth in the hot paths and no tight loop on this PC today. Filed with `needs-triage`:
+
+| Issue | Finding | State |
+|---|---|---|
+| #168 | Native `FrameDecoder` copied per chunk (quadratic), limit 256 MB | Fixed by #174 |
+| #169 | `MAX_MESSAGE_BYTES` 256 MB (`bridge.ts`, extension) for a base64 attachment path Teams doesn't have; applies before the token is proved; about 32 MB suggested | Open |
+| #170 | `hub.log`: `mkdirSync` + `statSync` + `appendFileSync` per line on the hub's thread; the native host logs every frame | Open |
+| #171 | role=none retried every 2 s forever | Fixed by #175 |
+| #172 | `send()` writes to a closed socket: with two browsers, an extension closing during `pickExtension` leaves a turn entry and the call waits out its timeout | Open |
+| #173 | Tracking: leftover `.rotating` files, the transcript cache counting text not memory, `search_transcripts` up to about 1,000 Teams requests, `get_version`'s sync `reg.exe`; and from `server.log`, frequent 15 s status-read timeouts, a hub silent for about 60 s on 2026-11-12, a possible native-host restart loop | Open |
+
+The audit found safe: pending-call and turn tables, timers and listeners, the peer send buffer and relay limits, the extension's 0.5–30 s backoff, the 60 s state watch (hub only), log volume, and the extension's caches.
+
+## Earlier on 2026-11-16
 
 | PR | Change | State |
 |---|---|---|
@@ -154,21 +189,23 @@ Repo: GitHub `HeeyunCho/mcp-teams`. PRs 1–4 of #123 (the native-messaging host
 - **#124** (`needs-info`): the extension stayed disconnected while a hub listened. The 2026-11-10 16:45 episode is in Earlier. `server.log` (#147) will show the `handshake-closed` and `extension-*` lines next time.
 - **#111/#96** (`ready-for-human`): close with the native host and launcher (#123, ADR 0002). #142 is another instance.
 - **#149:** see "Open bugs from 2026-11-11" in Now.
-- **Closed:** #76 (#137), #134 (#136), #138 (#144), #143 (#147), #145 (#150), #148 (#158), #152 (#163), #153 (#154), #156 (#159), #160 (transient, `wontfix`).
+- **#169, #170, #172, #173** (`needs-triage`, the CPU/memory audit): see "The CPU/memory audit" in Now. #169 (and #168's 64 MiB, done) matter before `nativeHost` is on by default.
+- **Closed:** #76 (#137), #134 (#136), #138 (#144), #143 (#147), #145 (#150), #148 (#158), #152 (#163), #153 (#154), #156 (#159), #160 (transient, `wontfix`), #168 (#174), #171 (#175).
 - **Outlook:** the pipe-name collision for non-ASCII usernames is mcp-newoutlook#178.
 
 ## Next up
 
-1. **Get every server onto 0.3.71** (see "This Windows PC"): rebuild, `reload-extension`, then a full restart of each session (`/mcp` → Reconnect did not replace any process on 2026-11-12), Claude Desktop last. Then check `server.log` for the first `handshake-closed` lines with `reason`/`ms`/`hello`/`port` (written only by a hub of 0.3.69 or later).
+1. **Get every server onto 0.3.72** (see "This Windows PC"): rebuild, `reload-extension`, then a full restart of each session (`/mcp` → Reconnect did not replace any process on 2026-11-12), Claude Desktop last. Then check `server.log` for the first `handshake-closed` lines with `reason`/`ms`/`hello`/`port` (written only by a hub of 0.3.69 or later).
 2. **The rest of #149** (keep-alive drops leave no `hub.log` line; the system tests on the 200 ms test heartbeat), the #156 follow-ups from the #159 review, and the #152 follow-ups from #163.
-3. **Worker restarts emptying the captures** (Now, "#160"): open an issue if it should be worked on.
-4. **#123 PR 5:** turn `nativeHost` on by default, with setup registering by default; `feat!:` → 0.4.0. It waits for the manual checks on Windows and the Mac (including Chrome's permission warning from #146). Read the #123 comments first.
-5. **Versioned launcher (0.5.0, ADR 0002).** Open the issue from the ADR first.
-6. The manual Chrome check on #122; `ready-for-agent` leftovers on #77 and #103 (above).
+3. **Triage the audit's open issues** (#169, #170, #172, #173); fix #169 before #123 PR 5.
+4. **Worker restarts emptying the captures** (Now, "#160"): open an issue if it should be worked on.
+5. **#123 PR 5:** turn `nativeHost` on by default, with setup registering by default; `feat!:` → 0.4.0. It waits for the manual checks on Windows and the Mac (including Chrome's permission warning from #146). Read the #123 comments first.
+6. **Versioned launcher (0.5.0, ADR 0002).** Open the issue from the ADR first.
+7. The manual Chrome check on #122; `ready-for-agent` leftovers on #77 and #103 (above).
 
 Run `gh issue list` for the full backlog. #21 and #96 are the umbrella issues that PRs reference as "Part of".
 
-## This Windows PC (checked 2026-11-12)
+## This Windows PC (checked 2026-11-17)
 
 - **Live install:** `C:\Orca_Project\mcp-teams` is the live install. Every session's `teams` server runs its `dist/index.js`, and Chrome's Teams extension loads a copy of its `extension/` folder.
   - Rebuilt on 2026-11-11 at 12:41 on 0.3.65 (`5ef6c32bb59a`). The user then reconnected every session (`C:\PM_HUB_DB` last), restarted Claude Desktop, reloaded the extension and signed in. All 12 servers ran 0.3.65 by 13:05; the hub moved to the NAVERWORKS session (pid 75600).
@@ -178,6 +215,7 @@ Run `gh issue list` for the full backlog. #21 and #96 are the umbrella issues th
   - **The user's `/mcp` → teams → Reconnect in every session (about 14:00) replaced no process:** the same pids ran on, with no new `start` line in `server.log`. At about 15:00 all 14 servers were older than the build: the hub 105344 (0.3.68, Desktop), two `claude -p` runs on 0.3.68 logging `restart-needed onDisk=0.3.69`, and 0.3.66 for the rest (PM-HUB, Downloads, filemanager, local-plugins, mcp-newoutlook, mcp-teams, MeetNotes, `C:\PM_HUB_DB`, Desktop's pid 8380, two more `claude -p` runs). Restart each session fully instead (or check whether `/mcp` offers a restart), Claude Desktop last.
   - **After #163 the checkout was pulled to 0.3.70 (`d5cacdd`) but not rebuilt:** `dist/` is 0.3.69 while `extension/manifest.json` says 0.3.70. Rebuild (`npm ci`, `npm run build`, `node dist/index.js reload-extension`) before restarting sessions.
   - Rebuilt on 2026-11-16 at 12:34 CET on 0.3.71 (`9bf7434`, `npm ci` + `npm run build`, build `cd024402cd0a`; `hono` 4.13.18, `@hono/node-server` 2.1.8), then `node dist/index.js reload-extension` ("hub restarted"); the extension came back as 0.3.71 at 11:38:40Z. All 12 running servers predate the build and still run 0.3.70. **The hub is the `mcp-atlassian` Claude Code session (pid 60680), not Claude Desktop.** The others: Claude Code in local-plugins, PM-HUB, NAVERWORKS, `C:\PM_HUB_DB`, everything-compare, mcp-newoutlook and mcp-teams; Claude Desktop's two (7944, 44968); a `claude -p` run under a non-interactive PowerShell (36424); and a pm-hub-sync `claude -p` run (64328). Restart each one fully, the hub's session last.
+  - Rebuilt on 2026-11-17 at 07:59 CET on 0.3.72 (`71f49e2`, `npm ci` + `npm run build`, build `1274f3433802`; #174 and #175). `node dist/index.js reload-extension` answered "The extension is not connected" twice (06:59:59Z, 07:01:43Z): the extension had been gone since `extension-closed code=1001` at 06:43:49Z, before the build. `~/.mcp-teams/extension` was synced to 0.3.72 anyway, and the extension came back by itself as 0.3.72 at 07:03:10Z, with no Teams tab open (`tabs=0`). Meanwhile the hub changed hands about eight times in 3 s (07:01:44Z, `handover … to=0.3.72` and `hub-closed code=1012`), ending with a pm-hub-sync `claude -p` run's 0.3.72 server (pid 126448) as hub. Claude Desktop had no `teams` server running. Six servers predate the build: 0.3.70 in PM-HUB, NAVERWORKS, `C:\PM_HUB_DB`, mcp-newoutlook and mcp-teams, and 0.3.71 in markitdown. The hub, a `claude -p` run, will exit by itself and the hub will move to another server.
   - **Watch out during hand-overs:** old servers kept taking port 47393 back. A new hub stepped down 0.3.58 hubs about 10 times in 3 s.
   - **Chrome loads the extension from `~/.mcp-teams/extension`,** which a *starting* server syncs from the checkout (`syncExtension` in `src/index.ts`). A rebuild alone doesn't update it. `node dist/index.js reload-extension` syncs it (on this PC it answers "hub restarted"; the extension reloads and reconnects within about 5 s). The `reload_extension` tool only reloads from the copy.
   - **Running servers keep their old code** until each session reconnects with `/mcp`. Reconnect the hub's session last; the hub moves between sessions. To list stale servers, compare each `node … mcp-teams/dist/index.js` process's start time with `dist/index.js`'s write time; `~/.claude/sessions/<parent pid>.json` gives a Claude Code session's folder.
