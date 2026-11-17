@@ -1,7 +1,9 @@
 #!/usr/bin/env node
-// Bumps the version in package.json, package-lock.json and extension/manifest.json together. All three
-// are read and checked first; if any is missing, not valid JSON or lacks the "version" fields to
-// update, none is written. The writes are all or nothing: if one fails, every file is left as it was.
+// Bumps the two version lines (#219): the package's, in package.json and package-lock.json, on every
+// release, and the extension's, in extension/manifest.json ("version" and "version_name"), only when
+// files under extension/ changed since the extension's own tag. All three files are read and checked
+// first; if any is missing, not valid JSON or lacks the "version" fields to update, none is written.
+// The writes are all or nothing: if one fails, every file is left as it was.
 //
 //   node scripts/bump-version.mjs patch|minor|major     explicit bump
 //   git log --format=%B%x00 A..B | node scripts/bump-version.mjs
@@ -15,11 +17,16 @@
 //   "feat:" / "feat(scope):"                             patch          minor
 //   anything else                                        patch          patch
 //
-// An explicit level is applied as given (`major` on 0.x makes 1.0.0). Prints the new version.
+// An explicit level is applied as given (`major` on 0.x makes 1.0.0), to the extension too when it
+// changed. Prints `version=X.Y.Z` and `extension=X.Y.Z` (empty when the extension didn't move).
 //
-// A version whose "vX.Y.Z" tag already exists in the repository moves on by patches to the first
-// free one, so a tag left by a failed release can't block the next. If the tags can't be read, it
-// throws and writes nothing.
+// The extension's level comes from the messages of the commits since its tag ("ext-vX.Y.Z") that
+// touched extension/; a change to manifest.json's version fields alone doesn't count. A current
+// extension version without its tag yet is released as it is (the first release of 1.0.0).
+//
+// A version whose tag ("vX.Y.Z", or "ext-vX.Y.Z" for the extension) already exists in the repository
+// moves on by patches to the first free one, so a tag left by a failed release can't block the next.
+// If the tags or the extension's changes can't be read, it throws and writes nothing.
 //
 // Versions follow semver 2.0.0: MAJOR.MINOR.PATCH[-prerelease][+build], numeric parts without
 // leading zeros. Anything else throws, so the workflow fails instead of committing a broken version.
@@ -90,21 +97,55 @@ export function levelFor(version, level) {
 
 export const nextVersion = (version, messages) => increment(version, levelFor(version, bumpLevel(messages)));
 
-/** `version`, or the first patch after it whose "v" tag isn't in `tags`. */
-export function nextFreeVersion(version, tags) {
+/** `version`, or the first patch after it whose tag (`prefix` and the version) isn't in `tags`. */
+export function nextFreeVersion(version, tags, prefix = "v") {
   const taken = new Set(tags);
   let free = version;
-  while (taken.has(`v${free}`)) free = increment(free, "patch");
+  while (taken.has(`${prefix}${free}`)) free = increment(free, "patch");
   return free;
 }
 
+/** The tag prefix of each version line (#219): the package's "vX.Y.Z", the extension's "ext-vX.Y.Z". */
+export const TAG_PREFIX = Object.freeze({ package: "v", extension: "ext-v" });
+
+const runGit = (root, args, what) => {
+  try {
+    return execFileSync("git", ["-C", root, ...args], { encoding: "utf8", stdio: "pipe" });
+  } catch (e) {
+    throw new Error(`Cannot ${what} in ${root}: ${e.message}`);
+  }
+};
+
 /** The tags of the git repository at `root`. Throws if git can't list them. */
 function gitTags(root) {
+  return runGit(root, ["tag", "--list"], "list the git tags").split(/\r?\n/).filter(Boolean);
+}
+
+/** A manifest's text without its version fields, to tell a version-only change from a real one; null if it isn't JSON. */
+function withoutVersion(text) {
   try {
-    return execFileSync("git", ["-C", root, "tag", "--list"], { encoding: "utf8", stdio: "pipe" }).split(/\r?\n/).filter(Boolean);
-  } catch (e) {
-    throw new Error(`Cannot list the git tags in ${root}: ${e.message}`);
+    const { version, version_name, ...rest } = JSON.parse(text);
+    return JSON.stringify(rest);
+  } catch {
+    return null;
   }
+}
+
+/**
+ * The commit messages of the extension's changes since its tag `tag` (the CLI's `readExtension`): none when no
+ * file under extension/ differs between the tag and HEAD, except manifest.json's version fields (a release
+ * commit). Otherwise the messages of the commits since the tag that touched extension/. Throws if git fails.
+ */
+function gitExtensionChanges(root, tag) {
+  const changed = runGit(root, ["diff", "--name-only", tag, "HEAD", "--", "extension"], "compare extension/ with its tag")
+    .split(/\r?\n/)
+    .filter(Boolean);
+  const manifest = "extension/manifest.json";
+  const real = changed.some((f) => f !== manifest) ||
+    (changed.includes(manifest) &&
+      withoutVersion(runGit(root, ["show", `${tag}:${manifest}`], "read the tagged manifest")) !== withoutVersion(runGit(root, ["show", `HEAD:${manifest}`], "read the manifest")));
+  if (!real) return [];
+  return runGit(root, ["log", "--format=%B%x00", `${tag}..HEAD`, "--", "extension"], "read the extension's commits").split("\0").filter((m) => m.trim());
 }
 
 /**
@@ -180,13 +221,15 @@ export function writeAll(root, writes, fs = { chmodSync, renameSync, rmSync, sta
 const sampleJson = (value) => JSON.stringify(value, null, 2);
 
 /**
- * The version files, each with how its new text is made from the old. package.json must stay first (see main).
+ * The version files, each with its version line (#219) and how its new text is made from the old. package.json
+ * must stay first, and the extension's manifest.json is the extension line's only file (see bumpFiles).
  * `sample` is for tests: a minimal file holding `version` in every field `update` must replace.
  */
 const VERSION_FILES = [
-  { file: "package.json", update: setVersion, sample: (version) => sampleJson({ name: "x", version }) },
+  { file: "package.json", line: "package", update: setVersion, sample: (version) => sampleJson({ name: "x", version }) },
   {
     file: "package-lock.json",
+    line: "package",
     update: (file, text, next) => setVersion(file, text, next, 2), // root + packages[""]
     // Also holds a dependency's version, which the update must leave alone.
     sample: (version) => sampleJson({ name: "x", version, packages: { "": { version }, "node_modules/y": { version: "9.9.9" } } }),
@@ -195,6 +238,7 @@ const VERSION_FILES = [
   // be in "version_name", so one left from a hand-set prerelease is set to the release too.
   {
     file: "extension/manifest.json",
+    line: "extension",
     update: (file, text, next) => setVersion(file, setVersion(file, text, next), next, 1, "version_name", true),
     sample: (version) => sampleJson({ version }),
   },
@@ -207,24 +251,49 @@ export const VERSION_FILE_NAMES = VERSION_FILES.map((f) => f.file);
 export const VERSION_SAMPLES = Object.fromEntries(VERSION_FILES.map((f) => [f.file, f.sample]));
 
 /**
- * Bumps the version files under `root` and returns the new version: by `level` if it is patch, minor or major,
- * else from the commit messages in the string `readInput()` resolves to, NUL-separated (called only then), moved
- * past any tag in the list `readTags()` resolves to. What the CLI runs, with the repository root, stdin and its git
- * tags; tests call it on a temporary root, in-process.
+ * Bumps the version files under `root`, each version line on its own (#219), and returns
+ * `{ version, extension }`: the package's new version, and the extension's, or null when it didn't move.
+ *
+ * - The package line (package.json, package-lock.json) moves on every bump: by `level` if it is patch, minor or
+ *   major, else from the commit messages in the string `readInput()` resolves to, NUL-separated (called only then),
+ *   past any "v" tag in the list `readTags()` resolves to.
+ * - The extension line (extension/manifest.json) moves only when the extension changed since its own tag,
+ *   "ext-v" and its current version: `readExtension(tag)` resolves to the messages of those changes (none: it
+ *   didn't change, and the manifest is left untouched). It moves by `level` if given, else by those messages, past
+ *   any "ext-v" tag. A current version without its tag yet is released as it is, so it never goes down.
+ *
+ * What the CLI runs, with the repository root, stdin and git; tests call it on a temporary root, in-process.
  */
-export async function bumpFiles(root, level, readInput, readTags) {
+export async function bumpFiles(root, level, readInput, readTags, readExtension = async () => []) {
   const files = VERSION_FILES.map((f) => ({ ...f, ...readJson(root, f.file) }));
+  const explicit = ["patch", "minor", "major"].includes(level);
   const current = files[0].json.version; // package.json, the first entry, holds the current version
   let next;
-  if (["patch", "minor", "major"].includes(level)) {
+  if (explicit) {
     next = increment(current, level);
   } else {
     const input = await readInput();
     next = nextVersion(current, input.split("\0").filter((m) => m.trim()));
   }
-  next = nextFreeVersion(next, await readTags());
-  writeAll(root, files.map(({ file, text, update }) => ({ file, text: update(file, text, next), original: text })));
-  return next;
+  const tags = await readTags();
+  next = nextFreeVersion(next, tags, TAG_PREFIX.package);
+
+  const manifest = files.find((f) => f.line === "extension");
+  const extCurrent = manifest.json.version;
+  if (typeof extCurrent !== "string") throw new Error(`${manifest.file} has no "version" field to update.`);
+  parse(extCurrent); // throws on an invalid version before anything is written
+  let extension = null;
+  if (!tags.includes(`${TAG_PREFIX.extension}${extCurrent}`)) {
+    extension = extCurrent;
+  } else {
+    const changes = await readExtension(`${TAG_PREFIX.extension}${extCurrent}`);
+    if (changes.length) extension = nextFreeVersion(explicit ? increment(extCurrent, level) : nextVersion(extCurrent, changes), tags, TAG_PREFIX.extension);
+  }
+
+  const versionOf = { package: next, extension };
+  const writes = files.filter(({ line }) => versionOf[line] !== null);
+  writeAll(root, writes.map(({ file, text, update, line }) => ({ file, text: update(file, text, versionOf[line]), original: text })));
+  return { version: next, extension };
 }
 
 /** Reads all of stdin as one string (the CLI's `readInput`). */
@@ -234,8 +303,10 @@ async function readStdin() {
   return input;
 }
 
+/** Prints `version=X.Y.Z` and `extension=X.Y.Z` (empty when the extension didn't move), as the workflow's step outputs. */
 async function main() {
-  console.log(await bumpFiles(ROOT, process.argv[2], readStdin, () => gitTags(ROOT)));
+  const { version, extension } = await bumpFiles(ROOT, process.argv[2], readStdin, () => gitTags(ROOT), (tag) => gitExtensionChanges(ROOT, tag));
+  console.log(`version=${version}\nextension=${extension ?? ""}`);
 }
 
 // Compares real paths: argv[1] keeps any symlink in the path the script was started by, import.meta.url doesn't.
