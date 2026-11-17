@@ -502,3 +502,69 @@ describe("#182: event-loop delay on the teams lines that say a read failed or wa
     expect(events(lines)).toEqual(["teams v=0.3.62 role=none status=unreadable kind=timeout ms=15002 failures=1 eld=- eldMax=- elu=-"]);
   });
 });
+
+describe("#182: the background watch logs a stalled event loop at its tick", () => {
+  const events = (lines: () => string[], file: string) => (existsSync(file) ? lines().map((l) => l.replace(/^\S+ pid=\d+ /, "")) : []);
+  const status = { teamsTabs: 1, sessions: [{ sessionCaptured: true }], services: { chatsvc: "2026-11-11T00:00:00Z" } };
+  const quiet = () => ({ restartNeeded: false }) as const;
+  const stops: (() => void)[] = [];
+  afterEach(() => {
+    stops.splice(0).forEach((s) => s());
+    vi.useRealTimers();
+  });
+  const fakeClock = () => vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval", "performance"] });
+
+  it.each([
+    ["a peer", { role: "peer", connected: true }],
+    ["a hub without an extension", { role: "hub", connected: false }],
+  ])("as %s, logs loop-delay when the loop stalled for 1 s or more, and starts a new window every tick", async (_, b) => {
+    fakeClock();
+    const loopDelay = fakeLoopDelay({ p99Ms: 25, maxMs: 1_000, elu: 4 });
+    const { log, lines, file } = setup({ loopDelay });
+    const bridge = { ...b, backgroundStatus: async () => status };
+    stops.push(watchState({ bridge, diagnostics: log, onDisk: quiet, everyMs: 60_000 }));
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(events(lines, file)).toEqual(["loop-delay v=0.3.62 role=none eld=25 eldMax=1000 elu=4"]);
+    expect(loopDelay.resets).toBe(1);
+    loopDelay.now = { p99Ms: 25, maxMs: 999, elu: 4 };
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(events(lines, file)).toHaveLength(1); // under 1 s: nothing new
+    expect(loopDelay.resets).toBe(2);
+  });
+
+  it("repeats a run of stalled ticks at the 1st and every 10th, and a quiet tick ends the run", async () => {
+    fakeClock();
+    const loopDelay = fakeLoopDelay({ p99Ms: 40, maxMs: 5_000, elu: 2 });
+    const { log, lines, file } = setup({ loopDelay });
+    stops.push(watchState({ bridge: { role: "peer", connected: true, backgroundStatus: async () => status }, diagnostics: log, onDisk: quiet, everyMs: 60_000 }));
+    await vi.advanceTimersByTimeAsync(12 * 60_000);
+    expect(events(lines, file)).toHaveLength(2); // the 1st and the 10th
+    loopDelay.now = { p99Ms: 1, maxMs: 30, elu: 1 };
+    await vi.advanceTimersByTimeAsync(60_000);
+    loopDelay.now = { p99Ms: 40, maxMs: 5_000, elu: 2 };
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(events(lines, file)).toEqual(Array(3).fill("loop-delay v=0.3.62 role=none eld=40 eldMax=5000 elu=2"));
+  });
+
+  it("doesn't end the window while the hub's read still runs, so that read's line covers the whole read", async () => {
+    fakeClock();
+    const loopDelay = fakeLoopDelay({ p99Ms: 30, maxMs: 1_500, elu: 85 });
+    const { log, lines, file } = setup({ loopDelay });
+    const bridge = { role: "hub", connected: true, backgroundStatus: () => new Promise((r) => setTimeout(() => r(status), 2_800)) };
+    stops.push(watchState({ bridge, diagnostics: log, onDisk: quiet, everyMs: 1_000 }));
+    await vi.advanceTimersByTimeAsync(3_900); // ticks at 1, 2 and 3 s; the read runs from 1 s to 3.8 s
+    expect(loopDelay.resets).toBe(1);
+    expect(events(lines, file)).toEqual([
+      "loop-delay v=0.3.62 role=none eld=30 eldMax=1500 elu=85",
+      "teams v=0.3.62 role=none tabs=1 captured=yes services=chatsvc account=none ms=2800 slow=yes eld=30 eldMax=1500 elu=85",
+    ]);
+  });
+
+  it("logs no loop-delay without a monitor", async () => {
+    fakeClock();
+    const { log, lines, file } = setup();
+    stops.push(watchState({ bridge: { role: "peer", connected: true, backgroundStatus: async () => status }, diagnostics: log, onDisk: quiet, everyMs: 60_000 }));
+    await vi.advanceTimersByTimeAsync(3 * 60_000);
+    expect(events(lines, file)).toEqual([]);
+  });
+});
