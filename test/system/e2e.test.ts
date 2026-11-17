@@ -36,6 +36,7 @@ const fakeExtension: Record<string, (p: any) => unknown> = {
   findPeople: () => ({ count: 1, people: [{ name: "Bo Kim", email: "bo@x.com" }] }),
   listMeetings: (p) => ({ total: 1, meetings: [{ id: "19:meeting_x@thread.v2", title: "Sync", transcriptOnly: p.transcriptOnly }] }),
   readTranscript: (p) => ({ meeting: "Sync", transcript: "[00:00:01] Bo Kim: hi", params: p }),
+  searchTranscripts: (p) => ({ query: p.query, meetingsSearched: 0, matches: 0, results: [], params: p }),
   requestSend: () => ({ sent: false, reason: "The user declined; nothing was sent." }),
 };
 
@@ -185,5 +186,11 @@ describe("MCP server end to end", () => {
     const { data } = await call("read_transcript", { meeting: "Sync", from: "10:00", max_length: 5000 });
     expect(data.params).toEqual({ meeting: "Sync", from: "10:00", maxLength: 5000 });
     expect((await call("read_transcript", { meeting: "Sync", from: "ten" })).isError).toBe(true);
+  });
+
+  // #179: one search reads at most 20 meetings, so it stays within its Teams request budget.
+  it("search_transcripts takes at most 20 meetings", async () => {
+    expect((await call("search_transcripts", { query: "budget", meetings: 20 })).data.params).toEqual({ query: "budget", meetings: 20, limit: 30 });
+    expect((await call("search_transcripts", { query: "budget", meetings: 21 })).isError).toBe(true);
   });
 });
