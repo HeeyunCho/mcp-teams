@@ -1,5 +1,7 @@
 // The native host's log (#123 decision 6): ~/.mcp-teams/hub.log (0600), rotated to hub.log.1
 // once it passes 1 MB, with metadata only (type, method, ok, bytes, ms), never message text.
+import { spawn } from "node:child_process";
+import { once } from "node:events";
 import { closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync, writeSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -9,7 +11,7 @@ import { errorFields, HUB_LOG_MAX_BYTES, hubLog, logVersion, rotate, trafficLogg
 // The real fs, with the calls the logger makes counted (#170: not three blocking calls a line).
 vi.mock("node:fs", async (importOriginal) => {
   const fs = await importOriginal<typeof import("node:fs")>();
-  return { ...fs, mkdirSync: vi.fn(fs.mkdirSync), statSync: vi.fn(fs.statSync) };
+  return { ...fs, mkdirSync: vi.fn(fs.mkdirSync), statSync: vi.fn(fs.statSync), utimesSync: vi.fn(fs.utimesSync) };
 });
 
 const dirs: string[] = [];
@@ -133,6 +135,161 @@ describe("#143: rotation with other processes and other programs", () => {
     rotate(file, 1_000);
     expect(readdirSync(dir).sort()).toEqual(["hub.log.1"]);
     expect(statSync(`${file}.1`).size).toBe(2_000);
+  });
+});
+
+// #177: each rotation while .1 is held leaves a .rotating file. The next real move, under the
+// lock, removes this log's ones older than a day; younger ones (another process may have just
+// made one, and a late line may still land in it, #152) and other logs' ones stay.
+describe("#177: leftover .rotating files", () => {
+  const hoursAgo = (path: string, hours: number) => {
+    const t = new Date(Date.now() - hours * 3_600_000);
+    utimesSync(path, t, t);
+  };
+  const rotating = (dir: string) => readdirSync(dir).filter((f) => f.endsWith(".rotating")).sort();
+
+  it("removes this log's .rotating files older than a day at the next rotation, and keeps younger ones and other files", () => {
+    const dir = tempDir();
+    const file = join(dir, "hub.log");
+    const names = {
+      old: "hub.log.1234-ab12cd34.rotating",
+      older: "hub.log.99-00ff00ff.rotating",
+      young: "hub.log.5678-0badf00d.rotating", // another process's, 23 h old
+      otherLog: "server.log.123-abcdef12.rotating", // server.log's, in the same folder
+      notOurs: "hub.log.old.rotating", // not a name rotate() makes
+    };
+    for (const n of Object.values(names)) writeFileSync(join(dir, n), "an older part of the log\n");
+    hoursAgo(join(dir, names.old), 25);
+    hoursAgo(join(dir, names.older), 24 * 30);
+    hoursAgo(join(dir, names.young), 23);
+    hoursAgo(join(dir, names.otherLog), 25);
+    hoursAgo(join(dir, names.notOurs), 25);
+    writeFileSync(file, "x".repeat(2_000));
+    rotate(file, 1_000);
+    expect(statSync(`${file}.1`).size).toBe(2_000);
+    expect(rotating(dir)).toEqual([names.young, names.notOurs, names.otherLog].sort());
+  });
+
+  it("skips one it can't remove (held) without losing the line or the others, and removes it at a later rotation", () => {
+    const dir = tempDir();
+    const file = join(dir, "hub.log");
+    const held = join(dir, "hub.log.1-00000000.rotating");
+    const old = join(dir, "hub.log.999-ffffffff.rotating");
+    mkdirSync(held); // unlinkSync fails on it on every OS, as on a held file on Windows
+    writeFileSync(old, "an older part of the log\n");
+    hoursAgo(held, 25);
+    hoursAgo(old, 25);
+    writeFileSync(file, "x".repeat(2_000));
+    const log = hubLog(file, 1_000);
+    expect(() => log("after")).not.toThrow();
+    expect(readFileSync(file, "utf8")).toMatch(/^\S+ pid=\d+ after\n$/);
+    expect(rotating(dir)).toEqual(["hub.log.1-00000000.rotating"]);
+    rmSync(held, { recursive: true }); // let go of
+    writeFileSync(held, "an older part of the log\n");
+    hoursAgo(held, 25);
+    writeFileSync(file, "x".repeat(2_000));
+    rotate(file, 1_000);
+    expect(rotating(dir)).toEqual([]);
+  });
+
+  it("removes nothing while another process holds the lock, or when no rotation was needed", () => {
+    const dir = tempDir();
+    const file = join(dir, "hub.log");
+    const old = join(dir, "hub.log.1234-ab12cd34.rotating");
+    writeFileSync(old, "an older part of the log\n");
+    hoursAgo(old, 25);
+    writeFileSync(file, "small\n");
+    rotate(file, 1_000);
+    expect(existsSync(old)).toBe(true);
+    rotate(file, 1_000, 2_000); // saw it big just before another process rotated it: no move, so no cleanup
+    expect(readdirSync(dir).sort()).toEqual(["hub.log", "hub.log.1234-ab12cd34.rotating"]);
+    writeFileSync(file, "x".repeat(2_000));
+    writeFileSync(`${file}.lock`, ""); // another process is rotating
+    rotate(file, 1_000);
+    expect(readdirSync(dir).sort()).toEqual(["hub.log", "hub.log.1234-ab12cd34.rotating", "hub.log.lock"]);
+  });
+
+  it("removes old ones also when this rotation itself had to set the log aside (.1 held)", () => {
+    const dir = tempDir();
+    const file = join(dir, "hub.log");
+    mkdirSync(`${file}.1`); // a .1 nothing can be renamed over
+    const old = join(dir, "hub.log.1234-ab12cd34.rotating");
+    writeFileSync(old, "an older part of the log\n");
+    hoursAgo(old, 25);
+    writeFileSync(file, "x".repeat(2_000));
+    rotate(file, 1_000);
+    const left = rotating(dir);
+    expect(left).toHaveLength(1);
+    expect(left[0]).toMatch(new RegExp(`^hub\\.log\\.${process.pid}-[0-9a-f]{8}\\.rotating$`));
+    expect(statSync(join(dir, left[0])).size).toBe(2_000);
+  });
+
+  it("keeps a log set aside just now even when its last line is over a day old (a rename keeps the mtime)", () => {
+    const dir = tempDir();
+    const file = join(dir, "hub.log");
+    mkdirSync(`${file}.1`); // a .1 nothing can be renamed over
+    writeFileSync(file, "x".repeat(2_000)); // passed the cap with its last line, then nothing for 25 h
+    hoursAgo(file, 25);
+    hubLog(file, 1_000)("after a quiet day");
+    const left = rotating(dir);
+    expect(left).toHaveLength(1);
+    expect(statSync(join(dir, left[0])).size).toBe(2_000);
+    writeFileSync(file, "x".repeat(2_000), { flag: "a" }); // past the cap again: another process's rotation, minutes later
+    rotate(file, 1_000);
+    expect(rotating(dir)).toHaveLength(2);
+    expect(lineCount(dir)).toBe(3);
+  });
+
+  it("keeps the log it just set aside even when it can't renew that file's mtime", () => {
+    const dir = tempDir();
+    const file = join(dir, "hub.log");
+    mkdirSync(`${file}.1`);
+    writeFileSync(file, "x".repeat(2_000));
+    hoursAgo(file, 25);
+    vi.mocked(utimesSync).mockImplementationOnce(() => {
+      throw Object.assign(new Error("operation not permitted"), { code: "EPERM" });
+    });
+    rotate(file, 1_000);
+    const left = rotating(dir);
+    expect(left).toHaveLength(1);
+    expect(statSync(join(dir, left[0])).size).toBe(2_000);
+  });
+
+  // On Windows a file another program opened without FILE_SHARE_DELETE (a virus scanner, a viewer)
+  // can't be deleted: unlinkSync fails with EBUSY (or EPERM). Held here by PowerShell, opened with
+  // FileShare.None, until the test closes its stdin.
+  it.runIf(process.platform === "win32")("Windows: keeps an old one another program holds open, and removes it at a rotation after it is let go", { timeout: 60_000 }, async () => {
+    const dir = tempDir();
+    const file = join(dir, "hub.log");
+    const held = join(dir, "hub.log.1234-ab12cd34.rotating");
+    writeFileSync(held, "an older part of the log\n");
+    hoursAgo(held, 25);
+    const holder = spawn(
+      "powershell.exe",
+      ["-NoProfile", "-NonInteractive", "-Command", "$f = [System.IO.File]::Open($env:HELD_PATH, 'Open', 'ReadWrite', 'None'); [Console]::Out.WriteLine('held'); [Console]::Out.Flush(); [void][Console]::In.ReadToEnd(); $f.Close()"],
+      { env: { ...process.env, HELD_PATH: held }, stdio: ["pipe", "pipe", "inherit"] },
+    );
+    const exited = once(holder, "exit");
+    try {
+      let out = "";
+      await new Promise<void>((resolve, reject) => {
+        holder.stdout.on("data", (d: Buffer) => (out += d.toString()).includes("held") && resolve());
+        holder.once("exit", (code) => reject(new Error(`PowerShell exited (${code}) before holding the file`)));
+      });
+      expect(() => rmSync(held)).toThrow(/EBUSY|EPERM/); // really held
+      writeFileSync(file, "x".repeat(2_000));
+      const log = hubLog(file, 1_000);
+      expect(() => log("after")).not.toThrow();
+      expect(readFileSync(file, "utf8")).toMatch(/^\S+ pid=\d+ after\n$/);
+      expect(statSync(`${file}.1`).size).toBe(2_000);
+      expect(rotating(dir)).toEqual(["hub.log.1234-ab12cd34.rotating"]);
+    } finally {
+      holder.stdin.end();
+      await exited;
+    }
+    writeFileSync(file, "x".repeat(2_000));
+    rotate(file, 1_000);
+    expect(rotating(dir)).toEqual([]);
   });
 });
 
