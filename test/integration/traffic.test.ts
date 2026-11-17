@@ -94,3 +94,27 @@ describe("3.4: the traffic log records only while api_traffic turned it on", () 
     expect(await next.chrome.storage.session.get("traffic")).toEqual({});
   });
 });
+
+// #200: the Teams tab also opens WebSockets (trouter) and sends beacons (navigator.sendBeacon, Chrome's
+// "ping" type). Chrome reports a request to a webRequest listener only if the filter's types include its type.
+describe("#200: the traffic log records the Teams tab's websocket and ping requests", () => {
+  const SOCKET = "https://go.trouter.teams.microsoft.com/v4/c";
+  const BEACON = "https://teams.cloud.microsoft/api/fictional/beacon";
+
+  it("a websocket and a ping from the Teams tab are recorded while recording is on, with their type", async () => {
+    const fake = createFakeChrome();
+    const worker = await loadWorker(fake);
+    worker.registerListeners();
+    await worker.handlers.apiTraffic({ record: true });
+    await fake.fire("beforeSendHeaders", { url: SOCKET, type: "websocket" });
+    await fake.fire("beforeSendHeaders", { url: BEACON, method: "POST", type: "ping" });
+    const r = await worker.handlers.apiTraffic({});
+    expect(r).toMatchObject({ recording: true, recorded: 2 });
+    expect(r.requests).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ method: "GET", host: "go.trouter.teams.microsoft.com", path: "/v4/c", type: "websocket" }),
+        expect.objectContaining({ method: "POST", host: "teams.cloud.microsoft", path: "/api/fictional/beacon", type: "ping" }),
+      ]),
+    );
+  });
+});
