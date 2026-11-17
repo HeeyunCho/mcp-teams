@@ -1,4 +1,4 @@
-# Handoff: mcp-teams after #175 (updated 2026-11-17 on the Windows PC)
+# Handoff: mcp-teams after #175 and the 2026-11-17 triage (updated 2026-11-17 on the Windows PC)
 
 Repo: GitHub `HeeyunCho/mcp-teams`. PRs 1–4 of #123 (the native-messaging host) are on `main`, all **off by default** (`nativeHost` off). Next is PR 5, which turns it on. The last release is 0.3.72 (`71f49e2`, #174 and #175); 0.3.71 (`9bf7434`) has #165 and #166 (dependency bumps only), 0.3.70 (`d5cacdd`) has #163, 0.3.69 (`d35759e`) has #159, 0.3.68 (`60f005f`) has #158, 0.3.67 (`aa90cf4`) has #157, 0.3.66 (`367f198`) has #154.
 
@@ -36,6 +36,25 @@ A read-only subagent audited `main` at 0.3.71: no unbounded growth in the hot pa
 | #173 | Tracking: leftover `.rotating` files, the transcript cache counting text not memory, `search_transcripts` up to about 1,000 Teams requests, `get_version`'s sync `reg.exe`; and from `server.log`, frequent 15 s status-read timeouts, a hub silent for about 60 s on 2026-11-12, a possible native-host restart loop | Open |
 
 The audit found safe: pending-call and turn tables, timers and listeners, the peer send buffer and relay limits, the extension's 0.5–30 s backoff, the 60 s state watch (hub only), log volume, and the extension's caches.
+
+### Triage round (2026-11-17, after 0.3.72)
+
+Labels and comments only, no code. Each issue was checked against `main` at 0.3.72, and each got a triage comment. There's no `triage` skill here, so the triage followed `docs/agents/triage-labels.md`.
+
+| Issue | Now | Why |
+|---|---|---|
+| #170 | `ready-for-agent`, `performance` | `hubLog()` still makes three blocking file calls per line. A fix must keep rotation correct under the #152/#163 lock (an in-memory size is only a hint; recheck under the lock) |
+| #172 | `ready-for-agent`, `bug` | `send()` (`src/bridge.ts`, about line 1652) still writes without a `readyState` check, and `runCall` doesn't recheck the socket between `pickExtension` and `takeTurn` |
+| #149 | `ready-for-agent` | #159 did the handshake part. Left: keep-alive drops (`startKeepAlive`, `startPeerBeat`) write no `hub.log` line, and the system tests on the 200 ms test heartbeat aren't checked one by one |
+| #173 | `ready-for-human` | Tracking issue, all 7 items still apply. Its 4 low findings are being split into their own issues. The 3 "cause unknown" items need the live `server.log` |
+| #21 | `ready-for-human` | The "Part of" umbrella. What's left is in #123 and #111; close it when #123 ships |
+| #142 | `ready-for-human` | Not stale: `restart-needed v=0.3.71 onDisk=0.3.72` at 06:59:39Z, and 0.3.70/0.3.71 servers still running at 07:25Z. Same cause as #111/#96; kept open so the hourly health check's reports land there. Close it with #111 |
+| #162 | `ready-for-human` | Not stale: on 0.3.72, `tabs=0 captured=no` from `extension-connected` at 07:03:10Z to the first capture at 07:31:55Z (about 29 min, through four hub handovers). That's past #160's 15 min threshold. Needs the live browser and its logs |
+| #124 | still `needs-info` | On 0.3.72 the extension closed once (`extension-closed code=1001` at 07:15:00Z on hub 42868) and rejoined at 07:16:03Z, about 63 s. That's too short to show either way. The comment of 2026-11-17 lists what's still needed: a long occurrence on 0.3.66 or later with its `server.log` lines, the extension's service-worker console at that moment, and whether it only follows a release |
+
+- **Closed issues tidied:** `needs-triage` removed from #168, #169 and #171.
+- **#169 was closed as completed** at 07:09:26Z with no comment and no fixing PR. `get_version` on 0.3.72 still reports `maxMessageBytes: 268435456`, so the 256 MB limit it describes is unchanged. Check whether that was intended before #123 PR 5.
+- **Repo tidy:** Dependabot #166 had merged on 2026-11-16, but its branch `dependabot/npm_and_yarn/hono-4.13.18` was left on origin. Its head (`8b43592`) is in `main`, so the branch was deleted (it can be restored from #166). origin now has only `main`. Locally, the `wt-diag` scratchpad worktree and the five merged `worktree-agent-*` branches were removed.
 
 ## Earlier on 2026-11-16
 
@@ -186,10 +205,11 @@ The audit found safe: pending-call and turn tables, timers and listeners, the pe
   1. run `api_traffic` with `record: true`, use Teams search for a minute, call `api_traffic` again;
   2. confirm `substrate` and `chatsvc` are still captured. Close #122 once it passes.
   - Today both were seen captured from the Teams page (`chatsvc`, and `substrate` at 12:49:54Z), but not as this check; `csa`/`mt` were not (see "csa/mt captures" in Now).
-- **#124** (`needs-info`): the extension stayed disconnected while a hub listened. The 2026-11-10 16:45 episode is in Earlier. `server.log` (#147) will show the `handshake-closed` and `extension-*` lines next time.
-- **#111/#96** (`ready-for-human`): close with the native host and launcher (#123, ADR 0002). #142 is another instance.
-- **#149:** see "Open bugs from 2026-11-11" in Now.
-- **#169, #170, #172, #173** (`needs-triage`, the CPU/memory audit): see "The CPU/memory audit" in Now. #169 (and #168's 64 MiB, done) matter before `nativeHost` is on by default.
+- **#124** (`needs-info`): the extension stayed disconnected while a hub listened. The 2026-11-10 16:45 episode is in Earlier. The short 0.3.72 drop and what's still needed are in "Triage round" in Now.
+- **#111/#96** (`ready-for-human`): close with the native host and launcher (#123, ADR 0002). #142 (`ready-for-human`) is another instance and collects the health check's reports.
+- **#162** (`ready-for-human`): no Teams capture for about 29 min on 0.3.72; see "Triage round" in Now.
+- **#149, #170, #172** (`ready-for-agent`): see "Triage round" in Now.
+- **#173** (`ready-for-human`, the audit's tracking issue): its low findings are being split into their own issues. **#169** is closed, but its 256 MB limit is unchanged (see "Triage round"). #168's 64 MiB (done) and #169 matter before `nativeHost` is on by default.
 - **Closed:** #76 (#137), #134 (#136), #138 (#144), #143 (#147), #145 (#150), #148 (#158), #152 (#163), #153 (#154), #156 (#159), #160 (transient, `wontfix`), #168 (#174), #171 (#175).
 - **Outlook:** the pipe-name collision for non-ASCII usernames is mcp-newoutlook#178.
 
@@ -197,7 +217,7 @@ The audit found safe: pending-call and turn tables, timers and listeners, the pe
 
 1. **Get every server onto 0.3.72** (see "This Windows PC"): rebuild, `reload-extension`, then a full restart of each session (`/mcp` → Reconnect did not replace any process on 2026-11-12), Claude Desktop last. Then check `server.log` for the first `handshake-closed` lines with `reason`/`ms`/`hello`/`port` (written only by a hub of 0.3.69 or later).
 2. **The rest of #149** (keep-alive drops leave no `hub.log` line; the system tests on the 200 ms test heartbeat), the #156 follow-ups from the #159 review, and the #152 follow-ups from #163.
-3. **Triage the audit's open issues** (#169, #170, #172, #173); fix #169 before #123 PR 5.
+3. **The audit's `ready-for-agent` fixes:** #170 and #172 (and the issues split out of #173). Settle #169's 256 MB limit before #123 PR 5.
 4. **Worker restarts emptying the captures** (Now, "#160"): open an issue if it should be worked on.
 5. **#123 PR 5:** turn `nativeHost` on by default, with setup registering by default; `feat!:` → 0.4.0. It waits for the manual checks on Windows and the Mac (including Chrome's permission warning from #146). Read the #123 comments first.
 6. **Versioned launcher (0.5.0, ADR 0002).** Open the issue from the ADR first.
@@ -223,7 +243,7 @@ Run `gh issue list` for the full backlog. #21 and #96 are the umbrella issues th
 - **Claude Desktop's teams log:** `%LOCALAPPDATA%\Claude\Logs\mcp-server-teams.log` (not `%APPDATA%`).
 - **Memory:** often only about 2 GB of 27 GB free. Timing tests can then fail (`drain.test.ts` once on Node 20 during #147; #145 before #150); rerun the file alone.
 - **`npx tsc` can return exit code 0 on type errors here** (a wrapper prints `npm notice run … npx`). Gate on `node node_modules/typescript/bin/tsc --noEmit` and `node node_modules/typescript/bin/tsc -p tsconfig.test.json --noEmit` instead.
-- **Stray branches:** `worktree-agent-*` branches from older Agent-tool worktrees (a04b8591…, a25c22b6…, a26850f5…, a905f1e9…, af4d18a2…) and the `wt-diag` scratchpad worktree from an earlier session are still there; not checked, left alone.
+- **Stray branches:** none since 2026-11-17. The five merged `worktree-agent-*` branches and the `wt-diag` scratchpad worktree were removed, and the main checkout is the only worktree.
 - **Worktrees:** an Agent-tool worktree starts with an empty `node_modules`. Run `npm ci` in it before testing; otherwise vitest resolves from the main checkout.
 - **Node versions:** default `node` is v26. `npx -y node@20` doesn't give Node 20 here (`npx -y node@20 -v` prints `v26.3.0`).
   - **For a real Node 20 run:** an unpacked v20.20.2 is at `C:\Users\조희연\AppData\Local\Temp\claude\4b73b95594a054db\17972b37-7e83-4ce8-8b9d-3b36d890ee62\scratchpad\node20\node-v20.20.2-win-x64\node.exe`. It's in a session scratchpad and may disappear; if so, get the official zip from nodejs.org, check it against `SHASUMS256.txt` and unpack it outside the repo.
