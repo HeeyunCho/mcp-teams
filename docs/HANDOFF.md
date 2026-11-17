@@ -2,6 +2,79 @@
 
 Repo: GitHub `HeeyunCho/mcp-teams`. PRs 1–4 of #123 (the native-messaging host) are on `main`, all **off by default** (`nativeHost` off). Next is PR 5, which turns it on. The last release is 0.3.72 (`71f49e2`, #174 and #175); 0.3.71 (`9bf7434`) has #165 and #166 (dependency bumps only), 0.3.70 (`d5cacdd`) has #163, 0.3.69 (`d35759e`) has #159, 0.3.68 (`60f005f`) has #158, 0.3.67 (`aa90cf4`) has #157, 0.3.66 (`367f198`) has #154.
 
+## Resume here (session of 2026-11-17, before a PC reboot)
+
+This day was **triage and bookkeeping only. No code changed:** `main` is at `3ee1681`, still release 0.3.72. Every change was to GitHub issues, or to this file through docs PRs #181, #184, #191, #194, #196 and #197, all merged. There are no open PRs, no extra worktrees, and no local branches apart from `main`.
+
+**Where the state lives (read these, don't re-derive):**
+- **Issue #25, the roadmap:** the sections "CPU/memory audit (2026-11-16) and its follow-ups" and "Older follow-ups rechecked against 0.3.72 (2026-11-17)". They list every open issue with what's left and a link to its latest checklist comment.
+- **This file:** "Now (2026-11-17)", "Open issues and decisions" and "Next up", below.
+- **`gh issue list`:** 34 open issues. 19 are `ready-for-agent`, 14 `ready-for-human` and 1 `needs-info` (#124).
+
+### First, after the reboot
+1. **`get_version`:** everything should be on 0.3.72 with `restartNeeded: false`. The reboot also replaces the two 0.3.70 servers (pids 4196 and 69468) that #142 noted.
+2. **Read `~/.mcp-teams/server.log` from the reboot on.** A cold start is a free data point for:
+   - #124: how long until `extension-connected`;
+   - #162: how long until `tabs=1 captured=yes`;
+   - #173/#182: `status=unreadable kind=timeout` lines.
+
+   If one shows something new, add a comment to the issue. Quote only version, role, pid, code, ms and count fields; never region, account or names.
+3. **#122:** the user's manual Chrome check is still open. The steps are in #122's latest comment.
+
+### Suggested order for the `ready-for-agent` work
+From the 2026-11-17 recheck of #185–#190 and #192. This isn't recorded on #25 yet; add it there. The four lanes can run in parallel; inside each lane, the order matters.
+- **A, measure-memory:**
+  1. #185's freed port and #190 items 1–3 in one PR;
+  2. #185's load loop early, since #186, #187 and #149 use it; then the Node 20 `readMessagesCut` flake.
+  3. Separately: #190's heap check first, then #178 together with #190's byte-count item, so `extension/background.js:1225` changes once.
+- **B, bridge send path:**
+  1. #172 together with #192's "(unknown)" item, which is the same recheck after `pickExtension`;
+  2. then #188;
+  3. then the rest of #192.
+- **C, tests:** #187, then #186 (shared read-only `running` getter), or both in one PR. #149 runs alongside.
+- **D, extension worker:** #189, then #183 item 3 once the user decides it. #77's test nits can run alongside.
+- **Other pairs:**
+  - #177 before #170: same `rotate()`/`hubLog()` and test file.
+  - #180 and #195 one after the other: both change `nativeHostReport`/`get_version`.
+  - #193 with or before #169.
+  - Move the `getVersion` test helper once under #195, for all six copies; #103 notes it too.
+- **`docs/testing.md`** is edited by #185, #189, #190 and #192, so whichever lands later rebases.
+
+### Waiting on the user (don't do these unattended)
+- #22's gap 2: fail a replaced connection's calls at once, or give them a grace period.
+- #183's five items: each has a recommendation in its latest comment.
+- #103's two rules.
+- #23: which Node versions CI runs.
+- #35: its kept decision items.
+- #21: open the ADR 0002 launcher issue, and drop the idea of gating send safety on a declared feature or keep it.
+- #123 PR 5: the manual Windows and macOS checks.
+
+### Rules learned today
+- **Closing keywords:** never write fix/fixes/close/closes/closed/resolve(s) right before `#NNN` in a PR description, commit message or comment unless that PR really fixes it. #176 closed #169 by accident, and a draft PR description of mine nearly did it again.
+  - Before creating anything, run `grep -inE '\b(fix(e[sd])?|close[sd]?|resolve[sd]?):? +#[0-9]' <file>`.
+  - Before merging, run `gh pr view N --json closingIssuesReferences`; it must be `[]` for docs PRs.
+- **Editing issue bodies:** fetch the body, change it with a small script that asserts each anchor appears exactly once, diff, then `gh issue edit --body-file`.
+  - Write the file with `newline=''`. Python on Windows otherwise writes CRLF, and the diff shows every line as changed.
+  - Two subagents must never edit the same issue body at once. The main session makes all #25 edits.
+- **Docs PRs follow one pattern:**
+  1. `git worktree add -b docs/<name> <scratchpad>/wt-<name> origin/main`, edit, commit, push;
+  2. open the PR with a keyword-free description and wait for CI (test, test-windows, gitleaks);
+  3. `gh pr merge N --merge --match-head-commit <sha>`;
+  4. remove the worktree, delete the branch on origin and locally, then pull.
+
+  This checkout is the live install; a docs-only pull needs no rebuild.
+- **jq on Windows Git Bash** rejects `\[` inside `test()` patterns. Pipe to `grep` instead.
+
+### Suggested skills
+- `tdd` (or `superpowers:test-driven-development`) for any `ready-for-agent` issue: a red test first, per #25's process rules.
+- `code-review` from a fresh subagent before every merge. The reviewer is never the author.
+- `superpowers:using-git-worktrees`, or the Agent tool with `isolation: "worktree"`, for code changes. Run `npm ci` in a new worktree first.
+- `diagnosing-bugs` if the post-reboot log shows something new for #124, #162 or #173.
+- `superpowers:finishing-a-development-branch` when a fix branch is ready to merge.
+- `handoff` again at the end of the next session.
+
+---
+
 ## Now (2026-11-17)
 
 | PR | Change | State |
