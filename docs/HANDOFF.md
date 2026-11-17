@@ -1,4 +1,4 @@
-# Handoff: mcp-teams after #175 and the 2026-11-17 triage (updated 2026-11-17 on the Windows PC)
+# Handoff: mcp-teams after #175, the 2026-11-17 triage and the closure audit (updated 2026-11-17 on the Windows PC)
 
 Repo: GitHub `HeeyunCho/mcp-teams`. PRs 1–4 of #123 (the native-messaging host) are on `main`, all **off by default** (`nativeHost` off). Next is PR 5, which turns it on. The last release is 0.3.72 (`71f49e2`, #174 and #175); 0.3.71 (`9bf7434`) has #165 and #166 (dependency bumps only), 0.3.70 (`d5cacdd`) has #163, 0.3.69 (`d35759e`) has #159, 0.3.68 (`60f005f`) has #158, 0.3.67 (`aa90cf4`) has #157, 0.3.66 (`367f198`) has #154.
 
@@ -55,6 +55,10 @@ Labels and comments only, no code. Each issue was checked against `main` at 0.3.
 - **Split out of #173, all `ready-for-agent` and checked against 0.3.72:** #177 (`bug`: leftover `.rotating` files never deleted, `src/hubLog.ts` `rotate()`), #178 (`performance`: the extension's transcript cache counts response text, not the parsed JSON it keeps), #179 (`performance`: one `search_transcripts` call can make about 1,000 Teams requests; its timeout is 300 s, not the 120 s #173 said), #180 (`performance`: `get_version` blocks on `execFileSync(reg.exe)` when `nativeHost` is on).
 - **Closed issues tidied:** `needs-triage` removed from #168 and #171 (and from #169, since reopened).
 - **#169 was closed by accident and is reopened** (`ready-for-agent`). Merging #176 closed it at 07:09:27Z, because #176's description said "fix #169" and GitHub reads that as a closing keyword. No commit changed the limit: `src/bridge.ts:136` is still 256 MB, and `get_version` on 0.3.72 reports `maxMessageBytes: 268435456`. **In PR descriptions and commit messages, don't write "fix/fixes/close/resolve #NNN" unless the PR really fixes it.**
+- **#182** (`performance`, `ready-for-agent`, filed 2026-11-17): log event-loop delay and utilisation in `server.log`. It serves #173's three "cause unknown" items (the 15 s status-read timeouts, the hub silent for about 60 s, a possible native-host restart loop) by showing whether the server's own event loop was blocked.
+- **#77 and #103 rechecked against 0.3.72** ([#77 checklist](https://github.com/HeeyunCho/mcp-teams/issues/77#issuecomment-6943292684), [#103 checklist](https://github.com/HeeyunCho/mcp-teams/issues/103#issuecomment-6943293165)). #77 stays `ready-for-agent`. What's left for an agent: a `read_messages` cursor carries no account (`extension/teams.js:218-243`); a switch before the first page isn't caught (`extension/background.js:1381` runs before the `:1308` snapshot); and three #141 test nits. Its four judgement items moved to **#183** (`ready-for-human`). **#103 is now `ready-for-human`:** five refactors with no behaviour change, and two rules to decide (the stuck rule's 5-minute gap, recovery-tab calls counting as Teams-tab calls).
+- **#25** (the roadmap): a "CPU/memory audit" checklist section (#168 and #171 ticked; #169, #170, #172, #177–#180 and #182 open), plus a section listing #77 and #103 after their recheck. #76 and #88 are marked closed there.
+- **Closure audit:** all 19 issues closed since 2026-11-03 (other than #169) were closed by their real fix or by hand with a comment, so none was reopened. Handoff PRs #155, #161 and #164 had also listed issues after a closing keyword (#145 and #153, #148 and #156, #152). That did nothing, because each issue's fix PR had closed it earlier the same day. See the rule under "How the user wants work done".
 - **Repo tidy:** Dependabot #166 had merged on 2026-11-16, but its branch `dependabot/npm_and_yarn/hono-4.13.18` was left on origin. Its head (`8b43592`) is in `main`, so the branch was deleted (it can be restored from #166). origin now has only `main`. Locally, the `wt-diag` scratchpad worktree and the five merged `worktree-agent-*` branches were removed.
 
 ## Earlier on 2026-11-16
@@ -200,8 +204,9 @@ Labels and comments only, no code. Each issue was checked against `main` at 0.3.
 - **#123** (native host, `ready-for-agent`): PRs 1–4 merged (#127, #130, #140, #146). Not blocking, posted on #123:
   - from the PR 3 review: decision 9's `get_version` report of a 4403 isn't done (only the popup's `lastError`); `transport` is `null` with no extension; `skipNative` is one-shot; no deadline for the native welcome (main has the same gap for TCP); a native welcome failing its proof has its `lastError` overwritten by the TCP attempt; `Reassembler` has no unit tests and no limit on sets; style nits (`nativeFirst()` clears `skipNative`, `OPEN`/`CLOSED`, the hello parsed twice, a third `getVersion` test helper);
   - from the #130 reviews: the relay is a signing oracle for `client:socket` (not exploitable as far as seen); `sameText` duplicates `sameProof`; the handshake exists three times; during takeover a waiting response over 1 MB can trip the cap; commit messages `f32d2f3`, `eedcd82`, `6b66869` cite some wrong Outlook commits.
-- **#77** (`ready-for-agent`): the test leftovers are done (#141). Still open: the unsure guard copied at four send paths, the hand-kept `READS` list, `sendTo`'s 12 parameters, and `OLD_TOKEN_WINDOW_MS` also setting how long the unsure state lasts. Nits from #141: 7/7c still race a real 1 s Retry-After if the process stalls over 1 s; the 2b `setTimeout` spy matches exactly 1000 ms; `requestWithTurn` has no `deadline`.
-- **#103** (`ready-for-agent`): the three leftovers are done (#139). Still open: refactor notes from the #107 review (the `getVersion` test setup duplicated, `{at, host}` spelled out in four places, the "signed in" rule copied, `teamsCalls` naming three things) and behaviour notes (the 5-minute gap in the stuck rule, background-tab calls counting as Teams-tab calls).
+- **#77** (`ready-for-agent`, [rechecked 2026-11-17](https://github.com/HeeyunCho/mcp-teams/issues/77#issuecomment-6943292684)): two item 1 leftovers (a cursor carries no account; a switch before the first page isn't caught) and three #141 test nits (7/7c race a real 1 s Retry-After if the process stalls over 1 s; the 2b `setTimeout` spy matches exactly 1000 ms; `requestWithTurn` has no `deadline`).
+- **#183** (`ready-for-human`, split out of #77): the unsure guard copied at four send paths, the hand-kept `READS` list, `sendTo`'s 12 parameters, and `OLD_TOKEN_WINDOW_MS` also setting how long the unsure state lasts.
+- **#103** (`ready-for-human` since 2026-11-17, [checklist](https://github.com/HeeyunCho/mcp-teams/issues/103#issuecomment-6943293165)): the three leftovers are done (#139). Still open: refactor notes from the #107 review (the `getVersion` test setup duplicated, now in four test files; `{at, host}` spelled out in five places, including `src/serverLog.ts`; the "signed in" rule copied, `teamsCalls` naming three things) and behaviour notes (the 5-minute gap in the stuck rule, background-tab calls counting as Teams-tab calls).
 - **#122** (`ready-for-human`): only the manual Chrome check after #129 is left:
   1. run `api_traffic` with `record: true`, use Teams search for a minute, call `api_traffic` again;
   2. confirm `substrate` and `chatsvc` are still captured. Close #122 once it passes.
@@ -209,7 +214,7 @@ Labels and comments only, no code. Each issue was checked against `main` at 0.3.
 - **#124** (`needs-info`): the extension stayed disconnected while a hub listened. The 2026-11-10 16:45 episode is in Earlier. The short 0.3.72 drop and what's still needed are in "Triage round" in Now.
 - **#111/#96** (`ready-for-human`): close with the native host and launcher (#123, ADR 0002). #142 (`ready-for-human`) is another instance and collects the health check's reports.
 - **#162** (`ready-for-human`): no Teams capture for about 29 min on 0.3.72; see "Triage round" in Now.
-- **#149, #170, #172** (`ready-for-agent`): see "Triage round" in Now.
+- **#149, #170, #172** (`ready-for-agent`): see "Triage round" in Now. **#182** (`ready-for-agent`): event-loop delay logging for #173's cause-unknown items.
 - **#173** (`ready-for-human`, the audit's tracking issue): its low findings are split into #177–#180 (`ready-for-agent`). **#169** (`ready-for-agent`, reopened; see "Triage round"): the 256 MB limit is unchanged. #168's 64 MiB (done) and #169 matter before `nativeHost` is on by default.
 - **Closed:** #76 (#137), #134 (#136), #138 (#144), #143 (#147), #145 (#150), #148 (#158), #152 (#163), #153 (#154), #156 (#159), #160 (transient, `wontfix`), #168 (#174), #171 (#175).
 - **Outlook:** the pipe-name collision for non-ASCII usernames is mcp-newoutlook#178.
@@ -218,11 +223,11 @@ Labels and comments only, no code. Each issue was checked against `main` at 0.3.
 
 1. **Get every server onto 0.3.72** (see "This Windows PC"): rebuild, `reload-extension`, then a full restart of each session (`/mcp` → Reconnect did not replace any process on 2026-11-12), Claude Desktop last. Then check `server.log` for the first `handshake-closed` lines with `reason`/`ms`/`hello`/`port` (written only by a hub of 0.3.69 or later).
 2. **The rest of #149** (keep-alive drops leave no `hub.log` line; the system tests on the 200 ms test heartbeat), the #156 follow-ups from the #159 review, and the #152 follow-ups from #163.
-3. **The audit's `ready-for-agent` fixes:** #170, #172 and #177–#180 (split out of #173). Settle #169's 256 MB limit before #123 PR 5.
+3. **The audit's `ready-for-agent` fixes:** #170, #172, #177–#180 (split out of #173) and #182 (event-loop delay logging). Settle #169's 256 MB limit before #123 PR 5.
 4. **Worker restarts emptying the captures** (Now, "#160"): open an issue if it should be worked on.
 5. **#123 PR 5:** turn `nativeHost` on by default, with setup registering by default; `feat!:` → 0.4.0. It waits for the manual checks on Windows and the Mac (including Chrome's permission warning from #146). Read the #123 comments first.
 6. **Versioned launcher (0.5.0, ADR 0002).** Open the issue from the ADR first.
-7. The manual Chrome check on #122; `ready-for-agent` leftovers on #77 and #103 (above).
+7. The manual Chrome check on #122; the `ready-for-agent` leftovers on #77; the `ready-for-human` decisions on #103 and #183 (above).
 
 Run `gh issue list` for the full backlog. #21 and #96 are the umbrella issues that PRs reference as "Part of".
 
@@ -283,6 +288,7 @@ Run `gh issue list` for the full backlog. #21 and #96 are the umbrella issues th
   - push.
 - **PRs:**
   - open a PR with "Part of #21 and #96" (or whichever umbrella issue applies);
+  - **closing keywords:** in a PR description or commit message, put "fix", "fixes", "close", "closes" or "resolve" (or their other forms) right before an issue number only when that PR really fixes the issue. GitHub closes the issue on merge. A handoff or docs PR never uses them. Write "settle #NNN next" or "#NNN is still open" instead. On 2026-11-17 handoff PR #176 said "fix" right before #169 and closed it by accident. Handoff PRs #155, #161 and #164 did the same harmlessly, because those issues were already closed. Before merging, check that `gh pr view N --json closingIssuesReferences` lists only the issues the PR fixes (none for docs);
   - get a fresh-subagent review;
   - fix should-fix items that are small, and post the rest on the issue;
   - wait for CI (test, test-windows, gitleaks);
