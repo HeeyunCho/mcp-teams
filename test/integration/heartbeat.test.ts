@@ -445,13 +445,15 @@ describe("#149: keep-alive drops are logged", { timeout: 15_000 }, () => {
   it("#149: an extension that closes itself writes no extension-dropped line", async () => {
     h = await bridgeHarness(OPTIONS);
     const hubLog = recorder();
-    const hub = await h.session("1.0.0", { onEvent: hubLog.record });
+    const serverLog = recorder();
+    const hub = await h.session("1.0.0", { onEvent: hubLog.record, diagnose: serverLog.record });
     const ext = await h.extension({ reconnect: false });
     await until(() => hub.connected, 3_000, "the extension");
     await ext.close();
-    await until(() => !hub.connected, 3_000, "the extension gone");
-    await new Promise((r) => setTimeout(r, 100));
+    // The close handler logs extension-closed (server.log) where a drop would log extension-dropped.
+    await until(() => serverLog.events.some((e) => e.event === "extension-closed"), 3_000, "extension-closed");
     expect(hubLog.events.some((e) => e.event === "extension-dropped")).toBe(false);
+    expect(serverLog.events.some((e) => e.event === "extension-dropped")).toBe(false);
   });
 
   it("#149: a peer dropped for a missing pong logs peer-left reason=no-pong (hub.log) and peer-dropped reason=no-pong (server.log)", async () => {
@@ -483,7 +485,8 @@ describe("#149: keep-alive drops are logged", { timeout: 15_000 }, () => {
     h = await bridgeHarness(OPTIONS, { port: frozen.port });
     const serverLog = recorder();
     await h.session("1.0.0", { diagnose: serverLog.record });
-    await until(() => serverLog.events.some((e) => e.event === "hub-closed"), 4 * PERIOD, "the watchdog's drop");
+    // A late watchdog skips once and waits again: up to about 6 periods on a stalled machine.
+    await until(() => serverLog.events.some((e) => e.event === "hub-closed"), 6 * PERIOD, "the watchdog's drop");
     expect(serverLog.events.find((e) => e.event === "hub-closed")).toEqual({ event: "hub-closed", fields: { code: 1006, reason: "hub-silent" } });
   });
 

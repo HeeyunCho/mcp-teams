@@ -11,7 +11,7 @@ import { DEFAULT_BRIDGE_OPTIONS, proof, socketTransport, type BridgeSocket, type
 import { SERVER_VERSION } from "../../src/config.js";
 import { registerTools } from "../../src/tools.js";
 import { fakeExtension, TOKEN } from "../helpers/bridgeHarness.js";
-import { nativeHarness } from "../helpers/nativeHost.js";
+import { nativeHarness, REAL_HEARTBEAT } from "../helpers/nativeHost.js";
 import { stall, until } from "../helpers/timing.js";
 
 let h: Awaited<ReturnType<typeof nativeHarness>> | undefined;
@@ -33,12 +33,6 @@ async function getVersion(bridge: ExtensionBridge) {
 }
 
 const unixOnly = it.skipIf(process.platform === "win32");
-/**
- * The real heartbeat (20 s) for a host whose test doesn't depend on its pings (#149): at the
- * harness's 200 ms, a host or session busy for two of them on a loaded machine is dropped, and the
- * test's next call fails (#145). Tests that check the pings, or need a fast drop, keep 200 ms.
- */
-const REAL_HEARTBEAT = { TEAMS_MCP_HUB_KEEPALIVE_MS: String(DEFAULT_BRIDGE_OPTIONS.keepAliveMs) };
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 describe("#123: the native host", { timeout: 30_000 }, () => {

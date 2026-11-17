@@ -3,10 +3,9 @@
 // messages pass in Chrome's framing. Servers join the host over the hub socket. Runs the built
 // file (`npm run build` first).
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { DEFAULT_BRIDGE_OPTIONS } from "../../src/bridge.js";
 import { TOKEN } from "../helpers/bridgeHarness.js";
 import { createFakeChrome, loadWorker, NativeWebSocket, openedSockets, stopWorkers, type FakeChrome } from "../helpers/fakeChrome.js";
-import { chromeNativeHost, nativeHarness } from "../helpers/nativeHost.js";
+import { chromeNativeHost, nativeHarness, REAL_HEARTBEAT } from "../helpers/nativeHost.js";
 import { until } from "../helpers/timing.js";
 
 let h: Awaited<ReturnType<typeof nativeHarness>> | undefined;
@@ -19,8 +18,6 @@ afterEach(async () => {
   vi.unstubAllGlobals();
   openedSockets.length = 0;
 });
-
-const REAL_HEARTBEAT = { TEAMS_MCP_HUB_KEEPALIVE_MS: String(DEFAULT_BRIDGE_OPTIONS.keepAliveMs) };
 
 /**
  * A worker whose pairing.json turns the native host on, connected through dist/hub.js. Its hosts
