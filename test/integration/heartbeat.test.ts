@@ -369,7 +369,9 @@ describe("2.3: slow peers", () => {
     // Ticks are slow here, so only the check at send time can close the stalled peer. All 20
     // calls run at once (2.4 lets a session run maxConcurrentCalls), so their answers pile up.
     h = await bridgeHarness({ ...FAST, keepAliveMs: 30_000, maxPeerBufferedBytes: LIMIT, maxConcurrentCalls: 20 });
-    await h.session();
+    const hubLog: { event: string; fields?: Record<string, unknown> }[] = [];
+    const serverLog: { event: string; fields?: Record<string, unknown> }[] = [];
+    await h.session("1.0.0", { onEvent: (event, fields) => hubLog.push({ event, fields }), diagnose: (event, fields) => serverLog.push({ event, fields }) });
     const big = "x".repeat(4 * 1024 * 1024);
     const ext = await h.extension({ handle: () => big });
     const peer = await rawPeer(h.port);
@@ -382,6 +384,10 @@ describe("2.3: slow peers", () => {
     await until(() => peer.closeCode !== undefined, 10_000, "the stalled peer to be closed");
     expect(peer.closeCode).toBe(1013);
     expect(peer.received.filter((m) => m.type === "response").length).toBeLessThan(n);
+    // #149: logged as a drop with its reason, not as a peer that left.
+    await until(() => hubLog.some((e) => e.event === "peer-left"), 3_000, "peer-left");
+    expect(hubLog.filter((e) => e.event === "peer-left")).toEqual([{ event: "peer-left", fields: { via: "tcp", reason: "backlog" } }]);
+    expect(serverLog.filter((e) => e.event === "peer-dropped")).toEqual([{ event: "peer-dropped", fields: { reason: "backlog" } }]);
   }, 30_000);
 
   it("2.3: a burst over the limit that drains before the next tick never closes the peer", async () => {
@@ -413,4 +419,84 @@ describe("2.3: slow peers", () => {
     for (let i = 0; i < 6; i++) expect((await peer.call<string>("readMessages", {})).length).toBe(big.length);
     expect((peer as any).hub).toBe(hubSocket);
   }, 20_000);
+});
+
+// #149: a connection dropped by the keep-alive leaves a line. The native host passes onEvent
+// (hub.log), servers pass diagnose (server.log); a TCP hub here takes both, so one test shows each.
+// Metadata only: the kind of connection, a reason, a code.
+describe("#149: keep-alive drops are logged", { timeout: 15_000 }, () => {
+  type Event = { event: string; fields: Record<string, unknown> };
+  const recorder = () => {
+    const events: Event[] = [];
+    const record = (event: string, fields: Record<string, unknown> = {}) =>
+      events.push({ event, fields: Object.fromEntries(Object.entries(fields).filter(([, v]) => v !== undefined)) });
+    return { events, record };
+  };
+
+  it("#149: an extension dropped for a missing pong is logged to onEvent (hub.log) as extension-dropped reason=no-pong", async () => {
+    h = await bridgeHarness(OPTIONS);
+    const hubLog = recorder();
+    await h.session("1.0.0", { onEvent: hubLog.record });
+    await h.extension({ pong: false, reconnect: false });
+    await until(() => hubLog.events.some((e) => e.event === "extension-dropped"), 4 * PERIOD, "the drop in hub.log");
+    expect(hubLog.events.filter((e) => e.event === "extension-dropped")).toEqual([{ event: "extension-dropped", fields: { reason: "no-pong", transport: "websocket" } }]);
+  });
+
+  it("#149: an extension that closes itself writes no extension-dropped line", async () => {
+    h = await bridgeHarness(OPTIONS);
+    const hubLog = recorder();
+    const serverLog = recorder();
+    const hub = await h.session("1.0.0", { onEvent: hubLog.record, diagnose: serverLog.record });
+    const ext = await h.extension({ reconnect: false });
+    await until(() => hub.connected, 3_000, "the extension");
+    await ext.close();
+    // The close handler logs extension-closed (server.log) where a drop would log extension-dropped.
+    await until(() => serverLog.events.some((e) => e.event === "extension-closed"), 3_000, "extension-closed");
+    expect(hubLog.events.some((e) => e.event === "extension-dropped")).toBe(false);
+    expect(serverLog.events.some((e) => e.event === "extension-dropped")).toBe(false);
+  });
+
+  it("#149: a peer dropped for a missing pong logs peer-left reason=no-pong (hub.log) and peer-dropped reason=no-pong (server.log)", async () => {
+    h = await bridgeHarness(OPTIONS);
+    const hubLog = recorder();
+    const serverLog = recorder();
+    await h.session("1.0.0", { onEvent: hubLog.record, diagnose: serverLog.record });
+    const peer = await rawPeer(h.port, { pong: false });
+    await until(() => peer.closeCode !== undefined, 4 * PERIOD, "the frozen peer to be dropped");
+    await until(() => hubLog.events.some((e) => e.event === "peer-left"), 2_000, "peer-left");
+    expect(hubLog.events.filter((e) => e.event === "peer-left")).toEqual([{ event: "peer-left", fields: { via: "tcp", reason: "no-pong" } }]);
+    expect(serverLog.events.filter((e) => e.event === "peer-dropped")).toEqual([{ event: "peer-dropped", fields: { reason: "no-pong" } }]);
+  });
+
+  it("#149: a peer that leaves by itself logs a plain peer-left, and no peer-dropped", async () => {
+    h = await bridgeHarness(OPTIONS);
+    const hubLog = recorder();
+    const serverLog = recorder();
+    await h.session("1.0.0", { onEvent: hubLog.record, diagnose: serverLog.record });
+    const peer = await rawPeer(h.port);
+    peer.ws.close();
+    await until(() => hubLog.events.some((e) => e.event === "peer-left"), 3_000, "peer-left");
+    expect(hubLog.events.filter((e) => e.event === "peer-left")).toEqual([{ event: "peer-left", fields: { via: "tcp" } }]);
+    expect(serverLog.events.some((e) => e.event === "peer-dropped")).toBe(false);
+  });
+
+  it("#149: a peer whose hub went silent logs hub-closed with reason=hub-silent (server.log)", async () => {
+    const frozen = await frozenHub(PERIOD);
+    h = await bridgeHarness(OPTIONS, { port: frozen.port });
+    const serverLog = recorder();
+    await h.session("1.0.0", { diagnose: serverLog.record });
+    // A late watchdog skips once and waits again: up to about 6 periods on a stalled machine.
+    await until(() => serverLog.events.some((e) => e.event === "hub-closed"), 6 * PERIOD, "the watchdog's drop");
+    expect(serverLog.events.find((e) => e.event === "hub-closed")).toEqual({ event: "hub-closed", fields: { code: 1006, reason: "hub-silent" } });
+  });
+
+  it("#149: a peer whose hub closed logs hub-closed with its code and no reason", async () => {
+    h = await bridgeHarness(OPTIONS);
+    const hub = await h.session();
+    const serverLog = recorder();
+    await h.session("1.0.0", { diagnose: serverLog.record });
+    await hub.close();
+    await until(() => serverLog.events.some((e) => e.event === "hub-closed"), 3_000, "hub-closed");
+    expect(serverLog.events.find((e) => e.event === "hub-closed")?.fields).not.toHaveProperty("reason");
+  });
 });

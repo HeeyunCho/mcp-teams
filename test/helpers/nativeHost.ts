@@ -7,13 +7,20 @@ import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
-import { ExtensionBridge, type BridgeOptions } from "../../src/bridge.js";
+import { DEFAULT_BRIDGE_OPTIONS, ExtensionBridge, type BridgeOptions } from "../../src/bridge.js";
 import { EXTENSION_ORIGIN } from "../../src/extension.js";
 import { FAST, TOKEN, type Handler, type Request } from "./bridgeHarness.js";
 import type { FakeNativeHost } from "./fakeChrome.js";
 import { until } from "./timing.js";
 
 export const HUB_JS = "dist/hub.js";
+
+/**
+ * Env for a host with the real heartbeat (20 s), for a test that doesn't depend on its pings (#149):
+ * at the harness's 200 ms, a host or session busy for two of them on a loaded machine is dropped,
+ * and the test's next call fails (#145). Tests that check the pings, or need a fast drop, keep 200 ms.
+ */
+export const REAL_HEARTBEAT = { TEAMS_MCP_HUB_KEEPALIVE_MS: String(DEFAULT_BRIDGE_OPTIONS.keepAliveMs) };
 
 export interface NativeExtensionOptions {
   /** The caller origin Chrome passes (default: our extension's, with the trailing slash Chrome adds). */

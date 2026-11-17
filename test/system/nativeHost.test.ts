@@ -11,7 +11,7 @@ import { DEFAULT_BRIDGE_OPTIONS, proof, socketTransport, type BridgeSocket, type
 import { SERVER_VERSION } from "../../src/config.js";
 import { registerTools } from "../../src/tools.js";
 import { fakeExtension, TOKEN } from "../helpers/bridgeHarness.js";
-import { nativeHarness } from "../helpers/nativeHost.js";
+import { nativeHarness, REAL_HEARTBEAT } from "../helpers/nativeHost.js";
 import { stall, until } from "../helpers/timing.js";
 
 let h: Awaited<ReturnType<typeof nativeHarness>> | undefined;
@@ -106,7 +106,7 @@ describe("#123: the native host", { timeout: 30_000 }, () => {
 
   it("#123 decision 5: keeps serving for the linger time after the extension disconnects, then exits; its servers fall back to TCP", async () => {
     h = await nativeHarness();
-    const ext = await h.host({ lingerMs: 1_500 });
+    const ext = await h.host({ lingerMs: 1_500, env: REAL_HEARTBEAT });
     const server = await h.server();
     await until(() => server.connected);
     ext.disconnect();
@@ -127,13 +127,14 @@ describe("#123: the native host", { timeout: 30_000 }, () => {
     h = await nativeHarness();
     // Long enough for a second node process to start well within it, on a busy machine too.
     const lingerMs = 5_000;
-    const first = await h.host({ lingerMs });
+    // Two hosts and a relay for about 6 s, and no pings needed (#149).
+    const first = await h.host({ lingerMs, env: REAL_HEARTBEAT });
     const server = await h.server();
     await until(() => server.connected);
     first.disconnect();
     const gone = Date.now();
     await until(() => !server.connected, 3_000, "the extension gone");
-    const again = await h.host({ lingerMs, handle: () => ({ via: "relay" }) });
+    const again = await h.host({ lingerMs, env: REAL_HEARTBEAT, handle: () => ({ via: "relay" }) });
     expect(again.welcome?.capabilities.features).toContain("native");
     // It came in as a relaying host, within the first one's linger.
     expect(h.logText()).toMatch(new RegExp(` pid=${again.child.pid} relay version=`));
@@ -184,8 +185,10 @@ describe("#123: the native host", { timeout: 30_000 }, () => {
 
   it("#123: when the serving host goes away, the relaying host takes over the hub socket", async () => {
     h = await nativeHarness();
-    const chrome = await h.host({ browser: "Chrome", instance: "profile-1" });
-    const edge = await h.host({ browser: "Edge", instance: "profile-2", handle: () => ({ from: "edge" }) });
+    // The kill closes the hub socket, which the relaying host and the server see at once: the
+    // takeover needs no pings (#149).
+    const chrome = await h.host({ browser: "Chrome", instance: "profile-1", env: REAL_HEARTBEAT });
+    const edge = await h.host({ browser: "Edge", instance: "profile-2", env: REAL_HEARTBEAT, handle: () => ({ from: "edge" }) });
     const server = await h.server();
     await until(() => server.extensions.length === 2, 3_000, "both browsers");
     await chrome.kill(); // a crash: on macOS and Linux the socket file stays behind
@@ -193,6 +196,8 @@ describe("#123: the native host", { timeout: 30_000 }, () => {
     expect(server.hubIsHost).toBe(true);
     await expect(server.call("readMessages", {}, 3_000)).resolves.toEqual({ from: "edge" });
     expect(edge.exitCode).toBeUndefined();
+    // #149: the relaying host logged its relay closing, with the code, before it took over.
+    expect(h.logText()).toMatch(new RegExp(` pid=${edge.child.pid} relay-closed code=\\d+\n(.*\n)*.* pid=${edge.child.pid} host version=`));
   });
 
   // Another local user can create the Windows pipe while no host runs; the next host then relays to it.

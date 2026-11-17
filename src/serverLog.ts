@@ -43,7 +43,7 @@ export const SLOW_STATUS_MS = 2_500;
 export interface DiagnosticLog {
   start(fields?: LogFields): void;
   exit(reason: string, code?: number): void;
-  /** The bridge's events (BridgeOptions.diagnose): role, handover, extension, extension-closed, hub-closed. */
+  /** The bridge's events (BridgeOptions.diagnose): role, handover, extension, extension-closed, extension-dropped, peer-dropped, hub-closed. */
   bridge(event: string, fields?: LogFields): void;
   /** A status the extension answered (null or {error} when it couldn't be read), and how its read went. */
   teamsStatus(status: unknown, read?: StatusRead): void;

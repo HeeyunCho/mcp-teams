@@ -639,6 +639,7 @@ export class ExtensionBridge {
   private unanswered = new WeakSet<BridgeSocket>(); // hub: extensions dropped for not answering a ping (server.log)
   private refusedWith = new WeakMap<BridgeSocket, { code: number; reason: string }>(); // hub: how it turned a connection away (server.log, #156)
   private backlogged = new WeakSet<BridgeSocket>(); // hub: peers over maxPeerBufferedBytes at the last tick
+  private droppedPeers = new WeakMap<BridgeSocket, "no-pong" | "backlog">(); // hub: peers it dropped, and why (#149)
   private legacyReloaded = false; // hub: an extension of 0.2.0 or older was told to reload
   private readonly opts: Timings;
   private readonly native: NativeHostOptions;
@@ -972,7 +973,11 @@ export class ExtensionBridge {
       // reason "other", when the client left first), the time open, and the hello it sent.
       const refused = this.refusedWith.get(ws);
       if (!this.accepted.has(ws)) this.report("handshake-closed", { code: refused?.code ?? code, reason: refused?.reason ?? "other", via, ms: Date.now() - openedAt, hello: saw, port });
-      else if (closing && this.unanswered.has(ws)) this.report("extension-dropped", { reason: "no-pong", transport: closing.transport });
+      else if (closing && this.unanswered.has(ws)) {
+        // The native host passes onEvent (hub.log) and no diagnose: its drops are logged there (#149).
+        this.native.onEvent?.("extension-dropped", { reason: "no-pong", transport: closing.transport });
+        this.report("extension-dropped", { reason: "no-pong", transport: closing.transport });
+      }
       else if (closing) this.report("extension-closed", { code, transport: closing.transport });
       // A peer that went away can't be told the outcome of its calls: withdraw them.
       for (const ac of this.peerCalls.get(ws)?.values() ?? []) ac.abort();
@@ -1107,7 +1112,12 @@ export class ExtensionBridge {
     this.peers.add(ws);
     this.accepted.add(ws);
     this.native.onEvent?.("peer", { version: logVersion(peerVersion), via });
-    ws.on("close", () => this.native.onEvent?.("peer-left", { via }));
+    // A peer this hub dropped says why (#149), so it doesn't read as one that left by itself.
+    ws.on("close", () => {
+      const reason = this.droppedPeers.get(ws);
+      this.native.onEvent?.("peer-left", { via, reason });
+      if (reason) this.report("peer-dropped", { reason });
+    });
     // heartbeatMs: this hub pings the peer that often, so the peer can tell when it stops.
     ws.send(
       JSON.stringify({
@@ -1250,6 +1260,7 @@ export class ExtensionBridge {
   /** Hub: closes a peer that isn't reading its answers (1013); its calls are withdrawn and it connects again. */
   private closeSlowPeer(ws: BridgeSocket) {
     console.error(`[mcp-teams] closing a peer that doesn't read its answers (${Math.round(ws.bufferedAmount / 1024 / 1024)} MB waiting)`);
+    this.droppedPeers.set(ws, "backlog");
     this.peers.delete(ws);
     // Its close may wait for the backlog; its calls are withdrawn now (as on close).
     for (const ac of this.peerCalls.get(ws)?.values() ?? []) ac.abort();
@@ -1321,6 +1332,7 @@ export class ExtensionBridge {
         // nothing: the next tick closes the peer if the backlog lasts. It is still pinged (the
         // ping queues behind the data), so a peer that drains it in time hears from its hub.
         if (!backlog && !this.alive.has(p)) {
+          this.droppedPeers.set(p, "no-pong");
           p.terminate();
           continue;
         }
@@ -1363,6 +1375,8 @@ export class ExtensionBridge {
       // The hub said it answered every call it accepted and runs no more (#112): whatever is still
       // pending here when it closes never ran, so it fails as not sent rather than as a lost call.
       let drained = false;
+      // The watchdog dropped it: hub-closed says hub-silent, a hung hub rather than a closed one (#149).
+      let silent = false;
       // When the watchdog itself runs late, this peer stalled: the hub's ping may wait unread, so
       // it waits once more instead, but not twice in a row (see STALL_SLACK).
       const watch = (afterLate = false) => {
@@ -1373,6 +1387,7 @@ export class ExtensionBridge {
           if (this.hub !== ws) return;
           if (!afterLate && ranLate(due, waitMs)) return watch(true);
           this.rejectAll(LOST_CALL.hubSilent);
+          silent = true;
           ws.terminate();
         }, waitMs);
         watchdog.unref();
@@ -1458,7 +1473,7 @@ export class ExtensionBridge {
         this.hubChecksSend = false;
         this.extension = undefined;
         this.extensions = [];
-        this.report("hub-closed", { code });
+        this.report("hub-closed", { code, reason: silent ? "hub-silent" : undefined });
         this.reportExtensions();
         this.role = "none";
         this.rejectAll(drained ? NOT_SENT.hubClosing : LOST_CALL.hubRestarted);

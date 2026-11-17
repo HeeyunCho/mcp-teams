@@ -305,6 +305,8 @@ void (async () => {
     }
     if (await becomeHost(replay)) return;
     const code = await relay([...replay, ...queue.splice(0)]);
+    // Why the relay ended (#149): what follows (a takeover, relaying again, or an exit) shows the rest.
+    log("relay-closed", { code });
     if (code === 4401 || code === 4409) {
       log("exit", { reason: "refused by the host", code });
       process.exit(1);
