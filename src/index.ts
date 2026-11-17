@@ -28,12 +28,25 @@ process.on("exit", (code) => diagnostics?.exit(exitReason, code));
 
 // A stray error in a socket callback must not end the server (the AI app would show it
 // as "failed"); log it on stderr, which isn't the MCP channel, and by name in server.log.
+// #215: once a write to stderr failed (the AI app closed it), nothing more goes there. A failed
+// write is an error event that, with no listener, came back here as an uncaught exception whose
+// own write failed again: thousands of server.log lines, until the drain bound ended the process.
+let stderrOpen = true;
+process.stderr.on("error", () => (stderrOpen = false));
+const toStderr = (...args: unknown[]) => {
+  if (!stderrOpen) return;
+  try {
+    console.error(...args);
+  } catch {
+    stderrOpen = false; // a handler must never throw
+  }
+};
 process.on("unhandledRejection", (err) => {
-  console.error("[mcp-teams] unhandled rejection:", err);
+  toStderr("[mcp-teams] unhandled rejection:", err);
   diagnostics?.crash("unhandled-rejection", err);
 });
 process.on("uncaughtException", (err) => {
-  console.error("[mcp-teams] uncaught exception:", err);
+  toStderr("[mcp-teams] uncaught exception:", err);
   diagnostics?.crash("uncaught-exception", err);
 });
 
@@ -141,14 +154,25 @@ const shutdown = (signal: string) => async () => {
 };
 process.on("SIGINT", shutdown("SIGINT"));
 process.on("SIGTERM", shutdown("SIGTERM"));
-process.stdin.on("close", async () => {
-  exitReason = "stdin-closed";
+// #215: a failed write to stdout (the MCP channel) also means the AI session has ended: an app that
+// exits while its server starts closes its pipes before the first answer. Both end the session the
+// same way, once; the exit's reason in server.log says which was seen first.
+let sessionEnded = false;
+const endSession = async (reason: string) => {
+  if (sessionEnded) return;
+  sessionEnded = true;
+  exitReason = reason;
   const fromEnv = process.env.TEAMS_MCP_DRAIN_MS ? Number(process.env.TEAMS_MCP_DRAIN_MS) : NaN;
   const drainMs = Number.isFinite(fromEnv) && fromEnv >= 0 ? fromEnv : DRAIN_MAX_WAIT_MS; // 0: no drain
   setTimeout(() => ((exitReason = "drain-timeout"), process.exit(0)), drainMs + 2_000).unref();
   await server.close().catch(() => {});
   await bridge.drainAndClose(drainMs);
   process.exit(0);
+};
+process.stdin.on("close", () => void endSession("stdin-closed"));
+process.stdout.on("error", (err: NodeJS.ErrnoException) => {
+  if (err.code === "EPIPE" || err.code === "ERR_STREAM_DESTROYED") void endSession("stdout-closed");
+  else diagnostics?.crash("uncaught-exception", err); // as it was logged before this listener
 });
 
 // After an update of the folder, reloads the extension (one of 0.2.0 or older reloads
