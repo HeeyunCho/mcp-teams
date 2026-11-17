@@ -1609,6 +1609,8 @@ export class ExtensionBridge {
           : `${NOT_READ.notConnected} Open Chrome or Edge with the mcp-teams extension installed (run \`mcp-teams setup\`).`;
       throw new Error(reason);
     }
+    // The picked browser can close while the others' status is awaited (#172): take no turn for it.
+    if (this.role === "hub" && (!this.sockets.has(target) || target.readyState !== OPEN)) throw new Error(NOT_SENT.gone);
     // A send opens a window that must close once nobody waits for it: an extension that ignores
     // cancel would leave it open for a late click. The hub checks the extension it picked (for its
     // own sends and its peers'). A peer behind a hub that doesn't say it checks (one from before
@@ -1698,6 +1700,8 @@ export class ExtensionBridge {
   /** Sends one request on a connection (an extension for the hub, the hub for a peer). */
   private send<T>(target: BridgeSocket, method: string, params: unknown, timeoutMs: number, signal?: AbortSignal, deadline?: number, turn?: Turn): Promise<T> {
     if (signal?.aborted) return Promise.reject(cancelledError());
+    // ws doesn't throw on a closing or closed socket: the call would wait out its timer (#172).
+    if (target.readyState !== OPEN) return Promise.reject(new Error(NOT_SENT.gone));
     const id = randomUUID();
     const now = Date.now();
     // Taken before the timer starts, so the timer never fires before it.
