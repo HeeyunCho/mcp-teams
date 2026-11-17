@@ -484,6 +484,21 @@ describe("meetings", () => {
     expect(slim.entries.find((e: { spokenLanguageTag?: string }) => e.spokenLanguageTag)?.spokenLanguageTag).toBe("en-us");
     expect(teams.slimTranscript({}).transcript).toEqual({ entries: [] });
   });
+
+  it("#178: a slim transcript's size counts what it keeps, in UTF-8 bytes plus 128 bytes per entry", () => {
+    const entry = { text: "Hi", speakerDisplayName: "Bo", startOffset: "00:00:01.0", endOffset: "00:00:02.0" };
+    // 2 + 2 + 10 + 10 bytes of strings, and the entry's 128.
+    expect(teams.slimTranscript({ entries: [entry] }).bytes).toBe(152);
+    // What isn't kept isn't counted.
+    expect(teams.slimTranscript({ entries: [{ ...entry, id: "3c4d5e6f-0000-4000-8000-000000000001/17-0", confidence: 0.5, roleId: "r".repeat(1000) }] }).bytes).toBe(152);
+    // The first language is kept and counted, later ones aren't.
+    expect(teams.slimTranscript({ entries: [{ ...entry, spokenLanguageTag: "en-us" }, { ...entry, spokenLanguageTag: "de-de" }] }).bytes).toBe(152 + 5 + 152);
+    // UTF-8, not UTF-16 units: "Grüße" is 7 bytes (5 units), "한국" 6 (2 units), "👋" 4 (2 units).
+    expect(teams.slimTranscript({ entries: [{ ...entry, text: "Grüße" }] }).bytes).toBe(152 - 2 + 7);
+    expect(teams.slimTranscript({ entries: [{ ...entry, text: "한국" }] }).bytes).toBe(152 - 2 + 6);
+    expect(teams.slimTranscript({ entries: [{ ...entry, text: "👋" }] }).bytes).toBe(152 - 2 + 4);
+    expect(teams.slimTranscript({}).bytes).toBe(0);
+  });
 });
 
 describe("traffic log", () => {
