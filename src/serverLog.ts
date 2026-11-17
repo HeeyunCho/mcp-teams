@@ -23,6 +23,12 @@ import { IDLE_MS, isMissingSession } from "./sessionNote.js";
 /** Where every server logs: next to config.json (TEAMS_MCP_HOME moves both, for tests). */
 export const SERVER_LOG_FILE = join(CONFIG_DIR, "server.log");
 
+/**
+ * A watch period whose longest event-loop delay reaches this is logged as loop-delay (#182): a
+ * second is far beyond the loop's normal few ms, and short of the 2.5 s that makes a read slow.
+ */
+export const LOOP_DELAY_LOG_MS = 1_000;
+
 /** A tool call that takes longer than this is logged even when it succeeds. */
 export const SLOW_TOOL_MS = 20_000;
 
@@ -44,6 +50,11 @@ export interface DiagnosticLog {
   /** A tool call that ended: logged when it failed (err) or took longer than slowToolMs. */
   toolCall(name: string, ms: number, err?: unknown): void;
   restartNeeded(onDiskVersion: string): void;
+  /**
+   * Ends the loop-delay window (#182, the watch's tick): logs loop-delay when the loop stalled for
+   * loopDelayLogMs or more, then starts a new window. Nothing without a monitor.
+   */
+  loopDelayTick(): void;
   /** An uncaught exception or unhandled rejection, by its name and code only. */
   crash(kind: "uncaught-exception" | "unhandled-rejection", err: unknown): void;
 }
@@ -216,6 +227,7 @@ export function diagnosticLog(options: DiagnosticLogOptions): DiagnosticLog {
   let slowReads = 0; // successful status reads in a row slower than slowStatusMs
   const slowStatusMs = options.slowStatusMs ?? SLOW_STATUS_MS;
   let restartSeen = false;
+  let stalledTicks = 0; // watch periods in a row whose loop stalled (#182)
   const fieldsOf = (err: unknown) => {
     try {
       return errorFields(err);
@@ -324,6 +336,18 @@ export function diagnosticLog(options: DiagnosticLogOptions): DiagnosticLog {
       restartSeen = true;
       write("restart-needed", { onDisk: logVersion(onDiskVersion) });
     },
+    loopDelayTick() {
+      try {
+        if (!options.loopDelay) return;
+        const d = options.loopDelay.read();
+        options.loopDelay.reset();
+        // A run of stalled periods is logged like the other runs: the 1st and every REPEAT_EVERY-th.
+        stalledTicks = d.maxMs >= LOOP_DELAY_LOG_MS ? stalledTicks + 1 : 0;
+        if (stalledTicks === 1 || (stalledTicks > 0 && stalledTicks % REPEAT_EVERY === 0)) write("loop-delay", delayFields(d));
+      } catch {
+        // a monitor that fails is no reason to stop watching
+      }
+    },
     crash(kind, err) {
       const e = fieldsOf(err);
       write(kind, { error: e.name, code: e.code });
@@ -363,6 +387,9 @@ export function watchState({ bridge, diagnostics, onDisk, everyMs = WATCH_MS }: 
     } catch {
       // a build.json it can't read is no reason to stop watching
     }
+    // Any role, any state (#182): a peer's or an idle server's stall shows too. A running read's
+    // window isn't ended, so its teams line covers all of it; the next tick after it does.
+    if (!reading) diagnostics.loopDelayTick();
     if (reading || bridge.role !== "hub" || !bridge.connected) return;
     reading = true;
     const started = performance.now();
