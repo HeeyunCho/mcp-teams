@@ -27,6 +27,12 @@ This day was mostly triage and bookkeeping: GitHub issues, and this file through
      - The user's DevTools Network check (host, Type and Initiator of the search request) decides between them.
    - **#200**: `api_traffic` couldn't see `websocket` or `ping` requests, and the webRequest fake ignored `types`. **Fixed by #202 (0.3.73)**; see "#202" in Now.
    - **DevTools result:** the search request is a `fetch` to `substrate.office.com` with initiator `https://teams.cloud.microsoft`, which the recorder should see. That rules out causes 1 and 2; cause 3 (a tab the connected extension doesn't see) is left. The user confirmed mcp-teams is enabled in that profile. One recording with DevTools open settles it ([comment](https://github.com/HeeyunCho/mcp-teams/issues/122#issuecomment-6948667503)).
+   - **After the 0.3.73 reload:** the extension heard **no Teams-origin request from 13:22:11Z to 13:36:24Z**: `lastTeamsCall` was frozen, `api_traffic` recorded 0, and `sessionCaptured` was false, though `teamsTabs` was 1. Then, with no reload, it heard 8 requests (`csa` and `chatsvc`) and captured a session again. [Comment](https://github.com/HeeyunCho/mcp-teams/issues/122#issuecomment-6949346906).
+   - **Read-only diagnosis** ([comment](https://github.com/HeeyunCho/mcp-teams/issues/122#issuecomment-6949813109)):
+     - The listeners are registered synchronously, first thing in the worker (`extension/background.js:2576-2577` → `:2549-2552`), and nothing removes them. A throw would have stopped `connect()`, and the extension did connect.
+     - `teamsTabs` counts discarded tabs too (`status()`, `:1359`), so `teamsTabs: 1` doesn't mean the tab was awake.
+     - Ranked causes: (1) the tab was frozen or discarded (Memory Saver); (2) the actions happened in another profile or incognito; (3) the tab was idle; (4) the listeners were missing, which the 13:36 burst rules out.
+     - Not a recorder bug, so no issue was opened. The user's console checks (`hasListeners()`, the tabs' `discarded`/`frozen`/`windowId`, `chrome://discards`, Memory Saver) decide between causes 1 and 2.
 
 ### Suggested order for the `ready-for-agent` work
 From the 2026-11-17 recheck of #185–#190 and #192. This isn't recorded on #25 yet; add it there. The four lanes can run in parallel; inside each lane, the order matters.
@@ -95,10 +101,10 @@ Merged as `a0e2bff`, released as 0.3.73 (`5e5b9d9`, tag `v0.3.73`). Rebuilt here
 - `extension/manifest.json`: `wss://` host permissions for the same seven hosts. The extension is loaded unpacked, so a reload picks them up without a prompt.
 - **A socket opened before recording started is never seen:** only the handshake is visible, and trouter opens at page load. Start recording, then reload the Teams tab.
 - Written test-first by a subagent and reviewed twice by separate subagents. The first review found that `https://` patterns never match `wss://`; that's fixed. The second review found no blockers. Tests: 65 passed in the touched files on Node 26 and Node 20; 515 passed in `test/integration` on Node 20; 927 passed in the full `npm test`. CI passed.
-- **Live check still to do:** record, reload the Teams tab, then expect:
-  1. a `go.trouter.teams.microsoft.com` entry of type `websocket` with status 101;
-  2. at least one `ping` entry;
-  3. `lastTeamsCall` not moving on the handshake alone.
+- **Live check, part done** ([comment](https://github.com/HeeyunCho/mcp-teams/issues/200#issuecomment-6949306279)):
+  - **Seen:** two `websocket` entries with **status 101**. They're on regional hosts (`pub-ent-…-t.trouter.teams.microsoft.com`); `go.trouter.teams.microsoft.com` only answers a pre-connect check, as an `xmlhttprequest`.
+  - **Not seen yet: a `ping` entry.** A second try recorded nothing at all, because the extension didn't hear the tab then (see #122 in Resume here) ([comment](https://github.com/HeeyunCho/mcp-teams/issues/200#issuecomment-6949565618)).
+  - `lastTeamsCall` not moving on a handshake has no clean live evidence yet; `test/integration/teamsCalls.test.ts` covers it.
 
 | PR | Change | State |
 |---|---|---|
