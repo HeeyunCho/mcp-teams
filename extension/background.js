@@ -3,6 +3,7 @@
 // session Teams itself uses.
 
 import { NATIVE_MAX_MESSAGE_BYTES, Reassembler } from "./chunks.js";
+import { fitting, withinLimit } from "./sizes.js";
 import * as teams from "./teams.js";
 
 const VERSION = chrome.runtime.getManifest().version;
@@ -2101,22 +2102,6 @@ const NATIVE_HOST = "com.mcp_teams.hub";
 const OPEN = 1;
 const CLOSED = 3;
 
-const formatSize = (n) => (n >= 1024 * 1024 ? `${(n / 1024 / 1024).toFixed(1)} MB` : `${Math.ceil(n / 1024)} KB`);
-/** `text`'s UTF-8 size, or its length when even 3 bytes a character stay within `max` (no need to count). */
-const utf8Bytes = (text, max) => (text.length * 3 <= max ? text.length : new TextEncoder().encode(text).length);
-
-/**
- * The answer that goes instead of one too large for the native connection: the hub would drop the
- * whole connection on it (or Chrome refuse it), and the call would wait for its time limit.
- * Wording as mcp-newoutlook's dispatch (commit cf8cc72).
- */
-const tooLarge = (id, detail) => ({
-  type: "response",
-  id,
-  ok: false,
-  error: `The answer was too large to pass on over the native connection (${detail}). Nothing else was affected. Ask for less at once (fewer messages, a shorter range), or open it in Teams.`,
-});
-
 /**
  * A connection to the native host over chrome.runtime.connectNative, shaped like the WebSocket
  * connect() uses: readyState, send(text, msg), close(), and onmessage({ data }) and onclose({ code })
@@ -2126,7 +2111,7 @@ const tooLarge = (id, detail) => ({
  *
  * A response larger than the host takes (maxMessageBytes: Chrome's 64 MB, or less when the host's
  * welcome declares less) goes as a short error instead, as does one Chrome refuses to post; that
- * error is no larger than the host takes either (see fitting).
+ * error is no larger than the host takes either (see fitting in sizes.js).
  */
 function openNative() {
   const port = chrome.runtime.connectNative(NATIVE_HOST);
@@ -2140,21 +2125,18 @@ function openNative() {
     /** `msg`: the message `text` is, when the caller has it (saves parsing it again). */
     send(text, msg = JSON.parse(text)) {
       if (conn.readyState !== OPEN) return;
-      const bytes = utf8Bytes(text, conn.maxMessageBytes);
       const answer = msg?.type === "response";
-      const over = bytes > conn.maxMessageBytes;
-      if (over) {
-        if (!answer) return;
-        msg = fitting(msg.id, `${formatSize(bytes)}; the limit is ${formatSize(conn.maxMessageBytes)}`);
-        if (!msg) return;
-      }
+      const fit = withinLimit(text, msg, conn.maxMessageBytes, "native connection");
+      if (!fit) return;
+      const over = fit !== msg;
+      msg = fit;
       try {
         port.postMessage(msg);
       } catch (err) {
         // Chrome refused it (a disconnected port's onDisconnect follows, and the hub fails the call
         // then); on an open port, an answer still goes, short, so the call doesn't wait for nothing.
         if (!answer || over) return;
-        const short = fitting(msg.id, err?.message ?? String(err));
+        const short = fitting(msg.id, err?.message ?? String(err), conn.maxMessageBytes, "native connection");
         try {
           if (short) port.postMessage(short);
         } catch {
@@ -2167,16 +2149,6 @@ function openNative() {
       port.disconnect();
       closed();
     },
-  };
-  /**
-   * The error answer for request `id` that fits within what the host takes: the full explanation,
-   * else a bare "too large" (a host that declares a tiny limit); null when not even that fits.
-   */
-  const fitting = (id, detail) => {
-    for (const reply of [tooLarge(id, detail), { type: "response", id, ok: false, error: "too large" }]) {
-      if (utf8Bytes(JSON.stringify(reply), conn.maxMessageBytes) <= conn.maxMessageBytes) return reply;
-    }
-    return null;
   };
   // Later, as a WebSocket's close event: the caller may still be setting the connection up.
   const closed = () => {
@@ -2268,6 +2240,13 @@ async function connect() {
   // The welcome's proof is checked asynchronously, and the server may send requests right behind
   // it: they wait for the check (in the order they came) instead of being dropped.
   let checking = null;
+  // WebSocket only: the largest message the hub's welcome declares it takes (#193).
+  let hubMax = null;
+  const sendToHub = (text, reply) => {
+    if (native) return socket.send(text, reply);
+    const fit = withinLimit(text, reply, hubMax, "WebSocket connection");
+    if (fit) socket.send(fit === reply ? text : JSON.stringify(fit));
+  };
   socket.onopen = () => (opened = true);
   const refuse = (error) => {
     socket.close();
@@ -2307,6 +2286,8 @@ async function connect() {
           // The native host takes no more than it declares, and Chrome passes it no more than 64 MB.
           const hostMax = Number(msg.capabilities?.maxMessageBytes);
           if (native && hostMax > 0) socket.maxMessageBytes = Math.min(NATIVE_MAX_MESSAGE_BYTES, hostMax);
+          // Over WebSocket the hub takes no more than it declares either (#193); none declared: no check.
+          if (!native) hubMax = hostMax > 0 ? hostMax : null;
           const heartbeatMs = Number(msg.heartbeatMs);
           watchHeartbeat(socket, heartbeatMs > 0 ? Math.max(MIN_HEARTBEAT_TIMEOUT_MS, Math.round(2.25 * heartbeatMs)) : HEARTBEAT_TIMEOUT_MS);
         })().catch(notProven);
@@ -2318,8 +2299,9 @@ async function connect() {
       if (watchdog?.socket === socket) watchHeartbeat(socket, watchdog.ms);
       return;
     }
-    // The reply object goes along for a native connection (a WebSocket ignores it).
-    await dispatch(msg, (reply) => socket.readyState === WebSocket.OPEN && socket.send(JSON.stringify(reply), reply), socket);
+    // The reply object goes along for a native connection (a WebSocket ignores it). Over WebSocket,
+    // an answer over the hub's limit goes as a short error (#193), as on the native connection.
+    await dispatch(msg, (reply) => socket.readyState === WebSocket.OPEN && sendToHub(JSON.stringify(reply), reply), socket);
   };
   socket.onclose = (ev) => {
     // Nobody can be told the outcome of what came on this connection: withdraw it

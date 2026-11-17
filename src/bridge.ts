@@ -356,6 +356,18 @@ export const LOST_CALL = Object.freeze({
   tooLarge: (limitMb: number) => `The response was too large (over ${limitMb} MB) and was dropped. The connection is re-established automatically.`,
 });
 
+/**
+ * What a peer's call fails with when its answer is larger than the peer declared it takes (#193):
+ * the hub sends this instead, which fails only that call, where the answer itself would error out
+ * the peer's connection and fail every call on it. Worded as the extension's (extension/sizes.js).
+ */
+export const TOO_LARGE_FOR_SESSION = (detail: string) =>
+  `The answer was too large to pass on to this session (${detail}). Nothing else was affected. Ask for less at once (fewer messages, a shorter range), or open it in Teams.`;
+
+const formatSize = (n: number) => (n >= 1024 * 1024 ? `${(n / 1024 / 1024).toFixed(1)} MB` : `${Math.ceil(n / 1024)} KB`);
+/** `text`'s UTF-8 size, or its length when even 3 bytes a character stay within `max` (no need to count). */
+const utf8Bytes = (text: string, max: number) => (text.length * 3 <= max ? text.length : Buffer.byteLength(text, "utf8"));
+
 // Each LOST_CALL message as a pattern: its text, with anything in the place of a value.
 const SLOT = "\u0000";
 const escapeRegExp = (t: string) => t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -621,6 +633,7 @@ export class ExtensionBridge {
   private hub?: BridgeSocket; // peer: the hub
   private peers = new Set<BridgeSocket>();
   private peerCalls = new Map<BridgeSocket, Map<string, AbortController>>(); // hub: each peer's calls, by the peer's id
+  private peerMax = new WeakMap<BridgeSocket, number>(); // hub: the largest message each peer declared it takes (#193)
   /** Hub: per extension connection, its turns (keyed by session: null for the hub's own calls, else the peer) and who waits. */
   private turns = new Map<BridgeSocket, { queue: FairQueue<BridgeSocket | null>; waiting: Set<(err: Error) => void> }>();
   private pending = new Map<string, Pending>();
@@ -949,7 +962,7 @@ export class ExtensionBridge {
         clearTimeout(authTimer);
         const welcome = typeof msg.nonce === "string" ? { proof: proof(this.token, proofRole("server", via), msg.nonce) } : {};
         if (msg.type === "hello") this.acceptExtension(ws, msg, welcome, via, origin);
-        else this.acceptPeer(ws, msg.version, welcome, via);
+        else this.acceptPeer(ws, msg.version, welcome, via, capabilitiesOf(msg).maxMessageBytes);
         return;
       }
       if (this.sockets.has(ws)) this.onExtensionMessage(ws, msg);
@@ -1108,8 +1121,9 @@ export class ExtensionBridge {
     setTimeout(() => this.refuse(ws, 4426, "extension update required"), 1_000).unref();
   }
 
-  private acceptPeer(ws: BridgeSocket, peerVersion: unknown, welcome: object, via: Via) {
+  private acceptPeer(ws: BridgeSocket, peerVersion: unknown, welcome: object, via: Via, maxMessageBytes: number | null) {
     this.peers.add(ws);
+    if (maxMessageBytes) this.peerMax.set(ws, maxMessageBytes);
     this.accepted.add(ws);
     this.native.onEvent?.("peer", { version: logVersion(peerVersion), via });
     // A peer this hub dropped says why (#149), so it doesn't read as one that left by itself.
@@ -1221,7 +1235,8 @@ export class ExtensionBridge {
     if (msg.type !== "request" || typeof msg.id !== "string") return;
     const reply = (body: object) => {
       try {
-        this.sendToPeer(ws, JSON.stringify({ type: "response", id: msg.id, ...body }));
+        const text = this.fitForPeer(ws, msg.id, JSON.stringify({ type: "response", id: msg.id, ...body }));
+        if (text !== null) this.sendToPeer(ws, text);
       } catch (err) {
         console.error(`[mcp-teams] could not answer a peer: ${(err as Error).message}`);
       }
@@ -1244,6 +1259,23 @@ export class ExtensionBridge {
   private broadcastState() {
     const state = JSON.stringify({ type: "ext-state", extension: this.extension ?? null, extensions: this.extensions });
     for (const peer of this.peers) this.sendToPeer(peer, state);
+  }
+
+  /**
+   * Hub: the answer `text` to the peer's request `id`, or, when it is over what the peer declared
+   * it takes (#193), the short too-large error (a bare "too large" for a peer that declares a tiny
+   * limit; null when not even that fits). A peer from before #115 declares nothing: no check.
+   */
+  private fitForPeer(ws: BridgeSocket, id: string, text: string): string | null {
+    const max = this.peerMax.get(ws);
+    if (!max) return text;
+    const bytes = utf8Bytes(text, max);
+    if (bytes <= max) return text;
+    for (const error of [TOO_LARGE_FOR_SESSION(`${formatSize(bytes)}; the limit is ${formatSize(max)}`), "too large"]) {
+      const short = JSON.stringify({ type: "response", id, ok: false, error });
+      if (utf8Bytes(short, max) <= max) return short;
+    }
+    return null;
   }
 
   /**
