@@ -254,11 +254,47 @@ const TRAFFIC_ONLY_TYPES = ["websocket", "ping"];
  */
 const trafficFilter = { urls: [...teams.TRAFFIC_URLS, ...teams.TRAFFIC_WS_URLS], types: ["xmlhttprequest", "other", "media", ...TRAFFIC_ONLY_TYPES] };
 
+/**
+ * Whether the manifest requests every host the traffic log listens on (#218). The manifest as shipped
+ * (and for the stores) requests only the five Teams and SharePoint hosts, so api_traffic isn't available
+ * there and its listeners aren't registered; a developer's copy adds the patterns to host_permissions by
+ * hand. Read from the manifest, synchronously, so the listeners are registered on load as MV3 needs.
+ */
+function holdsTrafficHosts() {
+  const held = new Set(chrome.runtime.getManifest().host_permissions ?? []);
+  return trafficFilter.urls.every((u) => held.has(u));
+}
+
+const TRAFFIC_UNAVAILABLE =
+  "api_traffic isn't available in this build of the extension: it listens on the Microsoft hosts the Teams tab calls, " +
+  "which the extension doesn't request (it requests only the Teams and SharePoint hosts it works with). " +
+  "To use it from a clone of mcp-teams, add teams.TRAFFIC_URLS and teams.TRAFFIC_WS_URLS (extension/teams.js) to " +
+  "host_permissions in the extension's manifest.json, then reload the extension.";
+
 function recordRequest(details) {
   if (!teams.isTeamsOrigin(details.initiator)) return;
   const entry = teams.summarizeRequest(details);
-  updateTraffic((list) => teams.recordTraffic(list, entry), { ifRecording: true });
-  if (TRAFFIC_ONLY_TYPES.includes(details.type)) return;
+  return updateTraffic((list) => teams.recordTraffic(list, entry), { ifRecording: true });
+}
+
+/**
+ * The hosts the manifest requests (#218), and the request types that count as the Teams tab's calls (not
+ * a WebSocket handshake or a beacon, #200). The last calls are taken from these, with or without the
+ * api_traffic hosts, so get_version's lastTeamsCall and lastSignedInCall work in every build.
+ */
+const callsFilter = {
+  urls: [
+    "https://teams.cloud.microsoft/*",
+    "https://teams.microsoft.com/*",
+    "https://*.ng.msg.teams.microsoft.com/*",
+    "https://substrate.office.com/*",
+    "https://*.sharepoint.com/*",
+  ],
+  types: ["xmlhttprequest", "other", "media"],
+};
+
+function noteTeamsCall(details) {
+  if (!teams.isTeamsOrigin(details.initiator)) return;
   return noteCall(details);
 }
 
@@ -398,8 +434,11 @@ function openTeamsTab() {
     const current = await chrome.tabs.get(tab.id).catch(() => null);
     if (!current) throw new Error("The Teams tab that was opened was closed. Try again, or open Teams yourself.");
     if (!cap) {
+      // Without the tabs permission (#218), the URL of a tab off the Teams hosts, such as Microsoft's
+      // sign-in page, reads as undefined: then say which tab rather than where it is.
       const at = current.url || current.pendingUrl;
-      throw new Error(`Teams was opened in a background tab but isn't signed in yet. Sign in there${at ? ` (${at.split("/").slice(0, 3).join("/")})` : ""}, then try again.`);
+      const where = at ? `Sign in there (${at.split("/").slice(0, 3).join("/")})` : "Sign in in the Teams tab that was opened (it may show a Microsoft sign-in page or an account picker)";
+      throw new Error(`Teams was opened in a background tab but isn't signed in yet. ${where}, then try again.`);
     }
     await waitForTabLoaded(tab.id);
     return current;
@@ -1347,6 +1386,13 @@ async function fetchMessagePages(id, { limit, olderThan, includeSystem, threadId
   return { raw, linkOf, first, next: null, capped: false, pages };
 }
 
+// chrome.storage.local: true turns the development-only probe handler on (#218). Set by hand only.
+const DEV_PROBE_KEY = "devProbe";
+const PROBE_OFF =
+  "probe is off: it is a development aid. To turn it on in this browser, open the extension's service worker console " +
+  "(chrome://extensions, mcp-teams bridge, \"service worker\") and run chrome.storage.local.set({ devProbe: true }); " +
+  "chrome.storage.local.remove(\"devProbe\") turns it off again.";
+
 export const handlers = {
   async status() {
     const tabs = await userTeamsTabs(await chrome.tabs.query({ url: TEAMS_URLS }));
@@ -1563,8 +1609,13 @@ export const handlers = {
     };
   },
 
-  /** Read-only diagnostics for development: a GET on a service, never its headers. */
+  /**
+   * Read-only diagnostics for development (npm run probe): a GET on a service, never its headers. Any
+   * path or SharePoint URL with the user's session, so it is off unless a developer turned it on by hand
+   * in this extension's own console (#218); no server or peer can set chrome.storage.local.
+   */
   async probe({ service, path, url }, ctx) {
+    if ((await chrome.storage.local.get(DEV_PROBE_KEY))[DEV_PROBE_KEY] !== true) throw new Error(PROBE_OFF);
     if (url) {
       const res = await sharepointGet(url, ctx);
       return { status: res.status, text: res.text.slice(0, 20_000_000) };
@@ -1575,6 +1626,7 @@ export const handlers = {
   },
 
   async apiTraffic({ filter, limit = 100, clear = false, record }) {
+    if (!holdsTrafficHosts()) throw new Error(TRAFFIC_UNAVAILABLE);
     if (typeof record === "boolean") {
       // In the log's queue, so events already reported are recorded (or not) under the old setting.
       await (trafficQueue = trafficQueue.then(async () => {
@@ -2531,8 +2583,11 @@ function onStorageChanged(changes, area) {
 /** Registers the worker's chrome event listeners (no connection; see below). */
 export function registerListeners() {
   chrome.webRequest.onBeforeSendHeaders.addListener(captureSession, captureFilter, ["requestHeaders", "extraHeaders"]);
-  chrome.webRequest.onBeforeSendHeaders.addListener(recordRequest, trafficFilter, ["requestHeaders", "extraHeaders"]);
-  chrome.webRequest.onCompleted.addListener(recordCompleted, trafficFilter);
+  chrome.webRequest.onBeforeSendHeaders.addListener(noteTeamsCall, callsFilter, ["requestHeaders", "extraHeaders"]);
+  if (holdsTrafficHosts()) {
+    chrome.webRequest.onBeforeSendHeaders.addListener(recordRequest, trafficFilter, ["requestHeaders", "extraHeaders"]);
+    chrome.webRequest.onCompleted.addListener(recordCompleted, trafficFilter);
+  }
   chrome.windows.onRemoved.addListener(onWindowRemoved);
   chrome.runtime.onMessage.addListener(onConfirmMessage);
   chrome.runtime.onMessage.addListener(onPopupMessage);

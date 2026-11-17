@@ -1,5 +1,6 @@
 // The api_traffic log (3.4, #19): the worker records the Teams tab's API calls only while the
-// AI has turned recording on with api_traffic({ record: true }).
+// AI has turned recording on with api_traffic({ record: true }). Since #218 the manifest doesn't request
+// the hosts it listens on, so these tests run a developer's copy that adds them (trafficHosts: true).
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createFakeChrome, loadWorker, openedSockets, type FakeChrome } from "../helpers/fakeChrome.js";
 import { until } from "../helpers/timing.js";
@@ -23,7 +24,7 @@ const trafficWrites = (fake: FakeChrome) => fake.chrome.storage.session.set.mock
 
 describe("3.4: the traffic log records only while api_traffic turned it on", () => {
   it("3.4: before api_traffic turns recording on, Teams' calls are neither recorded nor written to storage", async () => {
-    const fake = createFakeChrome();
+    const fake = createFakeChrome({ trafficHosts: true });
     const worker = await loadWorker(fake);
     worker.registerListeners();
     await teamsCalls(fake, "users/ME/fictionalSettings");
@@ -36,7 +37,7 @@ describe("3.4: the traffic log records only while api_traffic turned it on", () 
   });
 
   it("3.4: record: true starts recording, record: false stops it, and what was recorded stays until clear", async () => {
-    const fake = createFakeChrome();
+    const fake = createFakeChrome({ trafficHosts: true });
     const worker = await loadWorker(fake);
     worker.registerListeners();
     expect(await worker.handlers.apiTraffic({ record: true })).toMatchObject({ recording: true, recorded: 0 });
@@ -54,7 +55,7 @@ describe("3.4: the traffic log records only while api_traffic turned it on", () 
   it("3.4: recording stops by itself 30 minutes after it was turned on", async () => {
     vi.useFakeTimers({ toFake: ["Date"] });
     vi.setSystemTime(new Date("2026-10-01T10:00:00Z"));
-    const fake = createFakeChrome();
+    const fake = createFakeChrome({ trafficHosts: true });
     const worker = await loadWorker(fake);
     worker.registerListeners();
     const r = await worker.handlers.apiTraffic({ record: true });
@@ -66,7 +67,7 @@ describe("3.4: the traffic log records only while api_traffic turned it on", () 
   });
 
   it("3.4: recording that was turned on survives a restart of the service worker", async () => {
-    const fake = createFakeChrome();
+    const fake = createFakeChrome({ trafficHosts: true });
     const first = await loadWorker(fake);
     await first.handlers.apiTraffic({ record: true });
     await settle();
@@ -80,13 +81,13 @@ describe("3.4: the traffic log records only while api_traffic turned it on", () 
   // The log is saved half a second after a change. The save goes to the browser the request was
   // recorded in, even once another fake chrome (the next test's) has taken its place.
   it("a pending save of the log goes to the storage of the browser it was recorded in, not to the next one's", async () => {
-    const first = createFakeChrome();
+    const first = createFakeChrome({ trafficHosts: true });
     const worker = await loadWorker(first);
     worker.registerListeners();
     await worker.handlers.apiTraffic({ record: true });
     await teamsCalls(first, "users/ME/fictionalSettings");
     await worker.handlers.apiTraffic({}); // the log's queued updates (the request and its status) have run
-    const next = createFakeChrome();
+    const next = createFakeChrome({ trafficHosts: true });
     await loadWorker(next);
     // The save's timer fires about half a second later; until's 3 s leaves a busy machine room for that.
     await until(() => trafficWrites(first) > 0, 3_000, "the pending save of the log");
@@ -103,7 +104,7 @@ describe("#200: the traffic log records the Teams tab's websocket and ping reque
   const BEACON = "https://teams.cloud.microsoft/api/fictional/beacon";
 
   it("a websocket and a ping from the Teams tab are recorded while recording is on, with their type", async () => {
-    const fake = createFakeChrome();
+    const fake = createFakeChrome({ trafficHosts: true });
     const worker = await loadWorker(fake);
     worker.registerListeners();
     await worker.handlers.apiTraffic({ record: true });
@@ -120,7 +121,7 @@ describe("#200: the traffic log records the Teams tab's websocket and ping reque
   });
 
   it("a websocket handshake's status (101) is recorded when Chrome reports it completed", async () => {
-    const fake = createFakeChrome();
+    const fake = createFakeChrome({ trafficHosts: true });
     const worker = await loadWorker(fake);
     worker.registerListeners();
     await worker.handlers.apiTraffic({ record: true });
@@ -131,7 +132,7 @@ describe("#200: the traffic log records the Teams tab's websocket and ping reque
 
   // The Teams-origin gate stays (#122): Outlook on the web's sockets and beacons are not Teams'.
   it("a websocket or ping from another origin is not recorded", async () => {
-    const fake = createFakeChrome();
+    const fake = createFakeChrome({ trafficHosts: true });
     const worker = await loadWorker(fake);
     worker.registerListeners();
     await worker.handlers.apiTraffic({ record: true });
@@ -139,5 +140,50 @@ describe("#200: the traffic log records the Teams tab's websocket and ping reque
     await fake.fire("beforeSendHeaders", { url: "wss://substrate.office.com/fictional/socket", type: "websocket", initiator });
     await fake.fire("beforeSendHeaders", { url: "https://outlook.office.com/fictional/beacon", method: "POST", type: "ping", initiator });
     expect(await worker.handlers.apiTraffic({})).toMatchObject({ recording: true, recorded: 0 });
+  });
+});
+
+// #218: the store build's manifest requests only the five Teams and SharePoint hosts, not the hosts the
+// traffic log listens on, so api_traffic isn't available there: it says so, and the worker doesn't listen.
+describe("#218: api_traffic without the traffic hosts (the manifest as shipped)", () => {
+  const SHIPPED_HOSTS = [
+    "https://teams.cloud.microsoft/*",
+    "https://teams.microsoft.com/*",
+    "https://*.ng.msg.teams.microsoft.com/*",
+    "https://substrate.office.com/*",
+    "https://*.sharepoint.com/*",
+  ];
+  /** Whether a listener's pattern lies within one of the shipped hosts (the host itself, or a path below it). */
+  const withinShipped = (pattern: string) => SHIPPED_HOSTS.some((host) => pattern === host || pattern.startsWith(host.slice(0, -1)));
+
+  it("api_traffic({ record: true }) answers that it isn't available in this build, and nothing records", async () => {
+    const fake = createFakeChrome();
+    const worker = await loadWorker(fake);
+    worker.registerListeners();
+    const answers: { ok: boolean; error?: string }[] = [];
+    await worker.dispatch({ type: "request", id: "t1", method: "apiTraffic", params: { record: true }, timeoutMs: 10_000 }, (m: any) => answers.push(m));
+    expect(answers).toHaveLength(1);
+    expect(answers[0].ok).toBe(false);
+    expect(answers[0].error).toMatch(/api_traffic isn't available in this build/);
+    expect(answers[0].error).toMatch(/host_permissions/);
+    await teamsCalls(fake, "users/ME/fictionalSettings");
+    worker.savePendingTraffic();
+    expect(await fake.chrome.storage.session.get(["traffic", "trafficUntil"])).toEqual({});
+  });
+
+  it("the worker registers no webRequest listener on a host the manifest doesn't request", async () => {
+    const fake = createFakeChrome();
+    const worker = await loadWorker(fake);
+    worker.registerListeners();
+    expect(fake.webRequestUrls().length).toBeGreaterThan(0);
+    expect(fake.webRequestUrls().filter((p: string) => !withinShipped(p))).toEqual([]);
+  });
+
+  it("with the traffic hosts added to the manifest (a developer's copy), it listens on them and records as before", async () => {
+    const fake = createFakeChrome({ trafficHosts: true });
+    const worker = await loadWorker(fake);
+    worker.registerListeners();
+    expect(fake.webRequestUrls()).toEqual(expect.arrayContaining(["https://*.microsoft.com/*", "wss://*.microsoft.com/*"]));
+    expect(await worker.handlers.apiTraffic({ record: true })).toMatchObject({ recording: true });
   });
 });

@@ -71,6 +71,38 @@ describe("no Teams tab open", () => {
   });
 });
 
+// #218: without the tabs permission, Chrome hides the URL of a tab on a host the extension doesn't hold,
+// such as the sign-in page the opened Teams tab goes to. The error still says where to sign in.
+describe("#218: the Teams tab that was opened isn't signed in", () => {
+  /** setup's openTab with no session coming: the worker opens Teams, which lands on `url`, and gives up after its 60 s. */
+  async function openedTabLandsOn(url: string) {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+    const fake = createFakeChrome({ services: { csa }, teamsTab: false, captured: [] });
+    const worker = await loadWorker(fake);
+    worker.registerListeners();
+    const done = request(worker, "listTeams", { refresh: true, openTab: true });
+    await vi.waitFor(() => expect(fake.spies.tabsCreate).toHaveBeenCalledTimes(1));
+    const opened = await fake.spies.tabsCreate.mock.results[0].value;
+    fake.navigate(opened.id, url);
+    await vi.advanceTimersByTimeAsync(61_000);
+    return (await done).reply;
+  }
+
+  it("on Microsoft's sign-in page (a host it doesn't hold), the error says to sign in in the Teams tab that was opened", async () => {
+    const reply = await openedTabLandsOn("https://login.microsoftonline.com/common/oauth2/v2.0/authorize?client_id=fictional");
+    expect(reply).toMatchObject({ ok: false });
+    expect(reply.error).toMatch(/isn't signed in yet/);
+    expect(reply.error).toContain("Sign in in the Teams tab that was opened");
+    expect(reply.error).not.toContain("Sign in there, then");
+  });
+
+  it("still on Teams (a host it holds), the error names the Teams origin as before", async () => {
+    const reply = await openedTabLandsOn("https://teams.cloud.microsoft/v2/?fictional=1");
+    expect(reply).toMatchObject({ ok: false });
+    expect(reply.error).toContain("Sign in there (https://teams.cloud.microsoft), then try again.");
+  });
+});
+
 describe("a Teams tab is open", () => {
   it("list_teams and list_chats read as before", async () => {
     const fake = createFakeChrome({ services: { csa } });

@@ -470,13 +470,35 @@ describe("traffic log", () => {
   });
 });
 
-// Chrome reports a request to a webRequest listener only on a host the extension has permission for,
-// so every pattern the traffic log listens on is also a host permission (#200: the wss:// ones too).
-describe("#200: the manifest's host permissions", () => {
-  it("cover every pattern the traffic log listens on, https:// and wss://", () => {
-    const { host_permissions } = JSON.parse(readFileSync("extension/manifest.json", "utf8"));
+// #218: the manifest asks only for what the bridge needs (store review). Chrome reports a request to a
+// webRequest listener only on a host the extension holds, so the api_traffic diagnostic, which listens on
+// broad https:// and wss:// patterns (#200), works only in a copy whose manifest adds them by hand.
+describe("#218: the manifest's permissions", () => {
+  const manifest = JSON.parse(readFileSync("extension/manifest.json", "utf8"));
+
+  it("host_permissions are exactly the five Teams and SharePoint hosts", () => {
+    expect([...manifest.host_permissions].sort()).toEqual(
+      [
+        "https://teams.cloud.microsoft/*",
+        "https://teams.microsoft.com/*",
+        "https://*.ng.msg.teams.microsoft.com/*",
+        "https://substrate.office.com/*",
+        "https://*.sharepoint.com/*",
+      ].sort(),
+    );
+  });
+
+  it("permissions are storage, scripting, webRequest, alarms and nativeMessaging: no tabs", () => {
+    expect([...manifest.permissions].sort()).toEqual(["alarms", "nativeMessaging", "scripting", "storage", "webRequest"]);
+    expect(manifest).not.toHaveProperty("optional_host_permissions");
+    expect(manifest).not.toHaveProperty("optional_permissions");
+  });
+
+  it("none of the api_traffic patterns beyond the five hosts is requested, https:// or wss://", () => {
     expect(teams.TRAFFIC_WS_URLS).toContain("wss://*.microsoft.com/*");
-    expect(host_permissions).toEqual(expect.arrayContaining([...teams.TRAFFIC_URLS, ...teams.TRAFFIC_WS_URLS]));
+    const extra = [...teams.TRAFFIC_URLS, ...teams.TRAFFIC_WS_URLS].filter((p: string) => p !== "https://*.sharepoint.com/*");
+    expect(extra).toHaveLength(13);
+    for (const p of extra) expect(manifest.host_permissions).not.toContain(p);
   });
 });
 

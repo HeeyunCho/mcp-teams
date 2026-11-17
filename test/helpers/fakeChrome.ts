@@ -8,12 +8,25 @@ import { expect, vi } from "vitest";
 import WsWebSocket from "ws";
 // @ts-expect-error plain JS extension module without types
 import { NATIVE_MAX_MESSAGE_BYTES } from "../../extension/chunks.js";
+// @ts-expect-error plain JS extension module without types
+import { TRAFFIC_URLS, TRAFFIC_WS_URLS } from "../../extension/teams.js";
 
 export type Service = "chatsvc" | "csa" | "mt" | "substrate" | "sharepoint";
 export const TEAMS_SERVICES = ["chatsvc", "csa", "mt", "substrate"] as const;
 
+/** The real extension/manifest.json: the fake grants what it requests, as Chrome does. */
+const MANIFEST: { version: string; permissions: string[]; host_permissions: string[] } = JSON.parse(
+  readFileSync(new URL("../../extension/manifest.json", import.meta.url), "utf8"),
+);
+
 /** The worker reports its manifest's version, as in the browser (sends need 0.2.13 or newer). */
-export const EXTENSION_VERSION: string = JSON.parse(readFileSync(new URL("../../extension/manifest.json", import.meta.url), "utf8")).version;
+export const EXTENSION_VERSION: string = MANIFEST.version;
+
+/**
+ * The patterns the api_traffic log listens on (#200), which the manifest doesn't request (#218): a
+ * developer's copy adds them to host_permissions by hand (`trafficHosts: true`).
+ */
+export const TRAFFIC_HOST_PERMISSIONS: string[] = [...TRAFFIC_URLS, ...TRAFFIC_WS_URLS];
 
 /** What a fake service answers: a JSON body (HTTP 200) or reply(status, ...), maybe later. */
 export interface Reply {
@@ -102,6 +115,17 @@ export interface FakeChromeOptions {
    * allocating 64 MB.
    */
   nativeRefusesOver?: number;
+  /**
+   * The manifest also requests the api_traffic patterns (TRAFFIC_HOST_PERMISSIONS), as a developer's
+   * copy edited by hand does (#218). Default false: the real manifest's five hosts only.
+   */
+  trafficHosts?: boolean;
+  /**
+   * The manifest's permissions (default: the real manifest's). Without "tabs", as in Chrome, a tab's
+   * url, pendingUrl and title are undefined unless its URL is on a held host, and a tabs.query by url
+   * finds only tabs whose URL it may see.
+   */
+  permissions?: string[];
 }
 
 /**
@@ -127,6 +151,8 @@ export interface FakeNativeHost {
 interface Tab {
   id: number;
   url: string;
+  pendingUrl?: string;
+  title?: string;
   status: "loading" | "complete";
   discarded?: boolean;
   pinned?: boolean;
@@ -196,7 +222,25 @@ function fakeNativePort(runtime: { lastError?: { message: string } }, name: stri
   return { port, host };
 }
 
-export function createFakeChrome({ services = {}, captured = [...TEAMS_SERVICES], teamsTab = true, local: localInit = {}, seesOwnRequests = false, loadMs, nativeHost, nativeRefusesOver = NATIVE_MAX_MESSAGE_BYTES }: FakeChromeOptions = {}) {
+export function createFakeChrome({
+  services = {},
+  captured = [...TEAMS_SERVICES],
+  teamsTab = true,
+  local: localInit = {},
+  seesOwnRequests = false,
+  loadMs,
+  nativeHost,
+  nativeRefusesOver = NATIVE_MAX_MESSAGE_BYTES,
+  trafficHosts = false,
+  permissions = MANIFEST.permissions,
+}: FakeChromeOptions = {}) {
+  const hostPermissions = trafficHosts ? [...MANIFEST.host_permissions, ...TRAFFIC_HOST_PERMISSIONS] : [...MANIFEST.host_permissions];
+  const manifest = { ...MANIFEST, permissions: [...permissions], host_permissions: hostPermissions };
+  const heldHosts = hostPermissions.map(patternToRegExp);
+  /** Whether the extension holds a host permission for `url` (Chrome's match patterns, as patternToRegExp reads them). */
+  const holds = (url: string | undefined) => !!url && heldHosts.some((p) => p.test(url));
+  /** A tab as the extension sees it: without "tabs", no url, pendingUrl or title unless its URL is on a held host. */
+  const seen = (t: Tab): Tab => (permissions.includes("tabs") || holds(t.url) ? { ...t } : ({ ...t, url: undefined, pendingUrl: undefined, title: undefined } as unknown as Tab));
   const sent: SentRequest[] = [];
   const session = new Map<string, unknown>();
   const local = new Map<string, unknown>(Object.entries(localInit));
@@ -271,15 +315,19 @@ export function createFakeChrome({ services = {}, captured = [...TEAMS_SERVICES]
   const windowRemoved = event<(windowId: number) => void>();
   const runtimeMessage = event<(msg: any, sender: any, sendResponse: (r: unknown) => void) => unknown>();
   /** A webRequest listener: its URL patterns and, if its filter gives them, the request types it hears (#200). */
-  type WebRequestListener = { fn: Fn; patterns: RegExp[]; types?: string[] };
+  type WebRequestListener = { fn: Fn; urls: string[]; patterns: RegExp[]; types?: string[] };
   const webRequestBefore: WebRequestListener[] = [];
   const webRequestCompleted: WebRequestListener[] = [];
-  const webRequestListener = (fn: Fn, filter: { urls: string[]; types?: string[] }): WebRequestListener => ({ fn, patterns: filter.urls.map(patternToRegExp), types: filter.types });
+  const webRequestListener = (fn: Fn, filter: { urls: string[]; types?: string[] }): WebRequestListener => ({ fn, urls: filter.urls, patterns: filter.urls.map(patternToRegExp), types: filter.types });
   type WebRequestDetails = { url: string; method?: string; type?: string; initiator?: string; requestHeaders?: { name: string; value: string }[]; statusCode?: number };
-  /** Reports a request, as Chrome does, only to listeners whose filter matches its URL and its type (when the filter gives types). */
+  /**
+   * Reports a request, as Chrome does, only on a host the extension holds (#218), and only to listeners
+   * whose filter matches its URL and its type (when the filter gives types).
+   */
   async function fireWebRequest(kind: "beforeSendHeaders" | "completed", details: WebRequestDetails) {
     const list = kind === "completed" ? webRequestCompleted : webRequestBefore;
     const full = { method: "GET", requestHeaders: [], type: "xmlhttprequest", initiator: TEAMS_ORIGIN, ...details };
+    if (!holds(full.url)) return;
     for (const l of list) if (l.patterns.some((p) => p.test(full.url)) && (!l.types || l.types.includes(full.type))) await l.fn(full);
   }
 
@@ -288,8 +336,10 @@ export function createFakeChrome({ services = {}, captured = [...TEAMS_SERVICES]
   /** Sets a tab's status (and url), and reports the change through tabs.onUpdated, later, as Chrome does. */
   const updateTab = (t: Tab, change: { status?: Tab["status"]; url?: string }) => {
     Object.assign(t, change);
-    const snapshot = { ...t };
-    void Promise.resolve().then(() => tabUpdated.listeners.forEach((l) => l(t.id, change, snapshot)));
+    const snapshot = seen(t);
+    // Without "tabs", a new URL off the held hosts isn't reported either.
+    const reported = change.url === undefined || snapshot.url !== undefined ? change : { ...change, url: undefined };
+    void Promise.resolve().then(() => tabUpdated.listeners.forEach((l) => l(t.id, reported, snapshot)));
   };
   /** With `loadMs`: the tab loads (from now) for that long, then is complete. */
   const startLoading = (t: Tab) => {
@@ -328,18 +378,19 @@ export function createFakeChrome({ services = {}, captured = [...TEAMS_SERVICES]
     }),
     tabsQuery: vi.fn(async ({ url }: { url?: string | string[] } = {}) => {
       const patterns = (url === undefined ? [] : Array.isArray(url) ? url : [url]).map(patternToRegExp);
-      return tabs.filter((t) => !patterns.length || patterns.some((p) => p.test(t.url))).map((t) => ({ ...t }));
+      // A url query finds only tabs whose URL the extension may see.
+      return tabs.map(seen).filter((t) => !patterns.length || (t.url !== undefined && patterns.some((p) => p.test(t.url))));
     }),
     tabsGet: vi.fn(async (id: number) => {
       const t = tabs.find((x) => x.id === id);
       if (!t) throw new Error(`No tab with id: ${id}.`);
-      return { ...t };
+      return seen(t);
     }),
     tabsCreate: vi.fn(async ({ url, pinned, active = true }: { url: string; active?: boolean; pinned?: boolean }) => {
       const t: Tab = { id: nextTabId++, url, status: "complete", pinned, active };
       tabs.push(t);
       startLoading(t);
-      return { ...t };
+      return seen(t);
     }),
     tabsReload: vi.fn(async (id: number) => {
       const t = tabs.find((x) => x.id === id);
@@ -353,7 +404,7 @@ export function createFakeChrome({ services = {}, captured = [...TEAMS_SERVICES]
       const t: Tab = { id: nextTabId++, url: url ?? "about:blank", status: "complete" };
       tabs.push(t);
       startLoading(t);
-      return { id: nextWindowId++, tabs: [{ ...t }] };
+      return { id: nextWindowId++, tabs: [seen(t)] };
     }),
     windowsRemove: vi.fn(async (_id: number) => {}),
     runtimeReload: vi.fn(() => {}),
@@ -376,7 +427,7 @@ export function createFakeChrome({ services = {}, captured = [...TEAMS_SERVICES]
       lastError: undefined as { message: string } | undefined,
       ...(connectNative ? { connectNative } : {}),
       id: "fake-extension-id",
-      getManifest: () => ({ version: EXTENSION_VERSION }),
+      getManifest: () => structuredClone(manifest),
       getURL: (p: string) => `chrome-extension://fake-extension-id/${p}`,
       reload: spies.runtimeReload,
       onMessage: runtimeMessage,
@@ -422,6 +473,12 @@ export function createFakeChrome({ services = {}, captured = [...TEAMS_SERVICES]
     },
     /** Chrome reports that the user closed a window. */
     closeWindow: (windowId: number) => windowRemoved.listeners.forEach((l) => l(windowId)),
+    /** A tab goes to another URL (e.g. a sign-in page), reported through tabs.onUpdated as in Chrome. */
+    navigate(tabId: number, url: string) {
+      const t = tabs.find((x) => x.id === tabId);
+      if (!t) throw new Error(`fakeChrome: no tab ${tabId}`);
+      updateTab(t, { url });
+    },
     /** Runs the worker's webRequest listeners whose URL filter matches, as Chrome would. */
     fire: fireWebRequest,
     /** A message from one of the extension's pages (e.g. "confirm.html?id=…"); resolves with the worker's answer. */
@@ -441,6 +498,8 @@ export function createFakeChrome({ services = {}, captured = [...TEAMS_SERVICES]
       webRequest: webRequestBefore.length + webRequestCompleted.length,
       onAlarm: chrome.alarms.onAlarm.listeners.length,
     }),
+    /** The URL patterns of every webRequest listener the worker registered (onBeforeSendHeaders and onCompleted). */
+    webRequestUrls: () => [...new Set([...webRequestBefore, ...webRequestCompleted].flatMap((l) => l.urls))],
     /**
      * The worker stops (Chrome suspends it): its listeners go with it, chrome.storage stays. Load
      * the next one with loadWorker(fake) and call its registerListeners().
