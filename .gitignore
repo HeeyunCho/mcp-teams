@@ -11,3 +11,6 @@ extension/pairing.json
 
 # Temp files a killed scripts/bump-version.mjs run can leave.
 *.bump-*.tmp
+
+# The store zips scripts/package-extension.mjs writes (#216).
+/artifacts/

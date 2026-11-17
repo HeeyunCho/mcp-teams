@@ -7,7 +7,7 @@ It supports work and school (Microsoft 365) accounts. Personal Teams (teams.live
 ```
 AI app ────stdio(MCP)──► mcp-teams server ──ws://127.0.0.1:47393──► browser extension ──► Teams tab
                                               (loopback only; our      (runs Teams' own
-                                               extension's fixed id)    web API in the tab)
+                                               extension's ids)         web API in the tab)
 ```
 
 ## Tools
@@ -185,7 +185,10 @@ npm install && npm run build
 node dist/index.js setup   # registers this copy (node dist/index.js) instead of npx
 npm test                   # builds, then runs unit, integration and system tests (see docs/testing.md)
 npm run probe -- status    # calls one extension method through the bridge (see scripts/probe.mjs)
+npm run package-extension  # the zip for the Chrome Web Store and Edge Add-ons (see docs/extension-ids.md)
 ```
+
+The server, the native host and setup trust a fixed list of extension ids: the sideloaded copy's (from the manifest's `key`) and, once the stores have assigned them, the Chrome Web Store's and Edge Add-ons'. Adding a store id is one line in `src/extension.ts`, then run setup again; see [docs/extension-ids.md](docs/extension-ids.md).
 
 Versions are bumped automatically. On every push to `main` (except Markdown-only changes), the **Version bump** GitHub Action runs the tests, then bumps `package.json`, `package-lock.json` and `extension/manifest.json`, commits `chore(release): vX.Y.Z` and tags it. While the version is below 1.0.0, a breaking change (`type!:` or a `BREAKING CHANGE:` footer) bumps the minor version and anything else, `feat:` included, the patch. From 1.0.0 on it's standard semver: breaking → major, `feat:` → minor, anything else → patch.
 
