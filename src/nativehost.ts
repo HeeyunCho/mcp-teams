@@ -10,11 +10,13 @@
  * (launch.cjs hub) and refreshNativeHosts; batPath with the .bat fixes of 302a2d6 and ace7f02.
  * New here: hostNodeCheck, which reports a registration whose Node has gone (decision 11).
  */
-import { execFileSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { execFile, execFileSync } from "node:child_process";
+import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { promisify } from "node:util";
 import { EXTENSION_ORIGIN } from "./extension.js";
 
 export const HOST_NAME = "com.mcp_teams.hub";
@@ -35,8 +37,11 @@ export interface NativeHostOptions {
   hubScript?: string;
   /** Runs `reg` with these arguments (Windows). */
   reg?: (args: string[]) => void;
-  /** Reads an HKCU key's default value, null when there is none (Windows; read-only). */
-  regQuery?: (key: string) => string | null;
+  /**
+   * Reads an HKCU key's default value, null when there is none (Windows; read-only). Async, so
+   * reg.exe doesn't block the event loop of a hub serving every session (#180).
+   */
+  regQuery?: (key: string) => Promise<string | null>;
 }
 
 interface Target {
@@ -208,20 +213,27 @@ export function regExportDefaultValue(file: Buffer): string | null {
   return null;
 }
 
+const execFileAsync = promisify(execFile);
+
+/** How long one `reg export` may take before the key counts as unreadable (antivirus, a hung reg.exe). */
+const REG_TIMEOUT_MS = 10_000;
+
 /**
  * Reads a key's default value through `reg export` into a temporary file, deleted after; null
- * when the key or its value is missing. The registry itself is only read.
+ * when the key or its value is missing, or reg.exe takes over 10 s. The registry itself is only
+ * read. Async (#180): get_version calls it on the hub, whose event loop serves every session.
  */
-export function readRegDefault(key: string): string | null {
-  const dir = mkdtempSync(join(tmpdir(), "mcp-teams-reg-"));
+export async function readRegDefault(key: string): Promise<string | null> {
+  let dir: string | undefined;
   try {
+    dir = await mkdtemp(join(tmpdir(), "mcp-teams-reg-"));
     const file = join(dir, "key.reg");
-    execFileSync(regExe(), ["export", key, file, "/y"], { stdio: "ignore", windowsHide: true });
-    return regExportDefaultValue(readFileSync(file));
+    await execFileAsync(regExe(), ["export", key, file, "/y"], { windowsHide: true, timeout: REG_TIMEOUT_MS });
+    return regExportDefaultValue(await readFile(file));
   } catch {
     return null;
   } finally {
-    rmSync(dir, { recursive: true, force: true });
+    if (dir !== undefined) await rm(dir, { recursive: true, force: true }).catch(() => {});
   }
 }
 
@@ -258,13 +270,12 @@ const resolveOptions = (o: NativeHostOptions) => ({
 type ReadOptions = Pick<NativeHostOptions, "home" | "platform" | "env" | "regQuery">;
 
 /**
- * Each registration found (a browser whose profile folder and our manifest are there): what its
- * host launcher starts, and on Windows whether the browser's HKCU key names that manifest.
+ * Each registration found (a browser whose profile folder and our manifest are there) and what its
+ * host launcher starts, from files only: setup reads this synchronously before it writes.
  */
-function readRegistrations(o: ReadOptions): (RegisteredHost & { target: Target })[] {
+function readRegistrations(o: Pick<NativeHostOptions, "home" | "platform" | "env">): (RegisteredHost & { target: Target; manifest: string })[] {
   const { home, platform, env } = resolveOptions(o);
-  const regQuery = o.regQuery ?? readRegDefault;
-  const found: (RegisteredHost & { target: Target })[] = [];
+  const found: (RegisteredHost & { target: Target; manifest: string })[] = [];
   for (const target of targets(home, platform, env)) {
     const manifest = join(target.dir, MANIFEST_FILE);
     if (!existsSync(target.profileDir) || !existsSync(manifest)) continue;
@@ -275,15 +286,14 @@ function readRegistrations(o: ReadOptions): (RegisteredHost & { target: Target }
       // No host launcher: it names nothing.
     }
     const paths = launcherPaths(text, platform, env);
-    const keyMissing = target.registryKey !== undefined && regQuery(target.registryKey)?.toLowerCase() !== manifest.toLowerCase();
     found.push({
       target,
+      manifest,
       browser: target.browser,
       node: paths?.node ?? null,
       nodeExists: paths ? existsSync(paths.node) : null,
       hub: paths?.hub ?? null,
       hubExists: paths ? existsSync(paths.hub) : null,
-      ...(keyMissing ? { keyMissing: true as const } : {}),
     });
   }
   return found;
@@ -294,8 +304,15 @@ function readRegistrations(o: ReadOptions): (RegisteredHost & { target: Target }
  * 11): get_version and setup say "run setup again" when the Node or dist/hub.js has gone, or a
  * browser's HKCU key is missing. Reads files and (Windows) the registry; writes nothing.
  */
-export function registeredHosts(o: ReadOptions = {}): RegisteredHost[] {
-  return readRegistrations(o).map(({ target: _target, ...host }) => host);
+export async function registeredHosts(o: ReadOptions = {}): Promise<RegisteredHost[]> {
+  const regQuery = o.regQuery ?? readRegDefault;
+  return Promise.all(
+    readRegistrations(o).map(async ({ target, manifest, ...host }) => {
+      // Windows: the browser's HKCU key must name our manifest (read without blocking: #180).
+      const keyMissing = target.registryKey !== undefined && (await regQuery(target.registryKey))?.toLowerCase() !== manifest.toLowerCase();
+      return { ...host, ...(keyMissing ? { keyMissing: true as const } : {}) };
+    }),
+  );
 }
 
 /** What get_version shows about the native host's registration (with "nativeHost": true). */
@@ -321,8 +338,8 @@ const gonePaths = (hosts: RegisteredHost[], pick: (h: RegisteredHost) => [string
 ];
 
 /** get_version's view of the registrations: which browsers, and what to do when one can't start. */
-export function nativeHostReport(o: ReadOptions = {}): NativeHostReport {
-  const hosts = registeredHosts(o);
+export async function nativeHostReport(o: ReadOptions = {}): Promise<NativeHostReport> {
+  const hosts = await registeredHosts(o);
   const registered = hosts.filter((h) => !h.keyMissing).map((h) => h.browser);
   if (!hosts.length) {
     return { registered, hint: "The native host isn't registered with any browser, so the extension uses the local port. Run `npx mcp-teams setup` to register it." };
@@ -353,7 +370,7 @@ export function installNativeHost(o: NativeHostOptions = {}): InstallResult {
   const reg = o.reg ?? defaultReg;
   if (!existsSync(hubScript)) return { installed: [], missingHub: true };
   // What the registrations started before (to say what had gone); their keys don't matter here.
-  const before = new Map(readRegistrations({ ...o, regQuery: () => null }).map((r) => [r.browser, r] as const));
+  const before = new Map(readRegistrations(o).map((r) => [r.browser, r] as const));
   const found = targets(home, platform, env).filter((t) => existsSync(t.profileDir));
   if (!found.length) return { installed: [] };
   let script: string;

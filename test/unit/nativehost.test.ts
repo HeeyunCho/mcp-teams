@@ -246,7 +246,7 @@ describe("#123: a registration whose Node has gone", () => {
     return {
       keys,
       reg: (args: string[]) => void (args[0] === "add" && keys.set(args[1], args[6])),
-      regQuery: (key: string) => keys.get(key) ?? null,
+      regQuery: async (key: string) => keys.get(key) ?? null,
     };
   };
   const winOpts = (registry = fakeRegistry()) => ({ home, platform: "win32" as const, env: winEnv(), hubScript: hub, ...registry });
@@ -258,33 +258,33 @@ describe("#123: a registration whose Node has gone", () => {
    */
   const ON_WINDOWS = process.platform === "win32";
 
-  it("#123: nothing registered: nothing to report", () => {
+  it("#123: nothing registered: nothing to report", async () => {
     mk(...MAC_CHROME);
-    expect(registeredHosts({ home, platform: "darwin" })).toEqual([]);
+    expect(await registeredHosts({ home, platform: "darwin" })).toEqual([]);
   });
 
-  it("#123: macOS: reports each registration with its Node and hub, and whether each is still there", () => {
+  it("#123: macOS: reports each registration with its Node and hub, and whether each is still there", async () => {
     mk(...MAC_CHROME);
     mk(...MAC_EDGE);
     const node = fakeNode("nvm", "v20 $x", "bin", "node");
     installNativeHost({ home, platform: "darwin", node, hubScript: hub });
-    expect(registeredHosts({ home, platform: "darwin" })).toEqual([
+    expect(await registeredHosts({ home, platform: "darwin" })).toEqual([
       { browser: "Chrome", node, nodeExists: true, hub, hubExists: true },
       { browser: "Edge", node, nodeExists: true, hub, hubExists: true },
     ]);
     rmSync(node);
-    expect(registeredHosts({ home, platform: "darwin" }).map((r) => [r.browser, r.nodeExists, r.hubExists])).toEqual([
+    expect((await registeredHosts({ home, platform: "darwin" })).map((r) => [r.browser, r.nodeExists, r.hubExists])).toEqual([
       ["Chrome", false, true],
       ["Edge", false, true],
     ]);
   });
 
-  it("#123: a gone dist/hub.js (a pruned npx cache, a moved clone) is reported like a gone Node", () => {
+  it("#123: a gone dist/hub.js (a pruned npx cache, a moved clone) is reported like a gone Node", async () => {
     mk(...MAC_CHROME);
     installNativeHost({ home, platform: "darwin", node: fakeNode("node"), hubScript: hub });
     rmSync(hub);
-    expect(registeredHosts({ home, platform: "darwin" })).toEqual([expect.objectContaining({ browser: "Chrome", hub, hubExists: false, nodeExists: true })]);
-    expect(nativeHostReport({ home, platform: "darwin" })).toEqual({
+    expect(await registeredHosts({ home, platform: "darwin" })).toEqual([expect.objectContaining({ browser: "Chrome", hub, hubExists: false, nodeExists: true })]);
+    expect(await nativeHostReport({ home, platform: "darwin" })).toEqual({
       registered: ["Chrome"],
       hubMissing: [hub],
       hint: `The native host runs ${hub}, which no longer exists (an npx cache cleared, or the copy moved), so the browser can't start it and the extension uses the local port. Run \`npx mcp-teams setup\` again.`,
@@ -302,57 +302,72 @@ describe("#123: a registration whose Node has gone", () => {
     expect(installNativeHost({ home, platform: "darwin", node, hubScript: now }).installed).toEqual([expect.objectContaining({ browser: "Chrome", hubWasMissing: hub })]);
   });
 
-  it("#123: Windows: reads the Node and hub back from the .bat, folder variables and doubled % undone", () => {
+  it("#123: Windows: reads the Node and hub back from the .bat, folder variables and doubled % undone", async () => {
     mk(...WIN_CHROME);
     const env = { ...winEnv(), APPDATA: join(home, "AppData", "Roaming") };
     const node = fakeNode("AppData", "Roaming", "nvm", "v20 100%", "node.exe");
     const registry = fakeRegistry();
     installNativeHost({ ...winOpts(registry), env, node });
     expect(readFileSync(join(home, "AppData", "Local", "mcp-teams", "mcp-teams-hub.bat"), "utf8")).toContain('"%APPDATA%\\nvm\\v20 100%%\\node.exe"');
-    expect(registeredHosts({ home, platform: "win32", env, regQuery: registry.regQuery })).toEqual([
+    expect(await registeredHosts({ home, platform: "win32", env, regQuery: registry.regQuery })).toEqual([
       expect.objectContaining({ browser: "Chrome", node: win(node), hub: win(hub) }),
     ]);
   });
 
-  it.runIf(ON_WINDOWS)("#123: Windows: a Node gone from under the .bat is reported, and setup says so when it registers again", () => {
+  it.runIf(ON_WINDOWS)("#123: Windows: a Node gone from under the .bat is reported, and setup says so when it registers again", async () => {
     mk(...WIN_CHROME);
     const registry = fakeRegistry();
     const old = fakeNode("AppData", "Local", "fnm", "v20.1", "node.exe");
     installNativeHost({ ...winOpts(registry), node: old });
-    expect(registeredHosts({ home, platform: "win32", env: winEnv(), regQuery: registry.regQuery })[0]).toMatchObject({ nodeExists: true, hubExists: true });
+    expect((await registeredHosts({ home, platform: "win32", env: winEnv(), regQuery: registry.regQuery }))[0]).toMatchObject({ nodeExists: true, hubExists: true });
     rmSync(old);
-    expect(registeredHosts({ home, platform: "win32", env: winEnv(), regQuery: registry.regQuery })[0].nodeExists).toBe(false);
+    expect((await registeredHosts({ home, platform: "win32", env: winEnv(), regQuery: registry.regQuery }))[0].nodeExists).toBe(false);
     const now = fakeNode("AppData", "Local", "fnm", "v20.2", "node.exe");
     const r = installNativeHost({ ...winOpts(registry), node: now });
     expect(r.installed).toEqual([expect.objectContaining({ browser: "Chrome", changed: true, nodeWasMissing: old })]);
-    expect(registeredHosts({ home, platform: "win32", env: winEnv(), regQuery: registry.regQuery })[0]).toMatchObject({ node: now, nodeExists: true });
+    expect((await registeredHosts({ home, platform: "win32", env: winEnv(), regQuery: registry.regQuery }))[0]).toMatchObject({ node: now, nodeExists: true });
   });
 
-  it("#123: Windows: a browser is registered only when its HKCU key names the manifest (Edge installed after setup)", () => {
+  it("#123: Windows: a browser is registered only when its HKCU key names the manifest (Edge installed after setup)", async () => {
     mk(...WIN_CHROME);
     const registry = fakeRegistry();
     installNativeHost({ ...winOpts(registry), node: fakeNode("node.exe") });
     mk(...WIN_EDGE); // Edge came later: the shared manifest and .bat are there, its key isn't
-    const hosts = registeredHosts({ home, platform: "win32", env: winEnv(), regQuery: registry.regQuery });
+    const hosts = (await registeredHosts({ home, platform: "win32", env: winEnv(), regQuery: registry.regQuery }));
     expect(hosts.map((h) => [h.browser, h.keyMissing ?? false])).toEqual([
       ["Chrome", false],
       ["Edge", true],
     ]);
-    const report = nativeHostReport({ home, platform: "win32", env: winEnv(), regQuery: registry.regQuery });
+    const report = (await nativeHostReport({ home, platform: "win32", env: winEnv(), regQuery: registry.regQuery }));
     expect(report).toMatchObject({ registered: ["Chrome"], keyMissing: ["Edge"] });
     expect(report.hint).toContain("Edge has no registry key for the native host (installed after setup?)");
     expect(report.hint).toContain("Run `npx mcp-teams setup` again.");
     // A key naming another file counts as missing too.
     registry.keys.set(CHROME_KEY, "C:\\elsewhere\\com.mcp_teams.hub.json");
-    expect(nativeHostReport({ home, platform: "win32", env: winEnv(), regQuery: registry.regQuery }).keyMissing).toEqual(["Chrome", "Edge"]);
+    expect((await nativeHostReport({ home, platform: "win32", env: winEnv(), regQuery: registry.regQuery })).keyMissing).toEqual(["Chrome", "Edge"]);
   });
 
-  it("#123: a host launcher it can't read paths from is reported with null, not as gone", () => {
+  // #180: reg.exe runs without blocking the event loop, so the read is a promise that settles later.
+  it("#180: Windows: a registry read that answers later is awaited, with the same report", async () => {
+    mk(...WIN_CHROME);
+    const registry = fakeRegistry();
+    installNativeHost({ ...winOpts(registry), node: fakeNode("node.exe") });
+    mk(...WIN_EDGE);
+    const later = (key: string) => new Promise<string | null>((resolve) => setTimeout(() => resolve(registry.keys.get(key) ?? null), 20));
+    const opts = { home, platform: "win32" as const, env: winEnv(), regQuery: later };
+    expect((await registeredHosts(opts)).map((h) => [h.browser, h.keyMissing ?? false])).toEqual([
+      ["Chrome", false],
+      ["Edge", true],
+    ]);
+    expect(await nativeHostReport(opts)).toMatchObject({ registered: ["Chrome"], keyMissing: ["Edge"] });
+  });
+
+  it("#123: a host launcher it can't read paths from is reported with null, not as gone", async () => {
     mk(...MAC_CHROME);
     installNativeHost({ home, platform: "darwin", node: fakeNode("node"), hubScript: hub });
     writeFileSync(join(home, ...MAC_CHROME, "NativeMessagingHosts", "mcp-teams-hub"), "#!/bin/sh\necho edited by hand\n");
-    expect(registeredHosts({ home, platform: "darwin" })).toEqual([{ browser: "Chrome", node: null, nodeExists: null, hub: null, hubExists: null }]);
-    expect(nativeHostReport({ home, platform: "darwin" })).toEqual({ registered: ["Chrome"] });
+    expect(await registeredHosts({ home, platform: "darwin" })).toEqual([{ browser: "Chrome", node: null, nodeExists: null, hub: null, hubExists: null }]);
+    expect(await nativeHostReport({ home, platform: "darwin" })).toEqual({ registered: ["Chrome"] });
   });
 
   it("#123: a registration whose Node and hub are still there says nothing of them", () => {
@@ -411,10 +426,19 @@ describe.runIf(process.platform === "win32")("#123: readRegDefault against the r
   });
 
   // Four reg.exe starts: well over vitest's 5 s default on a loaded machine.
-  it("#123: a Hangul path round-trips, and a missing key reads as null", { timeout: 30_000 }, () => {
+  it("#123: a Hangul path round-trips, and a missing key reads as null", { timeout: 30_000 }, async () => {
     const path = "C:\\Users\\홍길동\\AppData\\Local\\mcp-teams\\com.mcp_teams.hub.json";
-    expect(readRegDefault(key)).toBeNull();
+    expect(await readRegDefault(key)).toBeNull();
     reg(["add", key, "/ve", "/t", "REG_SZ", "/d", path, "/f"]);
-    expect(readRegDefault(key)).toBe(path);
+    expect(await readRegDefault(key)).toBe(path);
+  });
+
+  // #180: a synchronous reg.exe would hold the event loop until it exited, so the setImmediate
+  // couldn't run before the read settled.
+  it("#180: the event loop keeps turning while reg.exe runs", { timeout: 30_000 }, async () => {
+    let turned = false;
+    setImmediate(() => (turned = true));
+    expect(await readRegDefault(key)).toBeNull();
+    expect(turned).toBe(true);
   });
 });
