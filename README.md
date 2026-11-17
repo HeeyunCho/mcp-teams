@@ -100,6 +100,14 @@ WebSocket connection to 'ws://127.0.0.1:47393/' failed: Error in connection esta
 
 That's expected when no AI app runs mcp-teams, or for a moment while sessions hand the bridge over to each other. Chrome writes the line itself for each attempt; the extension can't hide it. The extension keeps retrying (quickly at first, then every 30 s) and connects by itself once a server listens. It needs looking into only if `get_version` keeps reporting the extension as not connected (`extension: null`, `bridge: "waiting for extension"`) while a server is running. If you changed `port`, set the same port in the extension popup too: a mismatch also gives these lines.
 
+During a hand-over you may also see, once or twice:
+
+```
+WebSocket connection to 'ws://127.0.0.1:47393/' failed: Error during WebSocket handshake: net::ERR_CONNECTION_RESET
+```
+
+or, more rarely, `Unexpected response code: 426`. Both are harmless. A server that hands the bridge to another session, or exits, closes its listening socket, and the operating system resets any connection that was still waiting to be picked up, even though the extension had already sent its handshake (a 426 is one that arrived just as the server stopped taking upgrades). Nothing had been sent on that connection, so no call is lost. The extension retries by itself and connects to the next server within a second or two (#212).
+
 ### When Teams has no session
 
 `get_version` showing `teamsTabs: 1` (or more) but `sessionCaptured: false` means the extension hasn't seen Teams sign in to its chat service. The extension always keeps when the Teams tab last made a call (`lastTeamsCall`) and when it last made a signed-in one (`lastSignedInCall`), only the time and the host, and `get_version` adds a `note` naming the case:
