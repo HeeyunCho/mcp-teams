@@ -34,7 +34,14 @@
     "https://*.office.net/*",
     "https://*.sharepoint.com/*",
     "https://*.svc.ms/*",
-    "https://*.skype.com/*"
+    "https://*.skype.com/*",
+    "wss://*.cloud.microsoft/*",
+    "wss://*.microsoft.com/*",
+    "wss://*.office.com/*",
+    "wss://*.office.net/*",
+    "wss://*.sharepoint.com/*",
+    "wss://*.svc.ms/*",
+    "wss://*.skype.com/*"
   ],
   "action": {
     "default_title": "mcp-teams",
