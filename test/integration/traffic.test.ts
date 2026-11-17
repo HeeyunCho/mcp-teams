@@ -117,4 +117,26 @@ describe("#200: the traffic log records the Teams tab's websocket and ping reque
       ]),
     );
   });
+
+  it("a websocket handshake's status (101) is recorded when Chrome reports it completed", async () => {
+    const fake = createFakeChrome();
+    const worker = await loadWorker(fake);
+    worker.registerListeners();
+    await worker.handlers.apiTraffic({ record: true });
+    await fake.fire("beforeSendHeaders", { url: SOCKET, type: "websocket" });
+    await fake.fire("completed", { url: SOCKET, type: "websocket", statusCode: 101 });
+    expect((await worker.handlers.apiTraffic({})).requests).toEqual([expect.objectContaining({ host: "go.trouter.teams.microsoft.com", type: "websocket", status: 101 })]);
+  });
+
+  // The Teams-origin gate stays (#122): Outlook on the web's sockets and beacons are not Teams'.
+  it("a websocket or ping from another origin is not recorded", async () => {
+    const fake = createFakeChrome();
+    const worker = await loadWorker(fake);
+    worker.registerListeners();
+    await worker.handlers.apiTraffic({ record: true });
+    const initiator = "https://outlook.office.com";
+    await fake.fire("beforeSendHeaders", { url: "https://substrate.office.com/fictional/socket", type: "websocket", initiator });
+    await fake.fire("beforeSendHeaders", { url: "https://outlook.office.com/fictional/beacon", method: "POST", type: "ping", initiator });
+    expect(await worker.handlers.apiTraffic({})).toMatchObject({ recording: true, recorded: 0 });
+  });
 });

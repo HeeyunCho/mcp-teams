@@ -236,7 +236,12 @@ export function savePendingTraffic() {
   store.set({ [TRAFFIC_KEY]: traffic }).catch(() => {}); // kept in memory: the next change saves again
 }
 
-const trafficFilter = { urls: teams.TRAFFIC_URLS, types: ["xmlhttprequest", "other", "media"] };
+/**
+ * websocket (a WebSocket handshake, e.g. trouter) and ping (navigator.sendBeacon) too, so api_traffic
+ * shows a feature that talks over them (#200). Only the handshake or beacon is seen, never what a
+ * socket carries; a handshake's onCompleted, if Chrome reports one, gives its status (101).
+ */
+const trafficFilter = { urls: teams.TRAFFIC_URLS, types: ["xmlhttprequest", "other", "media", "websocket", "ping"] };
 
 function recordRequest(details) {
   if (!teams.isTeamsOrigin(details.initiator)) return;
