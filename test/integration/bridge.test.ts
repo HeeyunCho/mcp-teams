@@ -239,6 +239,7 @@ describe("ExtensionBridge options", () => {
       maxMessageBytes: 256 * 1024 * 1024,
       keepAliveMs: 20_000,
       retryMs: 2_000,
+      retryMaxMs: 30_000, // the role=none wait doubles from retryMs up to this, with ±50% jitter
       joinTimeoutMs: 3_000,
       authTimeoutMs: 5_000,
       pickStatusTimeoutMs: 3_000,
