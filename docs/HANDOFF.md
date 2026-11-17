@@ -46,12 +46,13 @@ Labels and comments only, no code. Each issue was checked against `main` at 0.3.
 | #170 | `ready-for-agent`, `performance` | `hubLog()` still makes three blocking file calls per line. A fix must keep rotation correct under the #152/#163 lock (an in-memory size is only a hint; recheck under the lock) |
 | #172 | `ready-for-agent`, `bug` | `send()` (`src/bridge.ts`, about line 1652) still writes without a `readyState` check, and `runCall` doesn't recheck the socket between `pickExtension` and `takeTurn` |
 | #149 | `ready-for-agent` | #159 did the handshake part. Left: keep-alive drops (`startKeepAlive`, `startPeerBeat`) write no `hub.log` line, and the system tests on the 200 ms test heartbeat aren't checked one by one |
-| #173 | `ready-for-human` | Tracking issue, all 7 items still apply. Its 4 low findings are being split into their own issues. The 3 "cause unknown" items need the live `server.log` |
+| #173 | `ready-for-human` | Tracking issue, all 7 items still apply. Its 4 low findings are split into #177–#180 (below). The 3 "cause unknown" items stay here and need the live `server.log` |
 | #21 | `ready-for-human` | The "Part of" umbrella. What's left is in #123 and #111; close it when #123 ships |
 | #142 | `ready-for-human` | Not stale: `restart-needed v=0.3.71 onDisk=0.3.72` at 06:59:39Z, and 0.3.70/0.3.71 servers still running at 07:25Z. Same cause as #111/#96; kept open so the hourly health check's reports land there. Close it with #111 |
 | #162 | `ready-for-human` | Not stale: on 0.3.72, `tabs=0 captured=no` from `extension-connected` at 07:03:10Z to the first capture at 07:31:55Z (about 29 min, through four hub handovers). That's past #160's 15 min threshold. Needs the live browser and its logs |
 | #124 | still `needs-info` | On 0.3.72 the extension closed once (`extension-closed code=1001` at 07:15:00Z on hub 42868) and rejoined at 07:16:03Z, about 63 s. That's too short to show either way. The comment of 2026-11-17 lists what's still needed: a long occurrence on 0.3.66 or later with its `server.log` lines, the extension's service-worker console at that moment, and whether it only follows a release |
 
+- **Split out of #173, all `ready-for-agent` and checked against 0.3.72:** #177 (`bug`: leftover `.rotating` files never deleted, `src/hubLog.ts` `rotate()`), #178 (`performance`: the extension's transcript cache counts response text, not the parsed JSON it keeps), #179 (`performance`: one `search_transcripts` call can make about 1,000 Teams requests; its timeout is 300 s, not the 120 s #173 said), #180 (`performance`: `get_version` blocks on `execFileSync(reg.exe)` when `nativeHost` is on).
 - **Closed issues tidied:** `needs-triage` removed from #168, #169 and #171.
 - **#169 was closed as completed** at 07:09:26Z with no comment and no fixing PR. `get_version` on 0.3.72 still reports `maxMessageBytes: 268435456`, so the 256 MB limit it describes is unchanged. Check whether that was intended before #123 PR 5.
 - **Repo tidy:** Dependabot #166 had merged on 2026-11-16, but its branch `dependabot/npm_and_yarn/hono-4.13.18` was left on origin. Its head (`8b43592`) is in `main`, so the branch was deleted (it can be restored from #166). origin now has only `main`. Locally, the `wt-diag` scratchpad worktree and the five merged `worktree-agent-*` branches were removed.
@@ -209,7 +210,7 @@ Labels and comments only, no code. Each issue was checked against `main` at 0.3.
 - **#111/#96** (`ready-for-human`): close with the native host and launcher (#123, ADR 0002). #142 (`ready-for-human`) is another instance and collects the health check's reports.
 - **#162** (`ready-for-human`): no Teams capture for about 29 min on 0.3.72; see "Triage round" in Now.
 - **#149, #170, #172** (`ready-for-agent`): see "Triage round" in Now.
-- **#173** (`ready-for-human`, the audit's tracking issue): its low findings are being split into their own issues. **#169** is closed, but its 256 MB limit is unchanged (see "Triage round"). #168's 64 MiB (done) and #169 matter before `nativeHost` is on by default.
+- **#173** (`ready-for-human`, the audit's tracking issue): its low findings are split into #177–#180 (`ready-for-agent`). **#169** is closed, but its 256 MB limit is unchanged (see "Triage round"). #168's 64 MiB (done) and #169 matter before `nativeHost` is on by default.
 - **Closed:** #76 (#137), #134 (#136), #138 (#144), #143 (#147), #145 (#150), #148 (#158), #152 (#163), #153 (#154), #156 (#159), #160 (transient, `wontfix`), #168 (#174), #171 (#175).
 - **Outlook:** the pipe-name collision for non-ASCII usernames is mcp-newoutlook#178.
 
@@ -217,7 +218,7 @@ Labels and comments only, no code. Each issue was checked against `main` at 0.3.
 
 1. **Get every server onto 0.3.72** (see "This Windows PC"): rebuild, `reload-extension`, then a full restart of each session (`/mcp` → Reconnect did not replace any process on 2026-11-12), Claude Desktop last. Then check `server.log` for the first `handshake-closed` lines with `reason`/`ms`/`hello`/`port` (written only by a hub of 0.3.69 or later).
 2. **The rest of #149** (keep-alive drops leave no `hub.log` line; the system tests on the 200 ms test heartbeat), the #156 follow-ups from the #159 review, and the #152 follow-ups from #163.
-3. **The audit's `ready-for-agent` fixes:** #170 and #172 (and the issues split out of #173). Settle #169's 256 MB limit before #123 PR 5.
+3. **The audit's `ready-for-agent` fixes:** #170, #172 and #177–#180 (split out of #173). Settle #169's 256 MB limit before #123 PR 5.
 4. **Worker restarts emptying the captures** (Now, "#160"): open an issue if it should be worked on.
 5. **#123 PR 5:** turn `nativeHost` on by default, with setup registering by default; `feat!:` → 0.4.0. It waits for the manual checks on Windows and the Mac (including Chrome's permission warning from #146). Read the #123 comments first.
 6. **Versioned launcher (0.5.0, ADR 0002).** Open the issue from the ADR first.
