@@ -3,6 +3,7 @@
 // messages pass in Chrome's framing. Servers join the host over the hub socket. Runs the built
 // file (`npm run build` first).
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { DEFAULT_BRIDGE_OPTIONS } from "../../src/bridge.js";
 import { TOKEN } from "../helpers/bridgeHarness.js";
 import { createFakeChrome, loadWorker, NativeWebSocket, openedSockets, stopWorkers, type FakeChrome } from "../helpers/fakeChrome.js";
 import { chromeNativeHost, nativeHarness } from "../helpers/nativeHost.js";
@@ -19,9 +20,15 @@ afterEach(async () => {
   openedSockets.length = 0;
 });
 
-/** A worker whose pairing.json turns the native host on, connected through dist/hub.js. */
+const REAL_HEARTBEAT = { TEAMS_MCP_HUB_KEEPALIVE_MS: String(DEFAULT_BRIDGE_OPTIONS.keepAliveMs) };
+
+/**
+ * A worker whose pairing.json turns the native host on, connected through dist/hub.js. Its hosts
+ * keep the real heartbeat (20 s): these tests don't check pings, and at the harness's 200 ms a host
+ * busy for two of them on a loaded machine drops a connection the test still uses (#145, #149).
+ */
 async function nativeWorker(harness: NonNullable<typeof h>): Promise<FakeChrome> {
-  hosts = chromeNativeHost(harness.home, harness.socket);
+  hosts = chromeNativeHost(harness.home, harness.socket, REAL_HEARTBEAT);
   const fake = createFakeChrome({ nativeHost: hosts.attach });
   const worker = await loadWorker(fake);
   vi.stubGlobal(
@@ -54,8 +61,9 @@ describe("#123: the extension worker and the native host", { timeout: 30_000 }, 
 
   it("connect through a relaying host: the welcome proves the worker's own nonce", async () => {
     h = await nativeHarness();
-    // Another browser's host serves; the worker's host relays to it.
-    await h.host({ browser: "Edge", instance: "profile-2" });
+    // Another browser's host serves; the worker's host relays to it. The serving host pings the
+    // relayed connection, so it keeps the real heartbeat too (#149).
+    await h.host({ browser: "Edge", instance: "profile-2", env: REAL_HEARTBEAT });
     await nativeWorker(h);
     const server = await h.server();
     await until(() => server.extensions.length === 2, 5_000, "both browsers");
