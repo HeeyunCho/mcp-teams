@@ -69,7 +69,7 @@ Several AI sessions share one connection to the browser: the first one runs it, 
 
 ### What happened while nobody looked: server.log
 
-Every mcp-teams server appends what it went through to `~/.mcp-teams/server.log` (`0600` in a `0700` folder; moved to `server.log.1` once it passes 1 MB), so an outage can be traced after a restart. Each line is one event: the time (UTC), the process id, the event, the server's version and role, then its fields:
+Every mcp-teams server appends what it went through to `~/.mcp-teams/server.log` (`0600` in a `0700` folder; moved to `server.log.1` soon after it passes 1 MB: each server checks the file's real size every 50 lines or once its own count passes the cap, so with several servers writing it can run a little over), so an outage can be traced after a restart. Each line is one event: the time (UTC), the process id, the event, the server's version and role, then its fields:
 
 ```
 2026-11-11T00:04:12.345Z pid=4242 extension-closed v=0.3.62 role=hub code=1006 transport=websocket
