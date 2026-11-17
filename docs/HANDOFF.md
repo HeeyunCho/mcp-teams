@@ -2,24 +2,22 @@
 
 Repo: GitHub `HeeyunCho/mcp-teams`. PRs 1–4 of #123 (the native-messaging host) are on `main`, all **off by default** (`nativeHost` off). Next is PR 5, which turns it on. The last release is 0.3.72 (`71f49e2`, #174 and #175); 0.3.71 (`9bf7434`) has #165 and #166 (dependency bumps only), 0.3.70 (`d5cacdd`) has #163, 0.3.69 (`d35759e`) has #159, 0.3.68 (`60f005f`) has #158, 0.3.67 (`aa90cf4`) has #157, 0.3.66 (`367f198`) has #154.
 
-## Resume here (session of 2026-11-17, before a PC reboot)
+## Resume here (session of 2026-11-17, updated after the PC reboot)
 
-This day was **triage and bookkeeping only. No code changed:** `main` is at `3ee1681`, still release 0.3.72. Every change was to GitHub issues, or to this file through docs PRs #181, #184, #191, #194, #196 and #197, all merged. There are no open PRs, no extra worktrees, and no local branches apart from `main`.
+This day was **triage and bookkeeping only. No code changed:** release 0.3.72 is unchanged. Every change was to GitHub issues, or to this file through docs PRs #181, #184, #191, #194, #196, #197, #198 and the one after the reboot. There are no open PRs, no extra worktrees, and no local branches apart from `main`.
 
 **Where the state lives (read these, don't re-derive):**
 - **Issue #25, the roadmap:** the sections "CPU/memory audit (2026-11-16) and its follow-ups" and "Older follow-ups rechecked against 0.3.72 (2026-11-17)". They list every open issue with what's left and a link to its latest checklist comment.
 - **This file:** "Now (2026-11-17)", "Open issues and decisions" and "Next up", below.
 - **`gh issue list`:** 34 open issues. 19 are `ready-for-agent`, 14 `ready-for-human` and 1 `needs-info` (#124).
 
-### First, after the reboot
-1. **`get_version`:** everything should be on 0.3.72 with `restartNeeded: false`. The reboot also replaces the two 0.3.70 servers (pids 4196 and 69468) that #142 noted.
-2. **Read `~/.mcp-teams/server.log` from the reboot on.** A cold start is a free data point for:
-   - #124: how long until `extension-connected`;
-   - #162: how long until `tabs=1 captured=yes`;
-   - #173/#182: `status=unreadable kind=timeout` lines.
-
-   If one shows something new, add a comment to the issue. Quote only version, role, pid, code, ms and count fields; never region, account or names.
-3. **#122:** the user's manual Chrome check is still open. The steps are in #122's latest comment.
+### After the reboot (checked 2026-11-17, boot at 11:16:51Z)
+1. **`get_version`:** server, extension and hub on 0.3.72, `restartNeeded: false`, versions match. **No 0.3.70 servers are left:** pids 4196 and 69468 are gone, every running server started after the boot, and `server.log` has no 0.3.70 line since then. #142 needs nothing more for this.
+2. **`server.log` from the reboot on:**
+   - **#124:** the first server started at 11:18:27Z. The hub that stayed (pid 28076, started 11:19:06Z) logged `extension-connected` **19 s after it started** (11:19:25Z). There was no long gap, so nothing new for #124.
+   - **#162:** `tabs=1 captured=yes` (all four services) at the hub's **first status read**, 11:20:15Z, which was slow (ms=9093). Nothing new for #162.
+   - **#173/#182:** two `status=unreadable kind=timeout` lines on the hub, **ms=15011** (11:22:21Z) and **ms=15008** (11:28:21Z), plus four slow reads at 2866–9093 ms. So the timeouts also show up on a process only minutes old. [Comment on #173](https://github.com/HeeyunCho/mcp-teams/issues/173#issuecomment-6946978869).
+3. **#122: the manual Chrome check did not pass, so #122 stays open.** Recording was on and the user ran Teams search in the Chrome Teams tab, twice. Neither listing had a `substrate` call (the second had 7 entries on 5 other hosts). `substrate` and `chatsvc` stayed captured but weren't refreshed after about 11:18Z, and `server.log` says `stale=yes` from 11:30Z. The next step is in #122's [latest comment](https://github.com/HeeyunCho/mcp-teams/issues/122#issuecomment-6946978380): record with `filter: "search"`, and look in the tab's own Network panel for the search request's host.
 
 ### Suggested order for the `ready-for-agent` work
 From the 2026-11-17 recheck of #185–#190 and #192. This isn't recorded on #25 yet; add it there. The four lanes can run in parallel; inside each lane, the order matters.
@@ -327,9 +325,7 @@ Labels and comments only, no code. Each issue was checked against `main` at 0.3.
 - **#22** (`ready-for-human`): **gap 2 needs your decision** (fail a replaced connection's calls at once, or give them a grace period); see "#22, #23 and #35 rechecked" in Now. Its concrete items are #192 (`ready-for-agent`).
 - **#23** and **#35** (`ready-for-human`): only decision and live-check items are left; their concrete work is #185 and #186–#190 (`ready-for-agent`).
 - **#21** (`ready-for-human`, the Phase 4 umbrella): left are #123 PR 5, the launcher issue to open, and the send-safety gating question. **#193** (`ready-for-agent`): over TCP, one oversized answer fails every call on the connection; do it with or before #169.
-- **#122** (`ready-for-human`, rechecked 2026-11-17): only the user's manual Chrome check after #129 is left:
-  1. run `api_traffic` with `record: true`, use Teams search for a minute, call `api_traffic` again;
-  2. confirm `substrate` and `chatsvc` are still captured. Close #122 once it passes.
+- **#122** (`ready-for-human`, rechecked 2026-11-17): the user's manual Chrome check after #129 **ran after the reboot and did not pass**: Teams search in the Chrome tab recorded no `substrate` call, and `substrate`/`chatsvc` weren't refreshed (see "After the reboot" in Resume here). Find out where the web client's search goes before closing it ([comment](https://github.com/HeeyunCho/mcp-teams/issues/122#issuecomment-6946978380)).
   - Today both were seen captured from the Teams page (`chatsvc`, and `substrate` at 12:49:54Z), but not as this check; `csa`/`mt` were not (see "csa/mt captures" in Now).
 - **#124** (`needs-info`): the extension stayed disconnected while a hub listened. The 2026-11-10 16:45 episode is in Earlier. On 2026-11-17 it was gone for about 19 min (06:43–07:03Z); see "#124, #142, #162 and #123 rechecked" in Now.
 - **#111/#96** (`ready-for-human`, rechecked 2026-11-17): close with the native host and launcher (#123, ADR 0002). #111 happened again on 0.3.72 today without taking Teams down. #142 (`ready-for-human`) is another instance and collects the health check's reports.
@@ -341,13 +337,13 @@ Labels and comments only, no code. Each issue was checked against `main` at 0.3.
 
 ## Next up
 
-1. **Get every server onto 0.3.72** (see "This Windows PC"): rebuild, `reload-extension`, then a full restart of each session (`/mcp` → Reconnect did not replace any process on 2026-11-12), Claude Desktop last. On 2026-11-17 at about 09:40Z, **two 0.3.70 servers were still running (pids 4196 and 69468)**; restart their sessions. Then check `server.log` for the first `handshake-closed` lines with `reason`/`ms`/`hello`/`port` (written only by a hub of 0.3.69 or later).
+1. **Get every server onto 0.3.72** (see "This Windows PC"): rebuild, `reload-extension`, then a full restart of each session (`/mcp` → Reconnect did not replace any process on 2026-11-12), Claude Desktop last. Done by the reboot on 2026-11-17: every server is on 0.3.72 and the two 0.3.70 servers (pids 4196 and 69468) are gone. Still to do: check `server.log` for the first `handshake-closed` lines with `reason`/`ms`/`hello`/`port` (written only by a hub of 0.3.69 or later).
 2. **The rest of #149** (keep-alive drops leave no `hub.log` line; the system tests on the 200 ms test heartbeat), the #156 follow-ups from the #159 review, and the #152 follow-ups from #163.
 3. **The audit's `ready-for-agent` fixes:** #170, #172, #177–#180 (split out of #173) and #182 (event-loop delay logging). Settle #169's 256 MB limit before #123 PR 5, together with #193 (an oversized answer over TCP failing every call).
 4. **Worker restarts emptying the captures** (Now, "#160"): open an issue if it should be worked on.
 5. **#123 PR 5:** turn `nativeHost` on by default, with setup registering by default; `feat!:` → 0.4.0. It waits for the manual checks on Windows and the Mac (including Chrome's permission warning from #146), and for #169, #193, #180 and #195. Read the #123 comments first.
 6. **Versioned launcher (0.5.0, ADR 0002).** Open the issue from the ADR first.
-7. The manual Chrome check on #122; the `ready-for-agent` leftovers on #77, #185, #186–#190 and #192; the `ready-for-human` decisions on #103, #183, #22's gap 2, #23 and #35 (above).
+7. Where Teams search goes for #122 (the manual check didn't pass); the `ready-for-agent` leftovers on #77, #185, #186–#190 and #192; the `ready-for-human` decisions on #103, #183, #22's gap 2, #23 and #35 (above).
 
 Run `gh issue list` for the full backlog. #21 and #96 are the umbrella issues that PRs reference as "Part of".
 
