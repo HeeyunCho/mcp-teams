@@ -4,7 +4,7 @@ Repo: GitHub `HeeyunCho/mcp-teams`. PRs 1–4 of #123 (the native-messaging host
 
 ## Resume here (session of 2026-11-17, updated after the PC reboot)
 
-This day was **triage and bookkeeping only. No code changed:** release 0.3.72 is unchanged. Every change was to GitHub issues, or to this file through docs PRs #181, #184, #191, #194, #196, #197, #198 and the one after the reboot. There are no open PRs, no extra worktrees, and no local branches apart from `main`.
+This day was **triage and bookkeeping only. No code changed:** release 0.3.72 is unchanged. Every change was to GitHub issues, or to this file through docs PRs #181, #184, #191, #194, #196, #197, #198, #199 and the #122 diagnosis PR. There are no open PRs, no extra worktrees, and no local branches apart from `main`.
 
 **Where the state lives (read these, don't re-derive):**
 - **Issue #25, the roadmap:** the sections "CPU/memory audit (2026-11-16) and its follow-ups" and "Older follow-ups rechecked against 0.3.72 (2026-11-17)". They list every open issue with what's left and a link to its latest checklist comment.
@@ -18,6 +18,14 @@ This day was **triage and bookkeeping only. No code changed:** release 0.3.72 is
    - **#162:** `tabs=1 captured=yes` (all four services) at the hub's **first status read**, 11:20:15Z, which was slow (ms=9093). Nothing new for #162.
    - **#173/#182:** two `status=unreadable kind=timeout` lines on the hub, **ms=15011** (11:22:21Z) and **ms=15008** (11:28:21Z), plus four slow reads at 2866–9093 ms. So the timeouts also show up on a process only minutes old. [Comment on #173](https://github.com/HeeyunCho/mcp-teams/issues/173#issuecomment-6946978869).
 3. **#122: the manual Chrome check did not pass, so #122 stays open.** Recording was on and the user ran Teams search in the Chrome Teams tab, twice. Neither listing had a `substrate` call (the second had 7 entries on 5 other hosts). `substrate` and `chatsvc` stayed captured but weren't refreshed after about 11:18Z, and `server.log` says `stale=yes` from 11:30Z. The next step is in #122's [latest comment](https://github.com/HeeyunCho/mcp-teams/issues/122#issuecomment-6946978380): record with `filter: "search"`, and look in the tab's own Network panel for the search request's host.
+   - **Third try** (`record: true, clear: true`, a new query typed into the search box): **no request recorded at all** during the search minute, not even with `filter: "search"`. `substrate` was still not refreshed. `chatsvc` moved, but because the hourly health check posted its report to the notes chat (`48:notes`) at 11:41:49Z, not because of search. [Comment](https://github.com/HeeyunCho/mcp-teams/issues/122#issuecomment-6947082168).
+   - **Diagnosis** (read-only, [comment](https://github.com/HeeyunCho/mcp-teams/issues/122#issuecomment-6947197521)):
+     - `api_traffic` uses `chrome.webRequest` only, with the types `xmlhttprequest` (which covers `fetch`), `other` and `media` (`extension/background.js:239`), on a host list that includes `substrate.office.com` (`extension/teams.js:840-848`).
+     - Both the recorder and the session capture drop any request whose initiator isn't the Teams origin (`background.js:242` and `:40`).
+     - `lastTeamsCall` is set by the same handler after that gate (`:245`), and it **didn't move during the search minute**. So the extension saw no Teams-origin request of those types at all; the search wasn't merely filtered out by host.
+     - Ranked causes: (1) search goes out as a `websocket` or `ping`, or from a frame or worker with another initiator; (2) Teams answers from a local index or cache; (3) the typing happened in a browser or profile that isn't connected (unlikely: `get_version` showed one browser).
+     - The user's DevTools Network check (host, Type and Initiator of the search request) decides between them.
+   - **#200** (`ready-for-agent`): `api_traffic` can't see `websocket` or `ping` requests, and the webRequest fake (`test/helpers/fakeChrome.ts:277`) ignores `types` and gives requests the Teams initiator by default.
 
 ### Suggested order for the `ready-for-agent` work
 From the 2026-11-17 recheck of #185–#190 and #192. This isn't recorded on #25 yet; add it there. The four lanes can run in parallel; inside each lane, the order matters.
@@ -325,7 +333,7 @@ Labels and comments only, no code. Each issue was checked against `main` at 0.3.
 - **#22** (`ready-for-human`): **gap 2 needs your decision** (fail a replaced connection's calls at once, or give them a grace period); see "#22, #23 and #35 rechecked" in Now. Its concrete items are #192 (`ready-for-agent`).
 - **#23** and **#35** (`ready-for-human`): only decision and live-check items are left; their concrete work is #185 and #186–#190 (`ready-for-agent`).
 - **#21** (`ready-for-human`, the Phase 4 umbrella): left are #123 PR 5, the launcher issue to open, and the send-safety gating question. **#193** (`ready-for-agent`): over TCP, one oversized answer fails every call on the connection; do it with or before #169.
-- **#122** (`ready-for-human`, rechecked 2026-11-17): the user's manual Chrome check after #129 **ran after the reboot and did not pass**: Teams search in the Chrome tab recorded no `substrate` call, and `substrate`/`chatsvc` weren't refreshed (see "After the reboot" in Resume here). Find out where the web client's search goes before closing it ([comment](https://github.com/HeeyunCho/mcp-teams/issues/122#issuecomment-6946978380)).
+- **#122** (`ready-for-human`, rechecked 2026-11-17): the user's manual Chrome check after #129 **ran after the reboot and did not pass**: Teams search in the Chrome tab recorded no `substrate` call, and `substrate`/`chatsvc` weren't refreshed (see "After the reboot" in Resume here). A third try recorded no request at all, and the [diagnosis](https://github.com/HeeyunCho/mcp-teams/issues/122#issuecomment-6947197521) ranks three causes. The user's DevTools Network check (host, Type and Initiator of the search request) decides between them. The recorder's blind spot is #200 (`ready-for-agent`).
   - Today both were seen captured from the Teams page (`chatsvc`, and `substrate` at 12:49:54Z), but not as this check; `csa`/`mt` were not (see "csa/mt captures" in Now).
 - **#124** (`needs-info`): the extension stayed disconnected while a hub listened. The 2026-11-10 16:45 episode is in Earlier. On 2026-11-17 it was gone for about 19 min (06:43–07:03Z); see "#124, #142, #162 and #123 rechecked" in Now.
 - **#111/#96** (`ready-for-human`, rechecked 2026-11-17): close with the native host and launcher (#123, ADR 0002). #111 happened again on 0.3.72 today without taking Teams down. #142 (`ready-for-human`) is another instance and collects the health check's reports.
@@ -343,7 +351,7 @@ Labels and comments only, no code. Each issue was checked against `main` at 0.3.
 4. **Worker restarts emptying the captures** (Now, "#160"): open an issue if it should be worked on.
 5. **#123 PR 5:** turn `nativeHost` on by default, with setup registering by default; `feat!:` → 0.4.0. It waits for the manual checks on Windows and the Mac (including Chrome's permission warning from #146), and for #169, #193, #180 and #195. Read the #123 comments first.
 6. **Versioned launcher (0.5.0, ADR 0002).** Open the issue from the ADR first.
-7. Where Teams search goes for #122 (the manual check didn't pass); the `ready-for-agent` leftovers on #77, #185, #186–#190 and #192; the `ready-for-human` decisions on #103, #183, #22's gap 2, #23 and #35 (above).
+7. Where Teams search goes for #122 (the DevTools Network check); #200 (`api_traffic` misses `websocket`/`ping`); the `ready-for-agent` leftovers on #77, #185, #186–#190 and #192; the `ready-for-human` decisions on #103, #183, #22's gap 2, #23 and #35 (above).
 
 Run `gh issue list` for the full backlog. #21 and #96 are the umbrella issues that PRs reference as "Part of".
 
