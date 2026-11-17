@@ -1,10 +1,10 @@
 # Handoff: mcp-teams after #175, the 2026-11-17 triage, the closure audit and the rechecks of #22, #23, #35, #21, #111, #96, #122, #124, #142, #162 and #123, and a second pass on #77, #103 and #183 (updated 2026-11-17 on the Windows PC)
 
-Repo: GitHub `HeeyunCho/mcp-teams`. PRs 1–4 of #123 (the native-messaging host) are on `main`, all **off by default** (`nativeHost` off). Next is PR 5, which turns it on. The last release is 0.3.72 (`71f49e2`, #174 and #175); 0.3.71 (`9bf7434`) has #165 and #166 (dependency bumps only), 0.3.70 (`d5cacdd`) has #163, 0.3.69 (`d35759e`) has #159, 0.3.68 (`60f005f`) has #158, 0.3.67 (`aa90cf4`) has #157, 0.3.66 (`367f198`) has #154.
+Repo: GitHub `HeeyunCho/mcp-teams`. PRs 1–4 of #123 (the native-messaging host) are on `main`, all **off by default** (`nativeHost` off). Next is PR 5, which turns it on. The last release is 0.3.73 (`5e5b9d9`, #202 for #200); 0.3.72 (`71f49e2`) has #174 and #175; 0.3.71 (`9bf7434`) has #165 and #166 (dependency bumps only), 0.3.70 (`d5cacdd`) has #163, 0.3.69 (`d35759e`) has #159, 0.3.68 (`60f005f`) has #158, 0.3.67 (`aa90cf4`) has #157, 0.3.66 (`367f198`) has #154.
 
 ## Resume here (session of 2026-11-17, updated after the PC reboot)
 
-This day was **triage and bookkeeping only. No code changed:** release 0.3.72 is unchanged. Every change was to GitHub issues, or to this file through docs PRs #181, #184, #191, #194, #196, #197, #198, #199 and the #122 diagnosis PR. There are no open PRs, no extra worktrees, and no local branches apart from `main`.
+This day was mostly triage and bookkeeping: GitHub issues, and this file through docs PRs #181, #184, #191, #194, #196, #197, #198, #199, #201 and the #200 handoff PR. **One code change:** #202 for #200, released as **0.3.73** (`5e5b9d9`); see "#202" in Now. There are no other open PRs, no extra worktrees, and no local branches apart from `main`.
 
 **Where the state lives (read these, don't re-derive):**
 - **Issue #25, the roadmap:** the sections "CPU/memory audit (2026-11-16) and its follow-ups" and "Older follow-ups rechecked against 0.3.72 (2026-11-17)". They list every open issue with what's left and a link to its latest checklist comment.
@@ -25,7 +25,8 @@ This day was **triage and bookkeeping only. No code changed:** release 0.3.72 is
      - `lastTeamsCall` is set by the same handler after that gate (`:245`), and it **didn't move during the search minute**. So the extension saw no Teams-origin request of those types at all; the search wasn't merely filtered out by host.
      - Ranked causes: (1) search goes out as a `websocket` or `ping`, or from a frame or worker with another initiator; (2) Teams answers from a local index or cache; (3) the typing happened in a browser or profile that isn't connected (unlikely: `get_version` showed one browser).
      - The user's DevTools Network check (host, Type and Initiator of the search request) decides between them.
-   - **#200** (`ready-for-agent`): `api_traffic` can't see `websocket` or `ping` requests, and the webRequest fake (`test/helpers/fakeChrome.ts:277`) ignores `types` and gives requests the Teams initiator by default.
+   - **#200**: `api_traffic` couldn't see `websocket` or `ping` requests, and the webRequest fake ignored `types`. **Fixed by #202 (0.3.73)**; see "#202" in Now.
+   - **DevTools result:** the search request is a `fetch` to `substrate.office.com` with initiator `https://teams.cloud.microsoft`, which the recorder should see. That rules out causes 1 and 2; cause 3 (a tab the connected extension doesn't see) is left. The user confirmed mcp-teams is enabled in that profile. One recording with DevTools open settles it ([comment](https://github.com/HeeyunCho/mcp-teams/issues/122#issuecomment-6948667503)).
 
 ### Suggested order for the `ready-for-agent` work
 From the 2026-11-17 recheck of #185–#190 and #192. This isn't recorded on #25 yet; add it there. The four lanes can run in parallel; inside each lane, the order matters.
@@ -82,6 +83,22 @@ From the 2026-11-17 recheck of #185–#190 and #192. This isn't recorded on #25 
 ---
 
 ## Now (2026-11-17)
+
+### #202, `api_traffic` sees WebSocket handshakes and beacons (for #200)
+Merged as `a0e2bff`, released as 0.3.73 (`5e5b9d9`, tag `v0.3.73`). Rebuilt here at about 13:08Z (build `3daff63d2b0a`), then `node dist/index.js reload-extension`. The extension came back as 0.3.73 at 13:10:05Z with no prompt. Running servers stay on 0.3.72 until each session reconnects (`restartNeeded: true`).
+- `test/helpers/fakeChrome.ts`: a webRequest listener hears a request only if its filter's `types` include the request's type, as Chrome does.
+- `extension/background.js`:
+  - `trafficFilter` also takes `websocket` and `ping` (one `TRAFFIC_ONLY_TYPES` constant);
+  - it also takes the `wss://` URLs Chrome reports handshakes under (`TRAFFIC_WS_URLS` in `extension/teams.js`, the same hosts as `TRAFFIC_URLS`);
+  - the Teams-origin gate and the session-capture filter are unchanged.
+- **Not last calls:** a `websocket` or `ping` request doesn't move `lastTeamsCall`/`lastSignedInCall`. A trouter socket opens once and stays open, and a beacon is often sent as the page goes away.
+- `extension/manifest.json`: `wss://` host permissions for the same seven hosts. The extension is loaded unpacked, so a reload picks them up without a prompt.
+- **A socket opened before recording started is never seen:** only the handshake is visible, and trouter opens at page load. Start recording, then reload the Teams tab.
+- Written test-first by a subagent and reviewed twice by separate subagents. The first review found that `https://` patterns never match `wss://`; that's fixed. The second review found no blockers. Tests: 65 passed in the touched files on Node 26 and Node 20; 515 passed in `test/integration` on Node 20; 927 passed in the full `npm test`. CI passed.
+- **Live check still to do:** record, reload the Teams tab, then expect:
+  1. a `go.trouter.teams.microsoft.com` entry of type `websocket` with status 101;
+  2. at least one `ping` entry;
+  3. `lastTeamsCall` not moving on the handshake alone.
 
 | PR | Change | State |
 |---|---|---|
@@ -351,7 +368,7 @@ Labels and comments only, no code. Each issue was checked against `main` at 0.3.
 4. **Worker restarts emptying the captures** (Now, "#160"): open an issue if it should be worked on.
 5. **#123 PR 5:** turn `nativeHost` on by default, with setup registering by default; `feat!:` → 0.4.0. It waits for the manual checks on Windows and the Mac (including Chrome's permission warning from #146), and for #169, #193, #180 and #195. Read the #123 comments first.
 6. **Versioned launcher (0.5.0, ADR 0002).** Open the issue from the ADR first.
-7. Where Teams search goes for #122 (the DevTools Network check); #200 (`api_traffic` misses `websocket`/`ping`); the `ready-for-agent` leftovers on #77, #185, #186–#190 and #192; the `ready-for-human` decisions on #103, #183, #22's gap 2, #23 and #35 (above).
+7. #122: one recording with DevTools open (see Resume here); the #202 live check (see "#202" in Now); the `ready-for-agent` leftovers on #77, #185, #186–#190 and #192; the `ready-for-human` decisions on #103, #183, #22's gap 2, #23 and #35 (above).
 
 Run `gh issue list` for the full backlog. #21 and #96 are the umbrella issues that PRs reference as "Part of".
 
