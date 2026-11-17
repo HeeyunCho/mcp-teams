@@ -6,13 +6,14 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { LOST_CALL, NOT_READ, NOT_SENT } from "../../src/bridge.js";
 import { diagnosticLog, watchState } from "../../src/serverLog.js";
+import type { LoopDelay, LoopDelayMonitor } from "../../src/loopDelay.js";
 import { until } from "../helpers/timing.js";
 
 const dirs: string[] = [];
 afterEach(() => {
   for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });
 });
-const setup = (opts: { slowToolMs?: number } = {}) => {
+const setup = (opts: { slowToolMs?: number; loopDelay?: LoopDelayMonitor } = {}) => {
   const dir = mkdtempSync(join(tmpdir(), "mt-slog-"));
   dirs.push(dir);
   const file = join(dir, "server.log");
@@ -466,5 +467,38 @@ describe("#143 review: the background watch (hub only)", () => {
     await until(() => existsSync(file) && lines().length > 0, 3_000, "the restart-needed line");
     await new Promise((r) => setTimeout(r, 80));
     expect(lines().map((l) => l.replace(/^\S+ pid=\d+ /, ""))).toEqual(["restart-needed v=0.3.62 role=none onDisk=0.3.63"]);
+  });
+});
+
+/** A loop-delay monitor whose figures the test sets; counts its resets. */
+const fakeLoopDelay = (now: LoopDelay = { p99Ms: 0, maxMs: 0, elu: 0 }) => {
+  const m = { now, resets: 0, read: () => m.now, reset: () => void m.resets++ };
+  return m;
+};
+
+describe("#182: event-loop delay on the teams lines that say a read failed or was slow", () => {
+  const events = (lines: () => string[]) => lines().map((l) => l.replace(/^\S+ pid=\d+ /, ""));
+  const status = { teamsTabs: 1, sessions: [{ sessionCaptured: true }], services: { chatsvc: "2026-11-11T00:00:00Z" } };
+
+  it("adds eld, eldMax and elu to status=unreadable and slow=yes lines, and to no other teams line", () => {
+    const loopDelay = fakeLoopDelay({ p99Ms: 21, maxMs: 14_870, elu: 97 });
+    const { log, lines } = setup({ loopDelay });
+    log.teamsStatus(null, { ms: 15_002, error: new Error("Extension call 'status' timed out") });
+    log.teamsStatus(status, { ms: 6_731 });
+    log.teamsStatus({ ...status, teamsTabs: 2 }, { ms: 40 });
+    log.teamsStatus(null, { ms: 3, aborted: true });
+    expect(events(lines)).toEqual([
+      "teams v=0.3.62 role=none status=unreadable kind=timeout ms=15002 failures=1 eld=21 eldMax=14870 elu=97",
+      "teams v=0.3.62 role=none tabs=1 captured=yes services=chatsvc account=none ms=6731 slow=yes after=1 eld=21 eldMax=14870 elu=97",
+      "teams v=0.3.62 role=none tabs=2 captured=yes services=chatsvc account=none ms=40",
+      "teams v=0.3.62 role=none status=aborted ms=3",
+    ]);
+    expect(loopDelay.resets).toBe(0); // a status read only reads the window; the watch's tick starts it
+  });
+
+  it("writes a figure that isn't a whole number of a few digits as -", () => {
+    const { log, lines } = setup({ loopDelay: fakeLoopDelay({ p99Ms: Number.NaN, maxMs: 1e12, elu: -4 }) });
+    log.teamsStatus(null, { ms: 15_002, error: new Error("Extension call 'status' timed out") });
+    expect(events(lines)).toEqual(["teams v=0.3.62 role=none status=unreadable kind=timeout ms=15002 failures=1 eld=- eldMax=- elu=-"]);
   });
 });
