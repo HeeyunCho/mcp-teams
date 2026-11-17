@@ -12,14 +12,16 @@ import { reloadUntilUpdated } from "./extensionUpdate.js";
 import { hubSocketPath, msFromEnv } from "./native.js";
 import { diagnosticLog, watchState } from "./serverLog.js";
 import { restartCheck } from "./buildInfo.js";
+import { loopDelayMonitor } from "./loopDelay.js";
 
 const command = process.argv[2];
 const printsOnly = ["token", "version", "--version"].includes(command);
 
 // Every server (not the commands that only print) keeps ~/.mcp-teams/server.log (#143): metadata
-// to trace an outage after a restart. The role is the bridge's once it exists.
+// to trace an outage after a restart. The role is the bridge's once it exists. With it, the event
+// loop's delay (#182), so a slow or failed status read shows whether this process was blocked.
 let roleNow = (): string => "none";
-const diagnostics = printsOnly ? undefined : diagnosticLog({ version: SERVER_VERSION, role: () => roleNow() });
+const diagnostics = printsOnly ? undefined : diagnosticLog({ version: SERVER_VERSION, role: () => roleNow(), loopDelay: loopDelayMonitor() });
 let exitReason = "unknown";
 diagnostics?.start({ command: ["setup", "reload-extension"].includes(command) ? command : command ? "other" : "serve" });
 process.on("exit", (code) => diagnostics?.exit(exitReason, code));
@@ -122,7 +124,8 @@ registerTools(server, bridge, config, { diagnostics });
 await server.connect(new StdioServerTransport());
 
 // server.log stays current without tool calls (#143): every minute the hub reads the Teams state,
-// and any server checks the build on disk. TEAMS_MCP_WATCH_MS shortens the period (tests).
+// and any server checks the build on disk and logs a stalled event loop (#182; each tick starts the
+// next delay window). TEAMS_MCP_WATCH_MS shortens the period (tests).
 if (diagnostics) {
   watchState({ bridge, diagnostics, onDisk: restartCheck(RUNNING_BUILD, BUILD_DIR), everyMs: msFromEnv(process.env.TEAMS_MCP_WATCH_MS) });
 }
