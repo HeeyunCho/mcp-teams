@@ -28,12 +28,17 @@ process.on("exit", (code) => diagnostics?.exit(exitReason, code));
 
 // A stray error in a socket callback must not end the server (the AI app would show it
 // as "failed"); log it on stderr, which isn't the MCP channel, and by name in server.log.
+// #215: once stderr itself has failed, writing to it in a crash handler throws again and loops.
+let stderrGone = false;
+const safeError = (...args: unknown[]) => {
+  if (!stderrGone) console.error(...args);
+};
 process.on("unhandledRejection", (err) => {
-  console.error("[mcp-teams] unhandled rejection:", err);
+  safeError("[mcp-teams] unhandled rejection:", err);
   diagnostics?.crash("unhandled-rejection", err);
 });
 process.on("uncaughtException", (err) => {
-  console.error("[mcp-teams] uncaught exception:", err);
+  safeError("[mcp-teams] uncaught exception:", err);
   diagnostics?.crash("uncaught-exception", err);
 });
 
@@ -141,14 +146,31 @@ const shutdown = (signal: string) => async () => {
 };
 process.on("SIGINT", shutdown("SIGINT"));
 process.on("SIGTERM", shutdown("SIGTERM"));
-process.stdin.on("close", async () => {
-  exitReason = "stdin-closed";
+const clientGone = (reason: string) => {
+  if (exitReason !== "unknown") return; // one client-gone path wins
+  exitReason = reason;
   const fromEnv = process.env.TEAMS_MCP_DRAIN_MS ? Number(process.env.TEAMS_MCP_DRAIN_MS) : NaN;
   const drainMs = Number.isFinite(fromEnv) && fromEnv >= 0 ? fromEnv : DRAIN_MAX_WAIT_MS; // 0: no drain
   setTimeout(() => ((exitReason = "drain-timeout"), process.exit(0)), drainMs + 2_000).unref();
-  await server.close().catch(() => {});
-  await bridge.drainAndClose(drainMs);
-  process.exit(0);
+  void server.close().catch(() => {});
+  void bridge.drainAndClose(drainMs).then(() => process.exit(0));
+};
+process.stdin.on("close", () => clientGone("stdin-closed"));
+
+// #215: a write to a pipe whose reader has gone raises EPIPE as a stream error. Without a listener
+// that becomes an uncaught exception, and the handler's own console.error writes to the same dead
+// stderr - looping until the drain timeout. Treat a dead MCP channel the way a closed stdin is
+// treated, and remember that stderr is gone so no crash handler writes to it again.
+const isGonePipe = (err: NodeJS.ErrnoException) =>
+  err.code === "EPIPE" || err.code === "ERR_STREAM_DESTROYED";
+process.stdout.on("error", (err: NodeJS.ErrnoException) => {
+  if (isGonePipe(err)) clientGone("stdout-closed");
+});
+process.stderr.on("error", (err: NodeJS.ErrnoException) => {
+  if (isGonePipe(err)) {
+    stderrGone = true;
+    clientGone("stderr-closed");
+  }
 });
 
 // After an update of the folder, reloads the extension (one of 0.2.0 or older reloads
