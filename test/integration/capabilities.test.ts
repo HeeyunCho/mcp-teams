@@ -181,8 +181,8 @@ describe("#115: get_version shows both sides' capabilities and the transport", (
     });
     expect(v.browsers).toEqual(
       expect.arrayContaining([
-        { browser: "Chrome", version: "0.0.0", capabilities: CHROME },
-        { browser: "Edge", version: "0.0.0", capabilities: NONE },
+        { browser: "Chrome", version: "0.1.0", capabilities: CHROME },
+        { browser: "Edge", version: "0.1.0", capabilities: NONE },
       ]),
     );
     expect(v.transport).toBe("websocket");
@@ -195,5 +195,48 @@ describe("#115: get_version shows both sides' capabilities and the transport", (
     expect(v.capabilities).toEqual({ server: SERVER });
     // #123: no extension, so no transport it connected by.
     expect(v.transport).toBeNull();
+  });
+});
+
+// #219: the extension has its own version line (1.0.0 on), so get_version no longer compares it with
+// the server's (versionsMatch). It says whether this server works with it, and which of the
+// features the server checks it lacks (one that declares none: those its version had).
+describe("#219: get_version says whether the extension is supported", () => {
+  it("an extension of 1.0.0 that declares every checked feature, on a server of another version: supported, nothing missing", async () => {
+    h = await bridgeHarness();
+    const hub = await h.session("0.9.0");
+    await h.extension({ version: "1.0.0", capabilities: { features: ["cancelSend", "sizeCheck"], maxMessageBytes: 1024 } });
+    await until(() => hub.connected, 3_000, "the hub sees the extension");
+    const v = await getVersion(hub);
+    expect(v).toMatchObject({ extension: "1.0.0", extensionSupported: true, missingFeatures: [] });
+    expect(v).not.toHaveProperty("versionsMatch");
+  });
+
+  it("an extension that declares no features is taken to have those its version had", async () => {
+    h = await bridgeHarness();
+    const hub = await h.session();
+    await h.extension({ version: "0.2.13" });
+    await until(() => hub.connected, 3_000, "the hub sees the extension");
+    expect(await getVersion(hub)).toMatchObject({ extension: "0.2.13", extensionSupported: true, missingFeatures: ["sizeCheck"] });
+  });
+
+  it("an extension below MIN_EXTENSION is reported unsupported with what to do, and gets no calls", async () => {
+    h = await bridgeHarness();
+    const hub = await h.session();
+    const ext = await h.extension({ version: "0.0.9" });
+    await until(() => hub.connected, 3_000, "the hub sees the extension");
+    const v = await getVersion(hub);
+    expect(v).toMatchObject({ extension: "0.0.9", extensionSupported: false });
+    expect(v.hint).toMatch(/older than 0\.1\.0/);
+    expect(v.hint).toMatch(/reload_extension/);
+    expect(v.hint).toMatch(/store/i);
+    await expect(hub.call("listChats", {})).rejects.toThrow(/older than 0\.1\.0/);
+    expect(ext.requests().filter((r) => r.method === "listChats")).toHaveLength(0);
+  });
+
+  it("with no extension, extensionSupported is null", async () => {
+    h = await bridgeHarness();
+    const hub = await h.session();
+    expect(await getVersion(hub)).toMatchObject({ extension: null, extensionSupported: null });
   });
 });
