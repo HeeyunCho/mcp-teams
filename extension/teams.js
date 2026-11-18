@@ -1139,7 +1139,9 @@ export function transcriptLines(json, { fromSeconds = 0 } = {}) {
 /** A string's length in UTF-8 bytes (a lone surrogate counts 2, not the 3 of its U+FFFD). */
 function utf8Bytes(s) {
   let n = s.length;
-  for (let i = 0; i < s.length; i++) {
+  const first = s.search(/[^\x00-\x7f]/); // ASCII is 1 byte per unit; the native scan is fast
+  if (first < 0) return n;
+  for (let i = first; i < s.length; i++) {
     const c = s.charCodeAt(i);
     if (c >= 0x80) n += c >= 0x800 && (c < 0xd800 || c > 0xdfff) ? 2 : 1;
   }
