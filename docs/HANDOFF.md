@@ -1,6 +1,6 @@
 # Handoff: mcp-teams after #175, the 2026-11-17 triage, the closure audit and the rechecks of #22, #23, #35, #21, #111, #96, #122, #124, #142, #162 and #123, and a second pass on #77, #103 and #183 (updated 2026-11-17 on the Windows PC)
 
-Repo: GitHub `HeeyunCho/mcp-teams`. PRs 1–4 of #123 (the native-messaging host) are on `main`, all **off by default** (`nativeHost` off). Next is PR 5, which turns it on. The last release is 0.3.73 (`5e5b9d9`, #202 for #200); 0.3.72 (`71f49e2`) has #174 and #175; 0.3.71 (`9bf7434`) has #165 and #166 (dependency bumps only), 0.3.70 (`d5cacdd`) has #163, 0.3.69 (`d35759e`) has #159, 0.3.68 (`60f005f`) has #158, 0.3.67 (`aa90cf4`) has #157, 0.3.66 (`367f198`) has #154.
+Repo: GitHub `HeeyunCho/mcp-teams`. PRs 1–4 of #123 (the native-messaging host) are on `main`, all **off by default** (`nativeHost` off). Next is PR 5, which turns it on. The last release is **0.3.80** (`02cefeb`, extension **1.0.0**, #219); 0.3.74 to 0.3.79 are listed in "Releases 0.3.74 to 0.3.80" under Now (2026-11-18). 0.3.73 (`5e5b9d9`) has #202 for #200; 0.3.72 (`71f49e2`) has #174 and #175; 0.3.71 (`9bf7434`) has #165 and #166 (dependency bumps only), 0.3.70 (`d5cacdd`) has #163, 0.3.69 (`d35759e`) has #159, 0.3.68 (`60f005f`) has #158, 0.3.67 (`aa90cf4`) has #157, 0.3.66 (`367f198`) has #154.
 
 ## Resume here (session of 2026-11-17, updated after the PC reboot)
 
@@ -85,6 +85,40 @@ From the 2026-11-17 recheck of #185–#190 and #192. This isn't recorded on #25 
 - `diagnosing-bugs` if the post-reboot log shows something new for #124, #162 or #173.
 - `superpowers:finishing-a-development-branch` when a fix branch is ready to merge.
 - `handoff` again at the end of the next session.
+
+## Now (2026-11-18)
+
+### Releases 0.3.74 to 0.3.80
+
+Each code PR below was merged into `main` and released by `version.yml`. The two docs PRs (#213, #220) published no release, because the workflow ignores `**.md`.
+
+| Release | Commit | PR | For | What changed |
+|---|---|---|---|---|
+| 0.3.74 | `3517dd9` | #206 (`cb6cb74`) | #182 | `server.log` logs event-loop delay. Slow and unreadable `teams` lines carry `eld`, `eldMax` and `elu`, and a `loop-delay` line marks a watch period whose max delay was 1 s or more (`src/loopDelay.ts`, `src/serverLog.ts`). An `eldMax` near the read's `ms` means the server itself was blocked; a low `eldMax` and `elu` mean it was waiting on the extension or Teams |
+| 0.3.75 | `e7177b6` | #207 (`1fe29a8`) | #170 | `hubLog()` makes one blocking file call per line instead of three: it keeps an estimated size and reads the real size every 50 lines or once the estimate passes the cap. `server.log` can now run a little past 1 MB before it rotates; README updated by #213 (`1e53709`, docs only) |
+| 0.3.76 | `b0d63ba` | #208 (`27dc863`) | #180 | With `nativeHost` on, `get_version` reads the HKCU keys with an async `execFile` (10 s timeout) instead of `execFileSync(reg.exe)`, so it no longer blocks the hub's event loop. `setup` stays synchronous |
+| 0.3.77 | `61251d7` | #209 (`ecf004a`) | #149 | Keep-alive drops leave a line: `extension-dropped reason=no-pong` in `hub.log`, `peer-dropped reason=no-pong` or `reason=backlog` in `server.log`, `hub-closed code=1006 reason=hub-silent`, and `relay-closed code=…`. System tests that don't test pings moved off the 200 ms test heartbeat |
+| 0.3.78 | `4c650e5` | #211 (`12ac4ab`) | #193 | Over TCP, an answer bigger than the receiver's declared `maxMessageBytes` fails only that call, with a short too-large error. The connection and its other calls carry on. Shared size helpers are in the new `extension/sizes.js` |
+| 0.3.79 | `4aa7f53` | #214 (`1fc1cc2`) | #172 | The hub never sends a call to an extension that closed while `pickExtension` waited. The call fails at once as not sent, and takes no turn, instead of timing out as "may have run" |
+| — | — | #220 (`be37b01`) | #212 | Docs only: a README note that `ERR_CONNECTION_RESET` and 426 during a hub hand-over are harmless. The kernel resets connections still queued on the closing listener; the extension recovers and no call is lost |
+| 0.3.80 | `02cefeb` | #225 (`2b3457a`) | #219 | The extension has its own version line, starting at **1.0.0** (ADR `docs/adr/0003-extension-version-line.md`). See below |
+
+All eight issues (#182, #170, #180, #149, #193, #172, #212, #219) are closed.
+
+### The extension 1.0.0 line (#219, 0.3.80)
+
+- **Two version lines.** The package (`package.json`, tags `vX.Y.Z`) moves on every release. The extension (`extension/manifest.json`, tags `ext-vX.Y.Z`) moves only when files under `extension/` changed since its last tag. The release commit names both, e.g. `chore(release): v0.3.80 (extension 1.0.0)`.
+- **Why 1.0.0:** it must stay above 0.3.79, the last extension version bumped with the package, because the folder sync and `reloadIfUpdatedOnDisk` never downgrade.
+- **Features, not versions.** The server checks the features the extension declares in hello (`capabilities.features`): `cancelSend` (from 0.2.13) and `sizeCheck` (from 0.3.78). They're listed in `EXTENSION_FEATURES` (`src/bridge.ts`) and `extension/features.js`, and a unit test keeps the two in step. An extension that declares none (every one up to 0.3.79) gets the features its version had.
+- **The send gate checks `cancelSend`.** `MIN_EXTENSION` (0.1.0) is the one version floor.
+- **`get_version`:** a 0.3.80 server reports `extensionSupported` and `missingFeatures` instead of `versionsMatch`. An older server still shows `versionsMatch: false` against extension 1.0.0; that is expected, not a fault.
+- **New rule:** every new extension request method or changed shape gets a feature string in both lists in the same change. Ship the extension change first.
+
+### This PC after the 0.3.80 rebuild (2026-11-18, about 07:02Z)
+
+- `npm ci`, `npm run build` (build `cc045f062611`) and `node dist/index.js reload-extension`. The first reload hit a hub restart; the retry reported `Extension reloaded: 1.0.0 → 1.0.0`.
+- **Hub:** pid 92768 (0.3.80) took over at 07:02:13Z, and accepted extension 1.0.0 at 07:02:14Z (`extension-connected ext=1.0.0`). Teams was captured again by 07:03:11Z.
+- **Still on old code:** six 0.3.72 servers (28076, 5068, 6796, 15800, 46912, 42664) and six 0.3.73 servers (44316, 50852, 69956, 65472, 72272, 37216) were running as peers. Each needs its session fully restarted; `/mcp` Reconnect keeps the process.
 
 ---
 
