@@ -319,7 +319,7 @@ describe("3.4: the transcript cache is bounded by bytes", () => {
   });
 
   it("3.4: a transcript bigger than the cap is not cached: each read fetches it, and it pushes nothing out", async () => {
-    const fake = createFakeChrome({ services: { csa: csaWith(2), chatsvc: chatsvcWith(1), sharepoint: bigSharepoint((n) => (n === 1 ? 20 * MB : 10_000)) } });
+    const fake = createFakeChrome({ services: { csa: csaWith(2), chatsvc: chatsvcWith(1), sharepoint: bigSharepoint((n) => (n === 1 ? 10 * MB : 10_000)) } });
     const worker = await loadWorker(fake);
     await worker.handlers.readTranscript({ meeting: meetingId(2), maxLength: 1000 });
     const first = await worker.handlers.readTranscript({ meeting: meetingId(1), maxLength: 1000 });
