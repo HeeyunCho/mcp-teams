@@ -699,6 +699,7 @@ export class ExtensionBridge {
   private peerBeat?: NodeJS.Timeout; // hub: pings the peers
   private retry?: NodeJS.Timeout;
   private retryBackoffMs?: number; // the next role=none wait before jitter; unset: retryMs
+  private hubRestarting = false; // the TCP hub refused our peer-hello with 1012: it just handed over (#230)
   private closed = false;
   private steppingDown = false;
   /** Hub: its session ended and it drains before closing (#112); it starts no new call. */
@@ -827,6 +828,11 @@ export class ExtensionBridge {
     if (await this.join(this.tcpTransport)) return (this.setRole("peer"), this.watchHost());
     this.role = "none";
     clearTimeout(this.retry);
+    if (this.hubRestarting) {
+      this.hubRestarting = false;
+      this.retry = setTimeout(() => void this.start(), 100 + Math.random() * 400);
+      return void this.retry.unref();
+    }
     const backoff = this.retryBackoffMs ?? this.opts.retryMs;
     this.retryBackoffMs = Math.min(backoff * 2, this.opts.retryMaxMs);
     // ±50% jitter, so a dozen servers don't retry in step; no wait exceeds retryMaxMs (#171).
@@ -974,7 +980,9 @@ export class ExtensionBridge {
    * sends (its event says 1006), and which a client could set to anything.
    */
   private refuse(ws: BridgeSocket, code: number, reason: string) {
-    this.refusedWith.set(ws, { code, reason });
+    // The first reason stands: e.g. a hand-over's "restarting" isn't overwritten by the auth
+    // timeout firing while the close handshake still runs (#230).
+    if (!this.refusedWith.has(ws)) this.refusedWith.set(ws, { code, reason });
     ws.close(code, reason);
   }
 
@@ -1002,7 +1010,7 @@ export class ExtensionBridge {
         // A hello that arrives after this hub stopped serving (it handed over between the challenge
         // and the hello, and the hello crossed its close) is turned away, so the client races for
         // the port again instead of staying on an ex-hub that pings it and serves nothing (#230).
-        if (this.role !== "hub") return void this.refuse(ws, 1012, "restarting");
+        if (this.role !== "hub" || ws.readyState !== OPEN) return void this.refuse(ws, 1012, "restarting");
         // The native host takes extensions only on native messaging (or relayed on its socket): on
         // its TCP port it serves peers only (ADR decision 4, #123 decision 9).
         if (via === "tcp" && this.isHost && msg.type === "hello") {
@@ -1078,6 +1086,8 @@ export class ExtensionBridge {
    * turned away, and connecting ours replaces them.
    */
   private acceptExtension(ws: BridgeSocket, msg: any, welcome: object, via: Via, tcpOrigin?: string) {
+    // Only a hub takes extensions (onConnection already checks; #230).
+    if (this.role !== "hub") return void this.refuse(ws, 1012, "restarting");
     // Not on TCP: native messaging, where Chrome checked it is ours, or a hello on the hub socket,
     // which is another browser's host relaying its extension (that host checked it).
     const onTcp = via === "tcp";
@@ -1560,6 +1570,12 @@ export class ExtensionBridge {
           if (onSocket) {
             // No native host there (or not ours): the TCP logic runs next. Only a refused proof is worth saying.
             if (code === 4401) this.listenError = "The mcp-teams native host on the hub socket rejected this server's token (run `npx mcp-teams setup` again).";
+            return resolve(false);
+          }
+          // An ex-hub turning this server away as it hands over (#230): not a port problem, and the
+          // new hub is there in a moment. start() retries as quickly as after a hub that closed.
+          if (code === 1012) {
+            this.hubRestarting = true;
             return resolve(false);
           }
           this.listenError =
