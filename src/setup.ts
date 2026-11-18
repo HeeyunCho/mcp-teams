@@ -11,7 +11,7 @@ import { createInterface } from "node:readline/promises";
 import { fileURLToPath } from "node:url";
 import type { ExtensionBridge } from "./bridge.js";
 import { applyPlan, planClients, type Plan, type ServerCommand } from "./clients.js";
-import { EXTENSION_ORIGIN, installedVersion, syncExtension, writePairing } from "./extension.js";
+import { browsersWithTwoCopies, EXTENSION_IDS, installedVersion, isTrustedOrigin, syncExtension, twoCopiesNote, writePairing, type ExtensionIds } from "./extension.js";
 import { loadConfig } from "./config.js";
 import { installNativeHost, type InstallResult, type NativeHostOptions } from "./nativehost.js";
 
@@ -317,7 +317,8 @@ function open(target: string, browser?: Browser) {
   }
 }
 
-const ours = (bridge: ExtensionBridge) => bridge.extensions.filter((e) => e.origin === EXTENSION_ORIGIN);
+/** Our extension's connections: any id in the trusted list (#216), a store install too. */
+const ours = (bridge: ExtensionBridge, ids: ExtensionIds) => bridge.extensions.filter((e) => isTrustedOrigin(e.origin, ids));
 
 async function waitFor(cond: () => boolean, ms: number) {
   for (const end = Date.now() + ms; Date.now() < end; await sleep(500)) if (cond()) return true;
@@ -325,22 +326,24 @@ async function waitFor(cond: () => boolean, ms: number) {
 }
 
 /** Installs or updates the extension folder and waits until the extension connects. */
-async function connectExtension(bridge: ExtensionBridge, serverVersion: string): Promise<boolean> {
+async function connectExtension(bridge: ExtensionBridge, serverVersion: string, ids: ExtensionIds): Promise<boolean> {
   const { changed, dir } = syncExtension();
   const config = loadConfig();
   writePairing(config.token, dir, { nativeHost: config.nativeHost });
   ok(`Extension ${installedVersion(dir)} ${changed ? "installed in" : "up to date in"} ${dir}`);
 
   // An installed extension connects within seconds (it retries every 30 s).
-  await waitFor(() => ours(bridge).length > 0 && bridge.connected, 3_000);
+  await waitFor(() => ours(bridge, ids).length > 0 && bridge.connected, 3_000);
   const browsers = installedBrowsers();
-  const connected = () => ours(bridge).map((e) => e.browser ?? "browser");
+  const connected = () => ours(bridge, ids).map((e) => e.browser ?? "browser");
   if (connected().length) {
     if (changed) {
       const { after } = await bridge.reloadExtension();
       ok(`Extension reloaded (${after})`);
     }
     ok(`Extension connected in ${connected().join(" and ")}`);
+    const twice = twoCopiesNote(browsersWithTwoCopies(ours(bridge, ids), ids));
+    if (twice) todo(twice);
     const missing = browsers.filter((b) => !connected().includes(b.name));
     for (const b of missing) {
       todo(`To use Teams in ${b.name} too: in ${b.page}, turn on Developer mode (${b.devMode}) and click Load unpacked: ${dir}`);
@@ -364,7 +367,7 @@ async function connectExtension(bridge: ExtensionBridge, serverVersion: string):
 → Another AI session runs mcp-teams ${bridge.hubVersion}, which can't connect the new extension.
   Run /mcp in your open Claude Code sessions (or restart those AI apps); setup continues as soon as they do.`);
   }
-  if (!(await waitFor(() => ours(bridge).length > 0 && bridge.connected, EXTENSION_WAIT_MS))) {
+  if (!(await waitFor(() => ours(bridge, ids).length > 0 && bridge.connected, EXTENSION_WAIT_MS))) {
     console.log("\n✗ The extension did not connect. Run setup again once it is loaded.");
     return false;
   }
@@ -408,13 +411,19 @@ function registerNativeHost(options: NativeHostOptions) {
 /**
  * yes: make the changes without asking. nativeHost: where the native host's registration looks and
  * what it registers (tests: a temporary dist/hub.js); left out, this computer and this copy.
+ * trustedExtensionIds: the ids counted as our extension (#216; tests add a fictional store id);
+ * left out, EXTENSION_IDS.
  */
-export async function setup(bridge: ExtensionBridge, serverVersion: string, { yes = false, nativeHost = {} }: { yes?: boolean; nativeHost?: NativeHostOptions } = {}): Promise<boolean> {
+export async function setup(
+  bridge: ExtensionBridge,
+  serverVersion: string,
+  { yes = false, nativeHost = {}, trustedExtensionIds = EXTENSION_IDS }: { yes?: boolean; nativeHost?: NativeHostOptions; trustedExtensionIds?: ExtensionIds } = {},
+): Promise<boolean> {
   console.log(`mcp-teams ${serverVersion} setup\n`);
   await registerApps(yes);
   console.log("");
   if (loadConfig().nativeHost) registerNativeHost(nativeHost);
-  if (!(await connectExtension(bridge, serverVersion))) return false;
+  if (!(await connectExtension(bridge, serverVersion, trustedExtensionIds))) return false;
 
   // Opens Teams in a background tab if none is open, and waits for its session.
   try {

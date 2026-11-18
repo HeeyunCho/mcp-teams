@@ -30,6 +30,7 @@
     "probe": "node scripts/probe.mjs",
     "measure-memory": "npm run build && node scripts/measure-memory.mjs",
     "update": "node scripts/update.mjs",
+    "package-extension": "node scripts/package-extension.mjs",
     "prepublishOnly": "npm test"
   },
   "engines": {

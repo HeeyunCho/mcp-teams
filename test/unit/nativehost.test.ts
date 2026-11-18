@@ -10,7 +10,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { EXTENSION_ID } from "../../src/extension.js";
-import { batPath, HOST_NAME, hostLauncherScript, installNativeHost, nativeHostReport, NonAsciiBatPathError, readRegDefault, regExe, regExportDefaultValue, registeredHosts } from "../../src/nativehost.js";
+import { batPath, HOST_NAME, hostLauncherScript, hostManifest, installNativeHost, nativeHostReport, NonAsciiBatPathError, readRegDefault, regExe, regExportDefaultValue, registeredHosts } from "../../src/nativehost.js";
 
 const json = (path: string) => JSON.parse(readFileSync(path, "utf8"));
 
@@ -19,6 +19,20 @@ describe("#123: the extension's manifest", () => {
   // with this permission, so without it the extension would quietly stay on TCP.
   it("#123: asks for the nativeMessaging permission, without which Chrome has no connectNative", () => {
     expect(json("extension/manifest.json").permissions).toContain("nativeMessaging");
+  });
+});
+
+describe("#216: the host manifest trusts every extension id in the list", () => {
+  // A fictional second id (a store's): 32 letters a–p, as Chrome's ids are.
+  const STORE_ID = "abcdefghijklmnopabcdefghijklmnop";
+
+  it("#216: lists chrome-extension://<id>/ for every trusted id, so Chrome starts the host for a store install too", () => {
+    const manifest = JSON.parse(hostManifest("/home/alex/host", { unpacked: EXTENSION_ID, chromeWebStore: STORE_ID }));
+    expect(manifest.allowed_origins).toEqual([`chrome-extension://${EXTENSION_ID}/`, `chrome-extension://${STORE_ID}/`]);
+  });
+
+  it("#216: by default lists exactly the sideload id while no store id is known", () => {
+    expect(JSON.parse(hostManifest("/home/alex/host")).allowed_origins).toEqual([`chrome-extension://${EXTENSION_ID}/`]);
   });
 });
 
