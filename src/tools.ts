@@ -1,6 +1,6 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { isLostCall, type Capabilities, type ExtensionBridge, type ExtensionInfo } from "./bridge.js";
+import { extensionSupported, isLostCall, missingFeatures, unsupportedExtension, type Capabilities, type ExtensionBridge, type ExtensionInfo } from "./bridge.js";
 import type { Config } from "./config.js";
 import { readBuildInfo, restartCheck, restartHint } from "./buildInfo.js";
 import { BUILD_DIR, RUNNING_BUILD } from "./config.js";
@@ -133,6 +133,14 @@ const NOTE_STATUS_TIMEOUT_MS = 3_000;
 /** What an extension declared (#115); one from before #115, or seen through a hub from before it, has no features. */
 const declaredBy = (e: ExtensionInfo): Capabilities => e.capabilities ?? { features: [], maxMessageBytes: null };
 
+/**
+ * #219: whether this server works with the extension (it is at least MIN_EXTENSION), and which of the
+ * features the server checks it lacks; null with no extension. The extension has its own version
+ * line, so its version is never compared with the server's.
+ */
+const supportOf = (e: ExtensionInfo | undefined) =>
+  e ? { extensionSupported: extensionSupported(e), missingFeatures: missingFeatures(e) } : { extensionSupported: null };
+
 export function registerTools(server: McpServer, bridge: ExtensionBridge, config: ToolsConfig, options: ToolsOptions = {}) {
   const running = options.build ? readBuildInfo(options.build.dir) : RUNNING_BUILD;
   // The version of the code that runs (its build.json), not package.json's.
@@ -174,7 +182,7 @@ export function registerTools(server: McpServer, bridge: ExtensionBridge, config
     {
       title: "Version and connection status",
       description:
-        "Shows the mcp-teams server version and build, the browser extension version, and whether Teams is reachable (which of its services have a session). restartNeeded: true means mcp-teams was updated on disk while this server still runs the old code: the user should reconnect it (in Claude Code: /mcp) and reload the extension.",
+        "Shows the mcp-teams server version and build, the browser extension version (it has its own version line) and whether this server works with it (extensionSupported, and the missingFeatures it lacks), and whether Teams is reachable (which of its services have a session). restartNeeded: true means mcp-teams was updated on disk while this server still runs the old code: the user should reconnect it (in Claude Code: /mcp), and reload the extension if it changed too.",
       inputSchema: {},
     },
     safe(async (_, extra) => {
@@ -198,11 +206,13 @@ export function registerTools(server: McpServer, bridge: ExtensionBridge, config
           : {}),
         // #216: one browser with both the sideloaded copy and a store copy: suggest removing the sideloaded one.
         ...(twoCopies ? { twoCopies } : {}),
-        versionsMatch: bridge.extension ? bridge.extension.version === serverVersion : null,
+        ...supportOf(bridge.extension),
         bridge: bridge.listenError ?? (bridge.connected ? "connected" : "waiting for extension"),
         // #111: what the user can do; the extension tries to connect every 30 s on its own.
         ...(bridge.connected || bridge.listenError
-          ? {}
+          ? bridge.extension && !extensionSupported(bridge.extension)
+            ? { hint: `Calls are refused: ${unsupportedExtension(bridge.extension.version)}` }
+            : {}
           : {
               hint: "No browser extension is connected. Open Chrome or Edge (the extension connects within 30 s). If it stays disconnected, open chrome://extensions, reload mcp-teams and look for errors there; then reload the Teams tab.",
             }),
@@ -241,7 +251,7 @@ export function registerTools(server: McpServer, bridge: ExtensionBridge, config
     },
     safe(async () => {
       const r = await bridge.reloadExtension();
-      return text({ ...r, server: serverVersion, versionsMatch: r.after === serverVersion });
+      return text({ ...r, server: serverVersion, ...supportOf(bridge.extension) });
     }),
   );
 

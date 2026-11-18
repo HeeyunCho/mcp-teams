@@ -23,6 +23,7 @@ export const ALLOWED = Object.freeze([
   "manifest.json",
   "background.js",
   "chunks.js",
+  "features.js",
   "sizes.js",
   "teams.js",
   "confirm.html",

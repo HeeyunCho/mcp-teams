@@ -248,11 +248,61 @@ export const DEFAULT_BRIDGE_OPTIONS: Readonly<Timings> = Object.freeze({
  * send waits for the user's click (up to minutes), so it must not hold a turn others wait for.
  */
 const UNQUEUED = new Set(["status", "reload", "reloadAll", "requestSend"]);
+/** The calls an extension below MIN_EXTENSION still gets (#219): enough to see it and update it. */
+const BELOW_FLOOR_ALLOWED = new Set(["status", "reload", "reloadAll"]);
 /** Calls the extension fails without a Teams tab open (requireTeamsTab in extension/background.js). */
 const NEEDS_TEAMS_TAB = new Set(["listTeams", "listChats"]);
 
-/** The oldest extension that closes a send's confirmation window on {type:"cancel"} (1.2). Sends need it. */
-export const MIN_SEND_EXTENSION = "0.2.13";
+/**
+ * The protocol features of the extension that the server checks before relying on them (#219),
+ * each with the first version that had it: an extension that declares no features (every one up
+ * to 0.3.79) is taken to have those its version had. The extension's CAPABILITIES
+ * (extension/features.js) must list each; a new request method, or a changed request or response
+ * shape, gets one here in the same change.
+ * - "cancelSend": closes a send's confirmation window on {type:"cancel"} (#22). Sends need it.
+ * - "sizeCheck": answers a reply too large for its connection with a short error instead (#193).
+ */
+export const EXTENSION_FEATURES: Readonly<Record<string, string>> = Object.freeze({ cancelSend: "0.2.13", sizeCheck: "0.3.78" });
+
+/** The oldest extension that closes a send's confirmation window, for one that declares no features. */
+export const MIN_SEND_EXTENSION = EXTENSION_FEATURES.cancelSend;
+
+/**
+ * The oldest extension the hub serves (#219); today the first one released, so every released
+ * extension is served. The extension has its own version line (1.0.0 on), so this is the one
+ * version floor: what an extension can do beyond it is decided by the features it declares. Raise
+ * it only to drop an extension the server can no longer work with at all. One below it (a readable
+ * version) is accepted, so get_version can say what to do, but gets no calls but status and reload.
+ */
+export const MIN_EXTENSION = "0.1.0";
+
+const isVersion = (v: unknown): v is string => typeof v === "string" && /^\d+\.\d+\.\d+$/.test(v);
+
+type Declaring = Pick<ExtensionInfo, "version" | "capabilities">;
+
+/**
+ * What an extension can do: the features it declares, or, when it declares none (one from before
+ * #219), the ones its version had. An unreadable version has none.
+ */
+export function featuresOfExtension(e: Declaring | undefined): string[] {
+  const declared = e?.capabilities?.features ?? [];
+  if (declared.length) return declared;
+  const version = e?.version;
+  return isVersion(version) ? Object.keys(EXTENSION_FEATURES).filter((f) => !isNewer(EXTENSION_FEATURES[f], version)) : [];
+}
+
+/** The checked features (EXTENSION_FEATURES) an extension lacks. */
+export const missingFeatures = (e: Declaring): string[] => {
+  const has = featuresOfExtension(e);
+  return Object.keys(EXTENSION_FEATURES).filter((f) => !has.includes(f));
+};
+
+/** False for an extension whose readable version is below MIN_EXTENSION; an unreadable one (a dev build) is served. */
+export const extensionSupported = (e: Pick<ExtensionInfo, "version">): boolean => !isNewer(MIN_EXTENSION, e.version);
+
+/** What to do about an old extension, for a copy mcp-teams installed and for one from a browser's store. */
+const UPDATE_EXTENSION =
+  "Update the extension: a copy mcp-teams installed updates with reload_extension (it loads the version mcp-teams put in its folder; run `npx mcp-teams setup` if it was loaded from another folder), and one from the Chrome Web Store or Edge Add-ons updates from the store (chrome://extensions, Update).";
 
 /**
  * What a call fails with when it was never sent (it waited for a turn, or was refused before it
@@ -271,17 +321,24 @@ export const NOT_SENT = Object.freeze({
   hubClosing: "The mcp-teams hub is closing (the AI session that ran it ended); this call was not sent. Try again in a few seconds.",
   /** A send on an extension that can't close its confirmation window when the send is withdrawn. */
   extensionTooOld: (version: unknown) =>
-    `Nothing was sent: the browser extension (${String(version)}) is older than ${MIN_SEND_EXTENSION} and can't close its confirmation window when the AI stops waiting, so a late click could still post. Update it with reload_extension (it loads the version mcp-teams put in its folder), or run \`npx mcp-teams setup\` if it was loaded from another folder, then send again.`,
+    `Nothing was sent: the browser extension (${String(version)}) doesn't declare cancelSend (for one that declares no features: it is older than ${MIN_SEND_EXTENSION}), so it can't close its confirmation window when the AI stops waiting, and a late click could still post. ${UPDATE_EXTENSION} Then send again.`,
+  /** Any call but status and reload, on an extension below MIN_EXTENSION (#219). */
+  extensionUnsupported: (version: unknown) => `Nothing was sent: ${unsupportedExtension(version)}`,
 });
 
-/** True when an extension of `version` closes its confirmation window on a cancel (an unreadable version doesn't). */
-export function closesSendWindow(version: unknown): boolean {
-  return typeof version === "string" && /^\d+\.\d+\.\d+$/.test(version) && !isNewer(MIN_SEND_EXTENSION, version);
+/** Why an extension below MIN_EXTENSION gets no calls, and what to do (get_version's hint, #219). */
+export function unsupportedExtension(version: unknown): string {
+  return `the browser extension (${String(version)}) is older than ${MIN_EXTENSION}, the oldest mcp-teams works with. ${UPDATE_EXTENSION}`;
+}
+
+/** True when an extension closes its confirmation window on a cancel: it has cancelSend (see featuresOfExtension). */
+export function closesSendWindow(e: Declaring | undefined): boolean {
+  return featuresOfExtension(e).includes("cancelSend");
 }
 
 /** The version to name when a send is refused: of the extensions that can't close the window, the oldest (an unreadable one first). */
 function oldestTooOld(extensions: ExtensionInfo[]): string {
-  const tooOld = extensions.map((e) => e.version).filter((v) => !closesSendWindow(v));
+  const tooOld = extensions.filter((e) => !closesSendWindow(e)).map((e) => e.version);
   const unreadable = tooOld.find((v) => !/^\d+\.\d+\.\d+$/.test(v));
   return unreadable ?? tooOld.reduce<string | undefined>((a, v) => (a === undefined || isNewer(a, v) ? v : a), undefined) ?? "unknown";
 }
@@ -1132,7 +1189,8 @@ export class ExtensionBridge {
   /**
    * Our extension up to 0.2.0 can't prove it knows the token, and anything can claim its
    * origin, so it gets no calls. It is asked once to reload, which loads the update this
-   * server put in its folder, and the new version connects with a proof.
+   * server put in its folder, and the new version connects with a proof. Such an extension is
+   * always a copy mcp-teams installed: web store copies start at 1.0.0 (#219).
    */
   private reloadLegacy(ws: BridgeSocket) {
     if (!this.legacyReloaded) {
@@ -1630,6 +1688,11 @@ export class ExtensionBridge {
           : `${NOT_READ.notConnected} Open Chrome or Edge with the mcp-teams extension installed (run \`mcp-teams setup\`).`;
       throw new Error(reason);
     }
+    // The picked browser can close while the others' status is awaited (#172): take no turn for it.
+    if (this.role === "hub" && (!this.sockets.has(target) || target.readyState !== OPEN)) throw new Error(NOT_SENT.gone);
+    // #219: an extension below the floor answers status and reload only (so it can be updated).
+    const below = this.role === "hub" && !BELOW_FLOOR_ALLOWED.has(method) ? this.sockets.get(target) : undefined;
+    if (below && !extensionSupported(below)) throw new Error(NOT_SENT.extensionUnsupported(below.version));
     // A send opens a window that must close once nobody waits for it: an extension that ignores
     // cancel would leave it open for a late click. The hub checks the extension it picked (for its
     // own sends and its peers'). A peer behind a hub that doesn't say it checks (one from before
@@ -1637,9 +1700,9 @@ export class ExtensionBridge {
     // one must close the window.
     if (method === "requestSend") {
       if (this.role === "hub") {
-        const version = this.sockets.get(target)?.version;
-        if (!closesSendWindow(version)) throw new Error(NOT_SENT.extensionTooOld(version ?? "unknown"));
-      } else if (!this.hubChecksSend && (!this.extensions.length || !this.extensions.every((e) => closesSendWindow(e.version)))) {
+        const picked = this.sockets.get(target);
+        if (!closesSendWindow(picked)) throw new Error(NOT_SENT.extensionTooOld(picked?.version ?? "unknown"));
+      } else if (!this.hubChecksSend && (!this.extensions.length || !this.extensions.every((e) => closesSendWindow(e)))) {
         throw new Error(NOT_SENT.extensionTooOld(oldestTooOld(this.extensions)));
       }
     }
@@ -1719,6 +1782,8 @@ export class ExtensionBridge {
   /** Sends one request on a connection (an extension for the hub, the hub for a peer). */
   private send<T>(target: BridgeSocket, method: string, params: unknown, timeoutMs: number, signal?: AbortSignal, deadline?: number, turn?: Turn): Promise<T> {
     if (signal?.aborted) return Promise.reject(cancelledError());
+    // ws doesn't throw on a closing or closed socket: the call would wait out its timer (#172).
+    if (target.readyState !== OPEN) return Promise.reject(new Error(NOT_SENT.gone));
     const id = randomUUID();
     const now = Date.now();
     // Taken before the timer starts, so the timer never fires before it.

@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import WebSocket from "ws";
-import { ExtensionBridge, isNewer, proof } from "../../src/bridge.js";
+import { ExtensionBridge, isNewer, NOT_SENT, proof } from "../../src/bridge.js";
 import { EXTENSION_ID, EXTENSION_ORIGIN, extensionIdFromKey, installedVersion, syncExtension, writePairing } from "../../src/extension.js";
 // @ts-expect-error plain JS module shared with the extension
 import { pairingProof } from "../../extension/teams.js";
@@ -302,6 +302,45 @@ describe("several browsers at once", () => {
       edge.ws.close();
     },
   );
+
+  it("172: never sends a call to a browser that closed while the others' status was awaited, and keeps no turn for it", async () => {
+    bridge = new TestBridge("secret", "0.15.0");
+    await bridge.start();
+    // Edge has the Teams tab, so it's picked; it answers its status and then closes. Chrome
+    // answers only once the hub has seen Edge go, so the pick lands after the close.
+    const edge = extension(EXTENSION_ORIGIN, "secret", {
+      browser: "Edge",
+      instance: "edge-1",
+      onRequest: (ws, msg) => {
+        ws.send(JSON.stringify({ type: "response", id: msg.id, ok: true, result: { teamsTabs: 1, sessions: [{ sessionCaptured: true }] } }));
+        if (msg.method === "status") ws.close();
+      },
+    });
+    await edge.welcome;
+    const chromeGot: string[] = [];
+    const chrome = extension(EXTENSION_ORIGIN, "secret", {
+      browser: "Chrome",
+      instance: "chrome-1",
+      onRequest: async (ws, msg) => {
+        chromeGot.push(msg.method);
+        if (msg.method === "status") await until(() => bridge!.extensions.length === 1, 3_000, "the hub to see Edge close");
+        const result = msg.method === "status" ? { teamsTabs: 0, sessions: [{ sessionCaptured: false }] } : { from: "Chrome" };
+        ws.send(JSON.stringify({ type: "response", id: msg.id, ok: true, result }));
+      },
+    });
+    await until(() => bridge!.extensions.length === 2, 3_000, "both browsers to connect");
+
+    const timeoutMs = 4_000; // within the test's own 5 s, so a call that waits it out fails here
+    const started = Date.now();
+    await expect(bridge.call("listChats", {}, timeoutMs)).rejects.toThrow(NOT_SENT.gone);
+    expect(Date.now() - started).toBeLessThan(timeoutMs / 2);
+    // No turn was taken for the closed connection.
+    expect((bridge as any).turns.size).toBe(0);
+    // The next call goes to the browser still open.
+    await expect(bridge.call("listChats", {}, timeoutMs)).resolves.toEqual({ from: "Chrome" });
+    expect(chromeGot).toEqual(["status", "listChats"]);
+    chrome.ws.close();
+  });
 
   it("with one browser, sends list_teams and list_chats to it without asking for its status, tab or not", async () => {
     bridge = new TestBridge("secret", "0.15.0");

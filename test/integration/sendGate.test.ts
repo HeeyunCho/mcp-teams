@@ -163,3 +163,46 @@ describe("send_message and an extension that can't close its window", () => {
     expect(sends(ext)).toBe(1);
   });
 });
+
+// #219: the extension has its own version line (1.0.0 on), so the gate asks what it declares,
+// not how its version compares with the server's. One that declares no features (every
+// extension up to 0.3.79) still goes by the 0.2.13 rule.
+describe("#219: the send gate checks the cancelSend feature", () => {
+  const posts = (req: { method: string }) => (req.method === "requestSend" ? { sent: true } : { ok: true });
+
+  async function setupDeclaring(version: string, features: string[]) {
+    h = await bridgeHarness();
+    const hub = await h.session("0.9.0");
+    const ext = await h.extension({ version, handle: posts, capabilities: { features, maxMessageBytes: 1024 * 1024 } });
+    await until(() => hub.connected, 3_000, "the hub sees the extension");
+    return { hub, ext };
+  }
+
+  it("an extension of 1.0.0 that declares cancelSend gets the send, though the server is 0.9.0", async () => {
+    const { hub, ext } = await setupDeclaring("1.0.0", ["cancelSend", "sizeCheck"]);
+    expect(await sendMessage(hub)).toEqual({ isError: false, text: JSON.stringify({ sent: true }, null, 2) });
+    expect(sends(ext)).toBe(1);
+  });
+
+  it("an extension whose version reads as old gets the send when it declares cancelSend", async () => {
+    const { hub, ext } = await setupDeclaring("0.2.5", ["cancelSend"]);
+    expect(await sendMessage(hub)).toEqual({ isError: false, text: JSON.stringify({ sent: true }, null, 2) });
+    expect(sends(ext)).toBe(1);
+  });
+
+  it("an extension that declares features but not cancelSend is refused, however high its version", async () => {
+    const { hub, ext } = await setupDeclaring("7.0.0", ["sizeCheck"]);
+    const r = await sendMessage(hub);
+    expectRefused(r, ext);
+    expect(r.text).toMatch(/cancelSend/);
+    expect(r.text).toMatch(/store/i); // says what to do for a store copy too
+  });
+
+  it("a peer behind a current hub gets the send through an extension that declares cancelSend", async () => {
+    const { ext } = await setupDeclaring("1.0.0", ["cancelSend"]);
+    const peer = await h!.session("0.9.0");
+    await until(() => peer.connected, 3_000, "the peer sees the extension");
+    expect(await sendMessage(peer)).toEqual({ isError: false, text: JSON.stringify({ sent: true }, null, 2) });
+    expect(sends(ext)).toBe(1);
+  });
+});
