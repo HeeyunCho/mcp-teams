@@ -1,8 +1,49 @@
-# Handoff: mcp-teams after #175, the 2026-11-17 triage, the closure audit and the rechecks of #22, #23, #35, #21, #111, #96, #122, #124, #142, #162 and #123, and a second pass on #77, #103 and #183 (updated 2026-11-17 on the Windows PC)
+# Handoff: mcp-teams after 0.3.74–0.3.81 (#182, #170, #180, #149, #193, #172, #219 and #230), updated 2026-11-18 on the Windows PC
 
-Repo: GitHub `HeeyunCho/mcp-teams`. PRs 1–4 of #123 (the native-messaging host) are on `main`, all **off by default** (`nativeHost` off). Next is PR 5, which turns it on. The last release is **0.3.80** (`02cefeb`, extension **1.0.0**, #219); 0.3.74 to 0.3.79 are listed in "Releases 0.3.74 to 0.3.80" under Now (2026-11-18). 0.3.73 (`5e5b9d9`) has #202 for #200; 0.3.72 (`71f49e2`) has #174 and #175; 0.3.71 (`9bf7434`) has #165 and #166 (dependency bumps only), 0.3.70 (`d5cacdd`) has #163, 0.3.69 (`d35759e`) has #159, 0.3.68 (`60f005f`) has #158, 0.3.67 (`aa90cf4`) has #157, 0.3.66 (`367f198`) has #154.
+Repo: GitHub `HeeyunCho/mcp-teams`. PRs 1–4 of #123 (the native-messaging host) are on `main`, all **off by default** (`nativeHost` off). Next is PR 5, which turns it on. The last release is **0.3.81** (`6be1eb8`, #232 for #230; extension still **1.0.0**). 0.3.80 (`02cefeb`) started the extension's own version line at 1.0.0 (#219); 0.3.74 to 0.3.79 are listed in "Releases 0.3.74 to 0.3.80" under Now (2026-11-18). 0.3.73 (`5e5b9d9`) has #202 for #200; 0.3.72 (`71f49e2`) has #174 and #175; 0.3.71 (`9bf7434`) has #165 and #166 (dependency bumps only), 0.3.70 (`d5cacdd`) has #163, 0.3.69 (`d35759e`) has #159, 0.3.68 (`60f005f`) has #158, 0.3.67 (`aa90cf4`) has #157, 0.3.66 (`367f198`) has #154.
 
-## Resume here (session of 2026-11-17, updated after the PC reboot)
+## Resume here (session of 2026-11-18, Windows PC)
+
+The last release is **0.3.81** (`6be1eb8`), with #232 for #230; the extension is unchanged at 1.0.0. This PC still runs the 0.3.80 build (`cc045f062611`): `main` was pulled but not rebuilt after 0.3.81.
+
+**Done today:**
+- Pulled and rebuilt 0.3.80 here. Docs PRs #229 and #231, and #25 updated for 0.3.74–0.3.80 and #230.
+- Diagnosed #230, a peer stuck on an ex-hub after a hand-over, from live logs. Fixed it test-first in **#232** (merged as `4031e09`, released in 0.3.81). See "#230" in Now (2026-11-18) below.
+- Two comments on #173 with the first #182 readings: [hub not blocked](https://github.com/HeeyunCho/mcp-teams/issues/173#issuecomment-6971669066), and [`loop-delay` on short-lived peers](https://github.com/HeeyunCho/mcp-teams/issues/173#issuecomment-6973316226).
+
+**Where the state lives (read these, don't re-derive):**
+- **Issue #25, the roadmap:** the sections "After the 0.3.80 rebuild (2026-11-18)", "CPU/memory audit (2026-11-16) and its follow-ups" and "Older follow-ups rechecked against 0.3.72". #25 doesn't record #232 or 0.3.81 yet; tick #230 there.
+- **This file:** "Now (2026-11-18)" below. The 2026-11-17 resume notes and their lane order follow it.
+- **`gh issue list`:** 33 open issues: 15 `ready-for-agent`, 17 `ready-for-human`, 1 `needs-info`.
+- **`gh pr list`:** 7 open PRs, all opened outside this session: #221–#224 and #226–#228 (#215 EPIPE, extension hosts and ids, #177, #179, #210). One of them, #221, is from an outside contributor. None is reviewed here yet.
+
+### Next steps
+1. **Put 0.3.81 into use here.** Run `npm ci`, `npm run build` and `node dist/index.js reload-extension`, then fully restart every Claude session (`/mcp` Reconnect keeps the old process). Until every server runs 0.3.81, a peer can still get stuck on an ex-hub. Restarting the stuck peer's session, or the ex-hub's, clears it.
+   - At about 08:30Z, one 0.3.73 server (pid 44316, a Claude Code session started from cmd.exe) was still running, with three 0.3.80 peers (30516, 32016, 113396) stuck on it.
+   - Check for stuck peers by comparing `netstat -ano | grep 47393` (who holds each connection) with the `role … hub=` lines in `~/.mcp-teams/server.log`.
+2. **Watch #173 with #182's fields.** Every slow hub read so far had low `eldMax` and `elu` 0, so the hub isn't blocked; the wait is on the extension or Teams. The `loop-delay` lines came from one-shot peers (likely scheduled `claude -p` jobs that exit with `stdin-closed`) in their first minute. Next: whether those stalls are start-up work or machine load.
+3. **Review the open PRs** with a fresh-subagent `/code-review` each, before merging.
+4. **#230's leftovers** (from #232's description; no issue yet):
+   - the quick 1012 retry has no backoff;
+   - `close()` doesn't close connections still at their challenge;
+   - the optional peer-side check (drop a hub that welcomed with `extension: null` and turns out to be a peer).
+5. **Still waiting on the user:** #122's service-worker console results, and the items under "Waiting on the user" below.
+
+### Rules learned today
+- **Never run `gh issue view/edit` outside the repo folder.** In the scratchpad, `gh issue view 25 … > file` failed ("not a git repository"), the empty file went to `gh issue edit --body-file`, and #25's body was wiped. It was restored from `userContentEdits` (GraphQL). So:
+  - run `gh` from the checkout, or pass `-R HeeyunCho/mcp-teams`;
+  - guard every body edit with a size check, e.g. `test $(wc -l < file) -gt 150 && gh issue edit …`.
+- **A pull is safe, a build isn't:** pulling `main` here changes only sources. `npm run build` changes `dist/`, which new sessions start from.
+- **A failing repro test isn't merged alone:** it would turn `main`'s CI red. It goes in with its fix (#230's test went in #232).
+
+### Suggested skills
+- `diagnosing-bugs` for anything new in `server.log` (#173, #124, #162).
+- `tdd` for `ready-for-agent` issues; `code-review` from a fresh subagent before every merge.
+- `handoff` at the end of the next session.
+
+---
+
+## Session of 2026-11-17 (after the PC reboot)
 
 This day was mostly triage and bookkeeping: GitHub issues, and this file through docs PRs #181, #184, #191, #194, #196, #197, #198, #199, #201 and the #200 handoff PR. **One code change:** #202 for #200, released as **0.3.73** (`5e5b9d9`); see "#202" in Now. There are no other open PRs, no extra worktrees, and no local branches apart from `main`.
 
@@ -121,7 +162,7 @@ All eight issues (#182, #170, #180, #149, #193, #172, #212, #219) are closed.
 - **Still on old code:** six 0.3.72 servers (28076, 5068, 6796, 15800, 46912, 42664) and six 0.3.73 servers (44316, 50852, 69956, 65472, 72272, 37216) were running as peers. Each needs its session fully restarted; `/mcp` Reconnect keeps the process.
 - **After the restarts (about 08:30Z):** the hub is pid 106712 (0.3.80); `get_version` shows extension 1.0.0, `extensionSupported: true` and `restartNeeded: false`. One 0.3.73 server (44316) is still running, because its session wasn't restarted.
 
-### #230, a peer stuck on an ex-hub after a hand-over (open, `needs-triage`)
+### #230, a peer stuck on an ex-hub after a hand-over (fixed by #232, released in 0.3.81)
 
 - **What happens:** a hub hands over and stops serving, but a server that got its challenge just before still sends its peer-hello. The ex-hub accepts it with no extension and keeps pinging it, so the peer's hub-silent watchdog (#149) never fires. The peer stays at "waiting for extension" until one of the two processes exits.
 - **Seen live three times on 2026-11-18:**
@@ -138,7 +179,8 @@ All eight issues (#182, #170, #180, #149, #193, #172, #212, #219) are closed.
   - have `stopServing` close every accepted connection;
   - make `acceptPeer` and `startPeerBeat` do nothing unless the server is the hub.
 - **Untested:** a late extension `hello` can probably take the same path.
-- **Until it's fixed:** restart the stuck peer's session, or the ex-hub's.
+- **Fixed by #232** (`4031e09`, released in 0.3.81 as `6be1eb8`). An ex-hub now turns away a late `hello` or `peer-hello` with 1012. When it stops serving, it closes connections still at their challenge. It takes no peers or extensions, and pings no peers. A server refused with 1012 retries in 100–500 ms, with no port-in-use error. Five tests are in `test/integration/lateHelloAfterHandover.test.ts`. The repro branch and both worktrees are removed.
+- **Until every server runs 0.3.81:** restart the stuck peer's session, or the ex-hub's.
 
 ---
 
