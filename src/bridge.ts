@@ -689,6 +689,7 @@ export class ExtensionBridge {
   private preferred?: BridgeSocket; // hub: the extension that last answered a call
   private hub?: BridgeSocket; // peer: the hub
   private peers = new Set<BridgeSocket>();
+  private handshaking = new Set<BridgeSocket>(); // hub: connections that haven't said hello yet (#230)
   private peerCalls = new Map<BridgeSocket, Map<string, AbortController>>(); // hub: each peer's calls, by the peer's id
   private peerMax = new WeakMap<BridgeSocket, number>(); // hub: the largest message each peer declared it takes (#193)
   /** Hub: per extension connection, its turns (keyed by session: null for the hub's own calls, else the peer) and who waits. */
@@ -698,6 +699,7 @@ export class ExtensionBridge {
   private peerBeat?: NodeJS.Timeout; // hub: pings the peers
   private retry?: NodeJS.Timeout;
   private retryBackoffMs?: number; // the next role=none wait before jitter; unset: retryMs
+  private hubRestarting = false; // the TCP hub refused our peer-hello with 1012: it just handed over (#230)
   private closed = false;
   private steppingDown = false;
   /** Hub: its session ended and it drains before closing (#112); it starts no new call. */
@@ -826,6 +828,11 @@ export class ExtensionBridge {
     if (await this.join(this.tcpTransport)) return (this.setRole("peer"), this.watchHost());
     this.role = "none";
     clearTimeout(this.retry);
+    if (this.hubRestarting) {
+      this.hubRestarting = false;
+      this.retry = setTimeout(() => void this.start(), 100 + Math.random() * 400);
+      return void this.retry.unref();
+    }
     const backoff = this.retryBackoffMs ?? this.opts.retryMs;
     this.retryBackoffMs = Math.min(backoff * 2, this.opts.retryMaxMs);
     // ±50% jitter, so a dozen servers don't retry in step; no wait exceeds retryMaxMs (#171).
@@ -973,7 +980,9 @@ export class ExtensionBridge {
    * sends (its event says 1006), and which a client could set to anything.
    */
   private refuse(ws: BridgeSocket, code: number, reason: string) {
-    this.refusedWith.set(ws, { code, reason });
+    // The first reason stands: e.g. a hand-over's "restarting" isn't overwritten by the auth
+    // timeout firing while the close handshake still runs (#230).
+    if (!this.refusedWith.has(ws)) this.refusedWith.set(ws, { code, reason });
     ws.close(code, reason);
   }
 
@@ -984,6 +993,7 @@ export class ExtensionBridge {
     let saw: "hello" | "peer-hello" | "none" = "none";
     const authTimer = setTimeout(() => !authed && this.refuse(ws, 4401, "auth timeout"), this.opts.authTimeoutMs);
     const challenge = newNonce();
+    this.handshaking.add(ws);
     ws.send(JSON.stringify({ type: "challenge", nonce: challenge }));
 
     ws.on("message", (raw) => {
@@ -997,6 +1007,10 @@ export class ExtensionBridge {
       if (!authed) {
         if (msg.type !== "hello" && msg.type !== "peer-hello") return void this.refuse(ws, 4401, "bad token");
         saw = msg.type;
+        // A hello that arrives after this hub stopped serving (it handed over between the challenge
+        // and the hello, and the hello crossed its close) is turned away, so the client races for
+        // the port again instead of staying on an ex-hub that pings it and serves nothing (#230).
+        if (this.role !== "hub" || ws.readyState !== OPEN) return void this.refuse(ws, 1012, "restarting");
         // The native host takes extensions only on native messaging (or relayed on its socket): on
         // its TCP port it serves peers only (ADR decision 4, #123 decision 9).
         if (via === "tcp" && this.isHost && msg.type === "hello") {
@@ -1017,6 +1031,7 @@ export class ExtensionBridge {
         }
         authed = true;
         clearTimeout(authTimer);
+        this.handshaking.delete(ws);
         const welcome = typeof msg.nonce === "string" ? { proof: proof(this.token, proofRole("server", via), msg.nonce) } : {};
         if (msg.type === "hello") this.acceptExtension(ws, msg, welcome, via, origin);
         else this.acceptPeer(ws, msg.version, welcome, via, capabilitiesOf(msg).maxMessageBytes);
@@ -1034,6 +1049,7 @@ export class ExtensionBridge {
 
     ws.on("close", (code?: number) => {
       clearTimeout(authTimer);
+      this.handshaking.delete(ws);
       this.peers.delete(ws);
       const closing = this.sockets.get(ws);
       // Turned away before it was accepted (bad token, auth timeout, an old extension told to
@@ -1070,6 +1086,8 @@ export class ExtensionBridge {
    * turned away, and connecting ours replaces them.
    */
   private acceptExtension(ws: BridgeSocket, msg: any, welcome: object, via: Via, tcpOrigin?: string) {
+    // Only a hub takes extensions (onConnection already checks; #230).
+    if (this.role !== "hub") return void this.refuse(ws, 1012, "restarting");
     // Not on TCP: native messaging, where Chrome checked it is ours, or a hello on the hub socket,
     // which is another browser's host relaying its extension (that host checked it).
     const onTcp = via === "tcp";
@@ -1180,6 +1198,8 @@ export class ExtensionBridge {
   }
 
   private acceptPeer(ws: BridgeSocket, peerVersion: unknown, welcome: object, via: Via, maxMessageBytes: number | null) {
+    // Only a hub takes peers (onConnection already checks; #230).
+    if (this.role !== "hub") return void this.refuse(ws, 1012, "restarting");
     this.peers.add(ws);
     if (maxMessageBytes) this.peerMax.set(ws, maxMessageBytes);
     this.accepted.add(ws);
@@ -1251,8 +1271,12 @@ export class ExtensionBridge {
     this.rejectAll(reason);
     for (const s of this.sockets.keys()) s.close(1012, "restarting");
     for (const peer of this.peers) peer.close(1012, "restarting");
+    // Also those still at their challenge: closing the listener (wss.close()) leaves them open, and
+    // their hello would otherwise reach a server that no longer serves (#230).
+    for (const ws of this.handshaking) this.refuse(ws, 1012, "restarting");
     this.sockets.clear();
     this.peers.clear();
+    this.handshaking.clear();
     this.preferred = undefined;
     this.extension = undefined;
     this.extensions = [];
@@ -1394,6 +1418,8 @@ export class ExtensionBridge {
    * previous one isn't draining its answers and is closed (1013).
    */
   private startPeerBeat(ws: BridgeSocket) {
+    // Only a hub pings peers: an ex-hub's beat would keep a stale peer's watchdog (#149) quiet (#230).
+    if (this.role !== "hub") return;
     this.alive.add(ws);
     ws.on("pong", () => this.alive.add(ws));
     if (this.peerBeat) return;
@@ -1544,6 +1570,12 @@ export class ExtensionBridge {
           if (onSocket) {
             // No native host there (or not ours): the TCP logic runs next. Only a refused proof is worth saying.
             if (code === 4401) this.listenError = "The mcp-teams native host on the hub socket rejected this server's token (run `npx mcp-teams setup` again).";
+            return resolve(false);
+          }
+          // An ex-hub turning this server away as it hands over (#230): not a port problem, and the
+          // new hub is there in a moment. start() retries as quickly as after a hub that closed.
+          if (code === 1012) {
+            this.hubRestarting = true;
             return resolve(false);
           }
           this.listenError =
