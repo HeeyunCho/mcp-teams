@@ -119,6 +119,26 @@ All eight issues (#182, #170, #180, #149, #193, #172, #212, #219) are closed.
 - `npm ci`, `npm run build` (build `cc045f062611`) and `node dist/index.js reload-extension`. The first reload hit a hub restart; the retry reported `Extension reloaded: 1.0.0 → 1.0.0`.
 - **Hub:** pid 92768 (0.3.80) took over at 07:02:13Z, and accepted extension 1.0.0 at 07:02:14Z (`extension-connected ext=1.0.0`). Teams was captured again by 07:03:11Z.
 - **Still on old code:** six 0.3.72 servers (28076, 5068, 6796, 15800, 46912, 42664) and six 0.3.73 servers (44316, 50852, 69956, 65472, 72272, 37216) were running as peers. Each needs its session fully restarted; `/mcp` Reconnect keeps the process.
+- **After the restarts (about 08:30Z):** the hub is pid 106712 (0.3.80); `get_version` shows extension 1.0.0, `extensionSupported: true` and `restartNeeded: false`. One 0.3.73 server (44316) is still running, because its session wasn't restarted.
+
+### #230, a peer stuck on an ex-hub after a hand-over (open, `needs-triage`)
+
+- **What happens:** a hub hands over and stops serving, but a server that got its challenge just before still sends its peer-hello. The ex-hub accepts it with no extension and keeps pinging it, so the peer's hub-silent watchdog (#149) never fires. The peer stays at "waiting for extension" until one of the two processes exits.
+- **Seen live three times on 2026-11-18:**
+  - a 0.3.72 peer (pid 6796) joined ex-hub 46912 55 ms after its hand-over at 07:20:33Z;
+  - a 0.3.80 peer (pid 62956) joined ex-hub 28076 44 ms after its hand-over at 07:35:24Z, still stuck about 126,000 ms later;
+  - three 0.3.80 peers (30516, 32016, 113396) joined ex-hub 44316 (0.3.73) about 68 ms after its hand-over at 07:35:24Z, still stuck at 08:32Z.
+- **`main` is affected:**
+  - `onConnection` in `src/bridge.ts` never checks the role before `acceptPeer`.
+  - `stopServing` closes only authenticated sockets and peers.
+  - `wss.close()` leaves connected clients open.
+- **Repro test:** `test/integration/lateHelloAfterHandover.test.ts`, commit `dda8066` on local branch `worktree-agent-a8839a45f20eddd79` (worktree `.claude/worktrees/agent-a8839a45f20eddd79`, not pushed). It fails on `main`: the ex-hub welcomes the late peer and sends 14 pings in 3 s. It isn't merged on its own, because it would turn CI red; it goes in with the fix.
+- **Fix direction (in the issue):**
+  - refuse `hello` and `peer-hello` unless `role === "hub"`, closing with code 1012;
+  - have `stopServing` close every accepted connection;
+  - make `acceptPeer` and `startPeerBeat` do nothing unless the server is the hub.
+- **Untested:** a late extension `hello` can probably take the same path.
+- **Until it's fixed:** restart the stuck peer's session, or the ex-hub's.
 
 ---
 
