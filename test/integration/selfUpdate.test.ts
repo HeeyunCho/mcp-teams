@@ -15,7 +15,7 @@ afterEach(() => {
 
 const [major, minor, patch] = EXTENSION_VERSION.split(".").map(Number);
 const NEWER = `${major}.${minor}.${patch + 1}`;
-const OLDER = patch > 0 ? `${major}.${minor}.${patch - 1}` : `${major}.${minor - 1}.0`;
+const OLDER = patch > 0 ? `${major}.${minor}.${patch - 1}` : minor > 0 ? `${major}.${minor - 1}.0` : `${major - 1}.99.0`;
 
 /** The extension's folder on disk holds `version` (or can't be read, with null). */
 function folderHolds(version: string | null) {

@@ -205,14 +205,14 @@ describe("worker connection", () => {
     });
   });
 
-  it("#115: the worker's hello declares its capabilities: no features yet, and the largest message it takes", async () => {
+  it("#115: the worker's hello declares its capabilities: cancelSend and sizeCheck (#219), and the largest message it takes", async () => {
     const hub = await scriptedHub([]);
     const fake = createFakeChrome({ local: { token: TOKEN, port: hub.port } });
     const worker = await loadWorker(fake);
     worker.registerListeners();
     link = await connectWorker(fake, hub.welcomed);
     const hello = hub.received.find((m) => m.type === "hello");
-    expect(hello.capabilities).toEqual({ features: [], maxMessageBytes: 256 * 1024 * 1024 });
+    expect(hello.capabilities).toEqual({ features: ["cancelSend", "sizeCheck"], maxMessageBytes: 256 * 1024 * 1024 });
   });
 
   it("2.1b: after a welcome without the right proof, a request that came with it is never run", async () => {
