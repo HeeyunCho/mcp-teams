@@ -34,12 +34,25 @@ process.on("exit", (code) => diagnostics?.exit(exitReason, code));
 
 // A stray error in a socket callback must not end the server (the AI app would show it
 // as "failed"); log it on stderr, which isn't the MCP channel, and by name in server.log.
+// #215: once a write to stderr failed (the AI app closed it), nothing more goes there. A failed
+// write is an error event that, with no listener, came back here as an uncaught exception whose
+// own write failed again: thousands of server.log lines, until the drain bound ended the process.
+let stderrOpen = true;
+process.stderr.on("error", () => (stderrOpen = false));
+const toStderr = (...args: unknown[]) => {
+  if (!stderrOpen) return;
+  try {
+    console.error(...args);
+  } catch {
+    stderrOpen = false; // a handler must never throw
+  }
+};
 process.on("unhandledRejection", (err) => {
-  console.error("[mcp-teams] unhandled rejection:", err);
+  toStderr("[mcp-teams] unhandled rejection:", err);
   diagnostics?.crash("unhandled-rejection", err);
 });
 process.on("uncaughtException", (err) => {
-  console.error("[mcp-teams] uncaught exception:", err);
+  toStderr("[mcp-teams] uncaught exception:", err);
   diagnostics?.crash("uncaught-exception", err);
 });
 
@@ -140,13 +153,13 @@ if (diagnostics) {
 }
 
 // A signal closes at once, and exits within SIGNAL_EXIT_MS even if the bridge is slow to close. When
-// the AI session is gone (stdin closes, the parent that started this server is gone, or stdout
-// breaks: mcp-newoutlook #288), this server takes no more MCP calls, but as the hub it first lets
-// other sessions' running calls finish for a few seconds (#112, ported from mcp-newoutlook
-// src/index.ts, PR #108 there); TEAMS_MCP_DRAIN_MS changes that bound (tests). The process exits
-// soon after the bound even if a connection is slow to close.
-const fromEnv = process.env.TEAMS_MCP_DRAIN_MS ? Number(process.env.TEAMS_MCP_DRAIN_MS) : NaN;
-const drainMs = Number.isFinite(fromEnv) && fromEnv >= 0 ? fromEnv : DRAIN_MAX_WAIT_MS; // 0: no drain
+// the AI session is gone (stdin closes, the parent that started this server is gone: #234, found as
+// mcp-newoutlook #288; or stdout is closed: #215), this server takes no more MCP calls, but as the
+// hub it first lets other sessions' running calls finish for a few seconds (#112, ported from
+// mcp-newoutlook src/index.ts, PR #108 there); TEAMS_MCP_DRAIN_MS changes that bound (tests). The
+// process exits soon after the bound even if a connection is slow to close.
+const drainMsFromEnv = process.env.TEAMS_MCP_DRAIN_MS ? Number(process.env.TEAMS_MCP_DRAIN_MS) : NaN;
+const drainMs = Number.isFinite(drainMsFromEnv) && drainMsFromEnv >= 0 ? drainMsFromEnv : DRAIN_MAX_WAIT_MS; // 0: no drain
 const ending = serverEnding({
   close: () => bridge.close(),
   drain: async () => {
