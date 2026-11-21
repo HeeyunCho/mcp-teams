@@ -13,9 +13,15 @@ import { hubSocketPath, msFromEnv } from "./native.js";
 import { diagnosticLog, watchState } from "./serverLog.js";
 import { restartCheck } from "./buildInfo.js";
 import { loopDelayMonitor } from "./loopDelay.js";
+import { parentOfProcess, serverEnding, watchParent, watchStdout } from "./lifecycle.js";
 
 const command = process.argv[2];
 const printsOnly = ["token", "version", "--version"].includes(command);
+
+// The parent that started this server and its own parent (npm exec's AI app under npx), recorded
+// first: the AI app may exit while the server starts (mcp-newoutlook #288; see watchParent below).
+const startedBy = process.ppid;
+const startedUnder = printsOnly ? Promise.resolve(null) : parentOfProcess(startedBy);
 
 // Every server (not the commands that only print) keeps ~/.mcp-teams/server.log (#143): metadata
 // to trace an outage after a restart. The role is the bridge's once it exists. With it, the event
@@ -133,26 +139,28 @@ if (diagnostics) {
   watchState({ bridge, diagnostics, onDisk: restartCheck(RUNNING_BUILD, BUILD_DIR), everyMs: msFromEnv(process.env.TEAMS_MCP_WATCH_MS) });
 }
 
-// A signal closes at once. When the AI session ends (stdin closes), this server takes no more MCP
-// calls, but as the hub it first lets other sessions' running calls finish for a few seconds
-// (#112, ported from mcp-newoutlook src/index.ts, PR #108 there); TEAMS_MCP_DRAIN_MS changes that
-// bound (tests). The process exits soon after the bound even if a connection is slow to close.
-const shutdown = (signal: string) => async () => {
-  exitReason = signal;
-  await bridge.close();
-  process.exit(0);
-};
-process.on("SIGINT", shutdown("SIGINT"));
-process.on("SIGTERM", shutdown("SIGTERM"));
-process.stdin.on("close", async () => {
-  exitReason = "stdin-closed";
-  const fromEnv = process.env.TEAMS_MCP_DRAIN_MS ? Number(process.env.TEAMS_MCP_DRAIN_MS) : NaN;
-  const drainMs = Number.isFinite(fromEnv) && fromEnv >= 0 ? fromEnv : DRAIN_MAX_WAIT_MS; // 0: no drain
-  setTimeout(() => ((exitReason = "drain-timeout"), process.exit(0)), drainMs + 2_000).unref();
-  await server.close().catch(() => {});
-  await bridge.drainAndClose(drainMs);
-  process.exit(0);
+// A signal closes at once, and exits within SIGNAL_EXIT_MS even if the bridge is slow to close. When
+// the AI session is gone (stdin closes, the parent that started this server is gone, or stdout
+// breaks: mcp-newoutlook #288), this server takes no more MCP calls, but as the hub it first lets
+// other sessions' running calls finish for a few seconds (#112, ported from mcp-newoutlook
+// src/index.ts, PR #108 there); TEAMS_MCP_DRAIN_MS changes that bound (tests). The process exits
+// soon after the bound even if a connection is slow to close.
+const fromEnv = process.env.TEAMS_MCP_DRAIN_MS ? Number(process.env.TEAMS_MCP_DRAIN_MS) : NaN;
+const drainMs = Number.isFinite(fromEnv) && fromEnv >= 0 ? fromEnv : DRAIN_MAX_WAIT_MS; // 0: no drain
+const ending = serverEnding({
+  close: () => bridge.close(),
+  drain: async () => {
+    await server.close().catch(() => {});
+    await bridge.drainAndClose(drainMs);
+  },
+  drainMs,
+  exit: (code) => process.exit(code),
+  setReason: (reason) => void (exitReason = reason),
 });
+for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"] as const) process.on(signal, () => void ending.signal(signal));
+process.stdin.on("close", () => void ending.sessionGone("stdin-closed"));
+watchParent({ parent: startedBy, grandparent: startedUnder, onGone: () => void ending.sessionGone("parent-gone") });
+watchStdout(process.stdout, (reason) => void ending.sessionGone(reason));
 
 // After an update of the folder, reloads the extension (one of 0.2.0 or older reloads
 // itself when it connects, see bridge.ts).
