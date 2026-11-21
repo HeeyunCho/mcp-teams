@@ -64,7 +64,8 @@ if (command === "--version" || command === "version") {
 
 // Keeps the extension in step with this server: once setup has installed it, a newer
 // release (npx fetches it on start) updates the installed folder, never downgrading it (an
-// older copy still cached somewhere). The folder also gets the pairing token, which the
+// older copy still cached somewhere). It compares the folder's extension version with the packaged
+// extension's (#219: the extension has its own line). The folder also gets the pairing token, which the
 // extension proves itself with. Both happen before the bridge starts, because an extension
 // of 0.2.0 or older that connects is asked to reload into what is in the folder.
 let extensionUpdated = false;
@@ -104,7 +105,9 @@ if (command === "reload-extension") {
   try {
     if (!bridge.connected) throw new Error("The extension is not connected. Is Chrome open with the extension installed?");
     const { before, after } = await bridge.reloadExtension();
-    console.log(`Extension reloaded: ${before ?? "?"} → ${after}${after === SERVER_VERSION ? "" : ` (server is ${SERVER_VERSION})`}`);
+    // #219: the extension has its own version line; compare it with the folder it loads, not the server.
+    const inFolder = installedVersion() ?? installedVersion(PACKAGED_EXTENSION_DIR);
+    console.log(`Extension reloaded: ${before ?? "?"} → ${after}${inFolder === null || after === inFolder ? "" : ` (its folder has ${inFolder})`}`);
     await bridge.close();
     exitReason = "reload-done";
     process.exit(0);
@@ -178,9 +181,11 @@ process.stdout.on("error", (err: NodeJS.ErrnoException) => {
 // After an update of the folder, reloads the extension (one of 0.2.0 or older reloads
 // itself when it connects, see bridge.ts).
 void (async () => {
-  if (!extensionUpdated) return;
+  // #219: the version the folder now holds (the extension's own line), never the server's.
+  const wanted = installedVersion();
+  if (!extensionUpdated || wanted === null) return;
   // #111: retried while the hub changes hands right after the update (see reloadUntilUpdated).
-  const r = await reloadUntilUpdated(bridge, installedVersion() ?? SERVER_VERSION);
+  const r = await reloadUntilUpdated(bridge, wanted);
   if (r.ok) console.error(`[mcp-teams ${SERVER_VERSION}] extension updated: ${r.before ?? "?"} → ${r.after}`);
   // From 0.3.47 on, the extension also reloads itself when its folder holds a newer version.
   else console.error(`[mcp-teams] extension update needs a reload in the browser: ${r.error}`);
