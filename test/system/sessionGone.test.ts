@@ -139,7 +139,7 @@ describe("mcp-newoutlook #288: a server whose session is gone", { timeout: LISTE
     expect((await exited(p)).code).toBe(0);
     expect(Date.now() - t0).toBeLessThan(5_000);
     expect(stderr()).not.toMatch(/uncaught exception/);
-    expect(exit()).toMatch(/ reason=stdout-(epipe|error) code=0$/);
+    expect(exit()).toMatch(/ reason=stdout-closed code=0$/);
   });
 });
 

@@ -42,13 +42,13 @@ describe("mcp-newoutlook #288: a session that is gone", () => {
   it("drains once and exits with the first reason, however often it is reported", async () => {
     const drain = vi.fn(async () => {});
     const { e, exits, reason } = ending({ drain });
-    void e.sessionGone("stdout-epipe");
-    void e.sessionGone("stdout-epipe");
+    void e.sessionGone("stdout-closed");
+    void e.sessionGone("stdout-closed");
     void e.sessionGone("parent-gone");
     await vi.advanceTimersByTimeAsync(0);
     expect(drain).toHaveBeenCalledTimes(1);
     expect(exits).toEqual([0]);
-    expect(reason()).toBe("stdout-epipe");
+    expect(reason()).toBe("stdout-closed");
   });
 
   it("#112: exits 2 s after the drain's bound when the drain never ends, as drain-timeout", async () => {
@@ -160,24 +160,35 @@ describe("mcp-newoutlook #288: parentOfProcess", () => {
   });
 });
 
-describe("mcp-newoutlook #288: watchStdout", () => {
+describe("#215: watchStdout", () => {
   const epipe = () => Object.assign(new Error("write EPIPE"), { code: "EPIPE" });
 
-  it("reports a broken stdout once as stdout-epipe, and takes the errors after it without throwing", () => {
+  it("reports a closed stdout once as stdout-closed, and takes the errors after it without throwing", () => {
     const stdout = new EventEmitter();
     const onGone = vi.fn();
-    watchStdout(stdout, onGone);
+    watchStdout(stdout, onGone, () => {});
     for (let i = 0; i < 2_000; i++) stdout.emit("error", epipe());
     expect(onGone).toHaveBeenCalledTimes(1);
-    expect(onGone).toHaveBeenCalledWith("stdout-epipe");
+    expect(onGone).toHaveBeenCalledWith("stdout-closed");
   });
 
-  it("reports another write error as stdout-error", () => {
+  it("reports a destroyed stdout as stdout-closed too", () => {
     const stdout = new EventEmitter();
     const onGone = vi.fn();
-    watchStdout(stdout, onGone);
+    watchStdout(stdout, onGone, () => {});
     stdout.emit("error", Object.assign(new Error("destroyed"), { code: "ERR_STREAM_DESTROYED" }));
-    expect(onGone).toHaveBeenCalledWith("stdout-error");
+    expect(onGone).toHaveBeenCalledWith("stdout-closed");
+  });
+
+  it("passes another write error on without ending the session, as it was logged before", () => {
+    const stdout = new EventEmitter();
+    const onGone = vi.fn();
+    const onOther = vi.fn();
+    watchStdout(stdout, onGone, onOther);
+    const eio = Object.assign(new Error("write EIO"), { code: "EIO" });
+    stdout.emit("error", eio);
+    expect(onGone).not.toHaveBeenCalled();
+    expect(onOther).toHaveBeenCalledWith(eio);
   });
 });
 

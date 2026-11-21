@@ -132,16 +132,24 @@ export function parentOfProcess(pid: number): Promise<number | null> {
 }
 
 /**
- * stdout is the MCP channel: once a write to it fails (EPIPE when the session is gone), nobody reads
- * this server any more. Without a listener each failed write reached uncaughtException, which logged
- * and carried on (about 2,000 EPIPEs in 8 s). Reports the first error; the listener stays to take the rest.
+ * stdout is the MCP channel: once a write to it fails because it is closed (EPIPE, or a destroyed
+ * stream: #215), nobody reads this server any more. Without a listener each failed write reached
+ * uncaughtException, which logged and carried on (about 2,000 EPIPEs in 8 s). Reports the session
+ * gone once, as stdout-closed; the listener stays to take the rest. Any other write error is passed
+ * to onOther (logged as before) and doesn't end the session.
  */
-export function watchStdout(stdout: { on(event: "error", fn: (err: Error) => void): unknown }, onGone: (reason: string) => void): void {
+export function watchStdout(
+  stdout: { on(event: "error", fn: (err: Error) => void): unknown },
+  onGone: (reason: "stdout-closed") => void,
+  onOther: (err: Error) => void,
+): void {
   let reported = false;
   stdout.on("error", (err) => {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code !== "EPIPE" && code !== "ERR_STREAM_DESTROYED") return onOther(err);
     if (reported) return;
     reported = true;
-    onGone((err as NodeJS.ErrnoException).code === "EPIPE" ? "stdout-epipe" : "stdout-error");
+    onGone("stdout-closed");
   });
 }
 

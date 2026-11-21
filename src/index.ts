@@ -173,7 +173,7 @@ const ending = serverEnding({
 for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"] as const) process.on(signal, () => void ending.signal(signal));
 process.stdin.on("close", () => void ending.sessionGone("stdin-closed"));
 watchParent({ parent: startedBy, grandparent: startedUnder, onGone: () => void ending.sessionGone("parent-gone") });
-watchStdout(process.stdout, (reason) => void ending.sessionGone(reason));
+watchStdout(process.stdout, (reason) => void ending.sessionGone(reason), (err) => diagnostics?.crash("uncaught-exception", err));
 
 // After an update of the folder, reloads the extension (one of 0.2.0 or older reloads
 // itself when it connects, see bridge.ts).
