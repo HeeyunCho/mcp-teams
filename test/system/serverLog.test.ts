@@ -158,6 +158,32 @@ describe("#143: a real server's server.log", () => {
     await client.close();
   }, 60_000);
 
+  // #215: a client that went away while its server was starting (the short-lived servers of #212)
+  // left it writing to closed pipes. stdout's EPIPE was an uncaught exception, whose handler wrote
+  // to the closed stderr, which threw again: thousands of lines until the drain bound ended it.
+  it("#215: a client that closed stdout and stderr gets one line at most and a prompt stdout-closed exit", async () => {
+    const home = tempDir();
+    writeFileSync(join(home, "config.json"), JSON.stringify({ token: "tok", port: 0 }));
+    const p = spawn(process.execPath, ["dist/index.js"], { stdio: "pipe", env: { ...process.env, TEAMS_MCP_HOME: home } });
+    const exited = new Promise<number | null>((done) => p.on("exit", (code) => done(code)));
+    p.stdin.on("error", () => {}); // the server may be gone when the test closes stdin
+    // Closed before the server writes anything; stdin stays open, as the client's end may.
+    p.stdout.destroy();
+    p.stderr.destroy();
+    p.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "test", version: "0" } } })}\n`);
+    const logFile = join(home, "server.log");
+    const lines = () => (existsSync(logFile) ? readFileSync(logFile, "utf8").split("\n").filter(Boolean) : []);
+    await until(() => lines().some((l) => / (exit|uncaught-exception) /.test(l)), 30_000, "the server's first write to fail");
+    p.stdin.end(); // before the fix, only this (and the drain bound after it) ended the loop
+    expect(await exited).toBe(0);
+
+    expect(lines().filter((l) => /EPIPE/.test(l)).length).toBeLessThanOrEqual(1);
+    const at = (event: string) => Date.parse(lines().find((l) => l.includes(` ${event} `))!.split(" ")[0]);
+    expect(lines().at(-1)).toMatch(/ exit v=\S+ role=hub reason=stdout-closed code=0$/);
+    // A hub with no calls running closes at once; the drain bound (5 s) is for other sessions' calls.
+    expect(at("exit") - at("start")).toBeLessThan(5_000);
+  }, 60_000);
+
   it("#182: a slow status read's line gives the server's event-loop delay and utilisation", async () => {
     const home = tempDir();
     writeFileSync(join(home, "config.json"), JSON.stringify({ token: "tok", port: 0 }));

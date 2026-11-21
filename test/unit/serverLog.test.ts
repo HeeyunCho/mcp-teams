@@ -249,6 +249,20 @@ describe("#143: tool calls and crashes", () => {
       "unhandled-rejection v=0.3.62 role=none error=string",
     ]);
   });
+
+  it("#215: logs a broken pipe (EPIPE) once per process, whichever handler reports it; other crashes each time", () => {
+    const { log, lines } = setup();
+    const epipe = () => Object.assign(new Error("write EPIPE"), { code: "EPIPE", syscall: "write" });
+    for (let i = 0; i < 50; i++) log.crash("uncaught-exception", epipe());
+    log.crash("unhandled-rejection", epipe());
+    log.crash("uncaught-exception", new TypeError("x"));
+    log.crash("uncaught-exception", new TypeError("x"));
+    expect(lines().map((l) => l.replace(/^\S+ pid=\d+ /, ""))).toEqual([
+      "uncaught-exception v=0.3.62 role=none error=Error code=EPIPE",
+      "uncaught-exception v=0.3.62 role=none error=TypeError",
+      "uncaught-exception v=0.3.62 role=none error=TypeError",
+    ]);
+  });
 });
 
 describe("#143: what server.log never holds", () => {

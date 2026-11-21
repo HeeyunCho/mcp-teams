@@ -55,7 +55,7 @@ export interface DiagnosticLog {
    * loopDelayLogMs or more, then starts a new window. Nothing without a monitor.
    */
   loopDelayTick(): void;
-  /** An uncaught exception or unhandled rejection, by its name and code only. */
+  /** An uncaught exception or unhandled rejection, by its name and code only; an EPIPE only the first time (#215). */
   crash(kind: "uncaught-exception" | "unhandled-rejection", err: unknown): void;
 }
 
@@ -228,6 +228,7 @@ export function diagnosticLog(options: DiagnosticLogOptions): DiagnosticLog {
   const slowStatusMs = options.slowStatusMs ?? SLOW_STATUS_MS;
   let restartSeen = false;
   let stalledTicks = 0; // watch periods in a row whose loop stalled (#182)
+  let brokenPipeLogged = false; // #215: an EPIPE crash is logged once; its repeats say nothing new
   const fieldsOf = (err: unknown) => {
     try {
       return errorFields(err);
@@ -350,6 +351,10 @@ export function diagnosticLog(options: DiagnosticLogOptions): DiagnosticLog {
     },
     crash(kind, err) {
       const e = fieldsOf(err);
+      if (e.code === "EPIPE") {
+        if (brokenPipeLogged) return;
+        brokenPipeLogged = true;
+      }
       write(kind, { error: e.name, code: e.code });
     },
   };
