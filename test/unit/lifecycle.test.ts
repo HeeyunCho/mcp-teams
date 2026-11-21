@@ -36,6 +36,19 @@ describe("mcp-newoutlook #288: a signal", () => {
     expect(reason()).toBe("SIGTERM");
     expect(SIGNAL_EXIT_MS).toBeLessThanOrEqual(3_000);
   });
+  it("ends once: a later signal or a session gone keeps its reason, closes nothing again and starts no drain", async () => {
+    const close = vi.fn(async () => {});
+    const drain = vi.fn(async () => {});
+    const { e, exits, reason } = ending({ close, drain });
+    void e.signal("SIGTERM");
+    void e.sessionGone("stdin-closed");
+    void e.signal("SIGINT");
+    await vi.advanceTimersByTimeAsync(SIGNAL_EXIT_MS + 2_000);
+    expect(close).toHaveBeenCalledTimes(1);
+    expect(drain).not.toHaveBeenCalled();
+    expect(reason()).toBe("SIGTERM");
+    expect(exits[0]).toBe(0);
+  });
 });
 
 describe("mcp-newoutlook #288: a session that is gone", () => {

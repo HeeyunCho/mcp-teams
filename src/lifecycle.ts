@@ -22,13 +22,14 @@ export interface EndingOptions {
 
 export function serverEnding(o: EndingOptions) {
   let gone = false;
+  let signalled = false;
   return {
     /**
      * The session is gone (stdin closed, parent gone, stdout broken): the #112 drain, once, whichever
      * reports it first.
      */
     async sessionGone(reason: string): Promise<void> {
-      if (gone) return;
+      if (gone || signalled) return;
       gone = true;
       o.setReason(reason);
       // the process exits soon after the bound even if a connection is slow to close
@@ -36,8 +37,14 @@ export function serverEnding(o: EndingOptions) {
       await o.drain();
       o.exit(0);
     },
-    /** SIGINT, SIGTERM, SIGHUP: close at once, and exit within SIGNAL_EXIT_MS whatever the bridge does. */
+    /**
+     * SIGINT, SIGTERM, SIGHUP: close at once, and exit within SIGNAL_EXIT_MS whatever the bridge does.
+     * The first signal counts (#234): a later one, or the session going with it (stdin closes as the
+     * AI app ends), keeps its reason and closes nothing again. A signal during a drain still ends it.
+     */
     async signal(name: string): Promise<void> {
+      if (signalled) return;
+      signalled = true;
       o.setReason(name);
       setTimeout(() => o.exit(0), SIGNAL_EXIT_MS).unref();
       await o.close();
