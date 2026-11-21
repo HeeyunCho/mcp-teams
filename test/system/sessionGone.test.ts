@@ -112,14 +112,12 @@ describe("#234: a server whose session is gone", { timeout: LISTEN_MS + 15_000 }
     client.kill("SIGKILL");
     await until(() => !processExists(server), 5_000, "the orphaned server to exit");
     expect(Date.now() - t0).toBeLessThan(5_000);
+    // On Windows libuv puts a child in a job object that is killed with its parent, so the server
+    // ends with the client (no orphan, and no exit line of its own): that it is gone is the check.
+    if (process.platform === "win32") return;
+    expect(processExists(holder)).toBe(true); // its stdin never closed
     await until(() => exit() !== null, 2_000, "the exit in server.log");
-    if (process.platform === "win32") {
-      // The holder can't keep the server's stdin open there, so the parent's exit may close it first.
-      expect(exit()).toMatch(/ reason=(parent-gone|stdin-closed) code=0$/);
-    } else {
-      expect(processExists(holder)).toBe(true); // its stdin never closed
-      expect(exit()).toMatch(/ reason=parent-gone code=0$/);
-    }
+    expect(exit()).toMatch(/ reason=parent-gone code=0$/);
   });
 
   // Under `npx -y mcp-teams@latest`, npm exec sits between the AI app and the server, and outlives
