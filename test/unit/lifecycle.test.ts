@@ -82,6 +82,28 @@ describe("#234: a session that is gone", () => {
     expect(exits).toEqual([0]);
     expect(reason()).toBe("SIGTERM");
   });
+
+  it("a signal during the drain keeps its reason when the drain's timer fires first (TEAMS_MCP_DRAIN_MS=0)", async () => {
+    const { e, exits, reason } = ending({ drain: never, close: never, drainMs: 0 });
+    void e.sessionGone("stdin-closed");
+    await vi.advanceTimersByTimeAsync(100);
+    void e.signal("SIGTERM");
+    // the drain's timer (drainMs + 2 s) fires before the signal's own (SIGNAL_EXIT_MS)
+    await vi.advanceTimersByTimeAsync(SIGNAL_EXIT_MS);
+    expect(exits[0]).toBe(0);
+    expect(reason()).toBe("SIGTERM");
+  });
+
+  it("a drain that already timed out keeps drain-timeout when a signal comes after it", async () => {
+    const { e, exits, reason } = ending({ drain: never, close: never, drainMs: 0 });
+    void e.sessionGone("stdin-closed");
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(reason()).toBe("drain-timeout");
+    void e.signal("SIGTERM");
+    await vi.advanceTimersByTimeAsync(SIGNAL_EXIT_MS);
+    expect(exits[0]).toBe(0);
+    expect(reason()).toBe("drain-timeout");
+  });
 });
 
 describe("#234: watchParent", () => {
