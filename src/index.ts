@@ -19,9 +19,10 @@ const command = process.argv[2];
 const printsOnly = ["token", "version", "--version"].includes(command);
 
 // The parent that started this server and its own parent (npm exec's AI app under npx), recorded
-// first: the AI app may exit while the server starts (mcp-newoutlook #288; see watchParent below).
+// first: the AI app may exit while the server starts (#234; see watchParent below).
 const startedBy = process.ppid;
-const startedUnder = printsOnly ? Promise.resolve(null) : parentOfProcess(startedBy);
+const underNpx = process.env.npm_command === "exec";
+const startedUnder = printsOnly || !underNpx ? Promise.resolve(null) : parentOfProcess(startedBy);
 
 // Every server (not the commands that only print) keeps ~/.mcp-teams/server.log (#143): metadata
 // to trace an outage after a restart. The role is the bridge's once it exists. With it, the event
@@ -172,7 +173,7 @@ const ending = serverEnding({
 });
 for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"] as const) process.on(signal, () => void ending.signal(signal));
 process.stdin.on("close", () => void ending.sessionGone("stdin-closed"));
-watchParent({ parent: startedBy, grandparent: startedUnder, onGone: () => void ending.sessionGone("parent-gone") });
+watchParent({ parent: startedBy, underNpx, grandparent: startedUnder, onGone: () => void ending.sessionGone("parent-gone") });
 watchStdout(process.stdout, (reason) => void ending.sessionGone(reason), (err) => diagnostics?.crash("uncaught-exception", err));
 
 // After an update of the folder, reloads the extension (one of 0.2.0 or older reloads

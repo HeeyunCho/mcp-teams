@@ -1,5 +1,5 @@
 /**
- * How a server ends (found as mcp-newoutlook #288; the same held here): servers whose AI session
+ * How a server ends (#234, found as mcp-newoutlook #288; the same held here): servers whose AI session
  * had exited kept running under PID 1 and ignored SIGTERM, because closing the bridge could hang
  * while a socket lingered and nothing else ended them.
  */
@@ -61,7 +61,13 @@ export interface ParentWatch {
    * app that exits while the server is still starting is still noticed.
    */
   parent?: number;
-  /** The parent's own parent PID, looked up when the process started (default: parentOf(parent) now). */
+  /**
+   * Whether npx started this server (npm sets npm_command=exec): only then is the parent npm exec,
+   * whose own parent is watched. Otherwise the parent is the AI app, and its parent (a launcher that
+   * may exit while the app runs) says nothing about the session.
+   */
+  underNpx?: boolean;
+  /** The parent's own parent PID, looked up when the process started (default under npx: parentOf(parent) now). */
   grandparent?: Promise<number | null>;
   ppid?: () => number;
   /** Whether a process with this PID exists. */
@@ -86,7 +92,8 @@ export function watchParent({
   parent = ppid(),
   alive = processExists,
   parentOf = parentOfProcess,
-  grandparent = parentOf(parent),
+  underNpx = process.env.npm_command === "exec",
+  grandparent = underNpx ? parentOf(parent) : Promise.resolve(null),
   everyMs = 1_500,
   ancestorEveryMs = 3_000,
 }: ParentWatch): () => void {
@@ -108,7 +115,7 @@ export function watchParent({
   );
   void grandparent.then((first) => {
     // The parent already under PID 1 (or unknown) at start: nothing more to notice.
-    if (done || first === null || first <= 1) return;
+    if (done || !underNpx || first === null || first <= 1) return;
     let looking = false;
     const t = setInterval(async () => {
       if (looking) return;

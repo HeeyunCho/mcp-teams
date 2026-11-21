@@ -1,9 +1,8 @@
-// How a server ends (mcp-newoutlook #288): a signal always exits within its bound, and a session
+// How a server ends (#234, found as mcp-newoutlook #288): a signal always exits within its bound, and a session
 // that is gone (stdin closed, parent gone, stdout broken) ends the server through the #112 drain.
-import { spawn } from "node:child_process";
 import { EventEmitter } from "node:events";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { SIGNAL_EXIT_MS, parentOfProcess, processExists, serverEnding, watchParent, watchStdout } from "../../src/lifecycle.js";
+import { SIGNAL_EXIT_MS, serverEnding, watchParent, watchStdout } from "../../src/lifecycle.js";
 
 const never = () => new Promise<void>(() => {});
 
@@ -25,7 +24,7 @@ function ending(over: Partial<Parameters<typeof serverEnding>[0]> = {}) {
 beforeEach(() => void vi.useFakeTimers());
 afterEach(() => void vi.useRealTimers());
 
-describe("mcp-newoutlook #288: a signal", () => {
+describe("#234: a signal", () => {
   it("exits with 0 within its bound even when closing the bridge never ends", async () => {
     const { e, exits, reason } = ending({ close: never });
     void e.signal("SIGTERM");
@@ -51,7 +50,7 @@ describe("mcp-newoutlook #288: a signal", () => {
   });
 });
 
-describe("mcp-newoutlook #288: a session that is gone", () => {
+describe("#234: a session that is gone", () => {
   it("drains once and exits with the first reason, however often it is reported", async () => {
     const drain = vi.fn(async () => {});
     const { e, exits, reason } = ending({ drain });
@@ -85,7 +84,7 @@ describe("mcp-newoutlook #288: a session that is gone", () => {
   });
 });
 
-describe("mcp-newoutlook #288: watchParent", () => {
+describe("#234: watchParent", () => {
   /** A parent the test can end: as reparenting does, ppid turns to 1, or the PID stops existing. */
   const parent = (pid = 4242) => {
     const p = { ppid: pid, alive: true };
@@ -139,7 +138,7 @@ describe("mcp-newoutlook #288: watchParent", () => {
     it("reports the parent gone once npm exec itself is orphaned, though it still runs", async () => {
       const { app, parentOf } = npmExec();
       const onGone = vi.fn();
-      watchParent({ onGone, ppid: () => 4242, alive: () => true, parentOf, everyMs: 1_000, ancestorEveryMs: 3_000 });
+      watchParent({ onGone, ppid: () => 4242, alive: () => true, parentOf, underNpx: true, everyMs: 1_000, ancestorEveryMs: 3_000 });
       await vi.advanceTimersByTimeAsync(6_000);
       expect(onGone).not.toHaveBeenCalled();
       app.pid = 1;
@@ -151,25 +150,27 @@ describe("mcp-newoutlook #288: watchParent", () => {
 
     it("looks up the grandparent at most once per ancestorEveryMs", async () => {
       const { parentOf } = npmExec();
-      watchParent({ onGone: () => {}, ppid: () => 4242, alive: () => true, parentOf, everyMs: 1_000, ancestorEveryMs: 3_000 });
+      watchParent({ onGone: () => {}, ppid: () => 4242, alive: () => true, parentOf, underNpx: true, everyMs: 1_000, ancestorEveryMs: 3_000 });
       await vi.advanceTimersByTimeAsync(9_000);
       expect(parentOf.mock.calls.length).toBeLessThanOrEqual(4); // the first at start, then every 3 s
     });
 
+    it("doesn't look up the grandparent when not started by npx: the AI app's own launcher may exit while it runs", async () => {
+      const { app, parentOf } = npmExec();
+      const onGone = vi.fn();
+      watchParent({ onGone, ppid: () => 4242, alive: () => true, parentOf, underNpx: false, everyMs: 1_000, ancestorEveryMs: 3_000 });
+      app.pid = 1;
+      await vi.advanceTimersByTimeAsync(9_000);
+      expect(onGone).not.toHaveBeenCalled();
+      expect(parentOf).not.toHaveBeenCalled();
+    });
+
     it("doesn't watch the grandparent when the parent was already under PID 1 at start", async () => {
       const onGone = vi.fn();
-      watchParent({ onGone, ppid: () => 4242, alive: () => true, parentOf: async () => 1, everyMs: 1_000, ancestorEveryMs: 1_000 });
+      watchParent({ onGone, ppid: () => 4242, alive: () => true, parentOf: async () => 1, underNpx: true, everyMs: 1_000, ancestorEveryMs: 1_000 });
       await vi.advanceTimersByTimeAsync(5_000);
       expect(onGone).not.toHaveBeenCalled();
     });
-  });
-});
-
-describe("mcp-newoutlook #288: parentOfProcess", () => {
-  it.skipIf(process.platform === "win32")("reads a process's parent PID", async () => {
-    vi.useRealTimers();
-    expect(await parentOfProcess(process.pid)).toBe(process.ppid);
-    expect(await parentOfProcess(2 ** 22 + 12345)).toBeNull(); // no such process
   });
 });
 
@@ -202,15 +203,5 @@ describe("#215: watchStdout", () => {
     stdout.emit("error", eio);
     expect(onGone).not.toHaveBeenCalled();
     expect(onOther).toHaveBeenCalledWith(eio);
-  });
-});
-
-describe("mcp-newoutlook #288: processExists", () => {
-  it("is true for a running process and false for one that has exited", async () => {
-    vi.useRealTimers();
-    expect(processExists(process.pid)).toBe(true);
-    const child = spawn(process.execPath, ["-e", ""]);
-    await new Promise((r) => child.once("exit", r));
-    expect(processExists(child.pid!)).toBe(false);
   });
 });
