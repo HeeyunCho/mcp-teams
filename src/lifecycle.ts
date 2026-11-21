@@ -23,6 +23,7 @@ export interface EndingOptions {
 export function serverEnding(o: EndingOptions) {
   let gone = false;
   let signalled = false;
+  let timedOut = false;
   return {
     /**
      * The session is gone (stdin closed, parent gone, stdout broken): the #112 drain, once, whichever
@@ -32,20 +33,28 @@ export function serverEnding(o: EndingOptions) {
       if (gone || signalled) return;
       gone = true;
       o.setReason(reason);
-      // the process exits soon after the bound even if a connection is slow to close
-      setTimeout(() => (o.setReason("drain-timeout"), o.exit(0)), o.drainMs + 2_000).unref();
+      // the process exits soon after the bound even if a connection is slow to close; a signal that
+      // came during the drain keeps its reason, though this fires first with TEAMS_MCP_DRAIN_MS=0
+      setTimeout(() => {
+        if (!signalled) {
+          timedOut = true;
+          o.setReason("drain-timeout");
+        }
+        o.exit(0);
+      }, o.drainMs + 2_000).unref();
       await o.drain();
       o.exit(0);
     },
     /**
      * SIGINT, SIGTERM, SIGHUP: close at once, and exit within SIGNAL_EXIT_MS whatever the bridge does.
      * The first signal counts (#234): a later one, or the session going with it (stdin closes as the
-     * AI app ends), keeps its reason and closes nothing again. A signal during a drain still ends it.
+     * AI app ends), keeps its reason and closes nothing again. A signal during a drain still ends it;
+     * one after the drain timed out leaves drain-timeout as the reason.
      */
     async signal(name: string): Promise<void> {
       if (signalled) return;
       signalled = true;
-      o.setReason(name);
+      if (!timedOut) o.setReason(name);
       setTimeout(() => o.exit(0), SIGNAL_EXIT_MS).unref();
       await o.close();
       o.exit(0);
