@@ -62,7 +62,7 @@ export async function fakeExtension(port: number, opts: FakeExtensionOptions = {
     origin = EXTENSION_ORIGIN,
     browser = "Chrome",
     instance = "profile-1",
-    version = "0.0.0",
+    version = "0.1.0", // MIN_EXTENSION: below it the hub answers only status and reload (#219)
     pong = true,
     reconnect: again = true,
     capabilities,

@@ -243,11 +243,61 @@ export const DEFAULT_BRIDGE_OPTIONS: Readonly<Timings> = Object.freeze({
  * send waits for the user's click (up to minutes), so it must not hold a turn others wait for.
  */
 const UNQUEUED = new Set(["status", "reload", "reloadAll", "requestSend"]);
+/** The calls an extension below MIN_EXTENSION still gets (#219): enough to see it and update it. */
+const BELOW_FLOOR_ALLOWED = new Set(["status", "reload", "reloadAll"]);
 /** Calls the extension fails without a Teams tab open (requireTeamsTab in extension/background.js). */
 const NEEDS_TEAMS_TAB = new Set(["listTeams", "listChats"]);
 
-/** The oldest extension that closes a send's confirmation window on {type:"cancel"} (1.2). Sends need it. */
-export const MIN_SEND_EXTENSION = "0.2.13";
+/**
+ * The protocol features of the extension that the server checks before relying on them (#219),
+ * each with the first version that had it: an extension that declares no features (every one up
+ * to 0.3.79) is taken to have those its version had. The extension's CAPABILITIES
+ * (extension/features.js) must list each; a new request method, or a changed request or response
+ * shape, gets one here in the same change.
+ * - "cancelSend": closes a send's confirmation window on {type:"cancel"} (#22). Sends need it.
+ * - "sizeCheck": answers a reply too large for its connection with a short error instead (#193).
+ */
+export const EXTENSION_FEATURES: Readonly<Record<string, string>> = Object.freeze({ cancelSend: "0.2.13", sizeCheck: "0.3.78" });
+
+/** The oldest extension that closes a send's confirmation window, for one that declares no features. */
+export const MIN_SEND_EXTENSION = EXTENSION_FEATURES.cancelSend;
+
+/**
+ * The oldest extension the hub serves (#219); today the first one released, so every released
+ * extension is served. The extension has its own version line (1.0.0 on), so this is the one
+ * version floor: what an extension can do beyond it is decided by the features it declares. Raise
+ * it only to drop an extension the server can no longer work with at all. One below it (a readable
+ * version) is accepted, so get_version can say what to do, but gets no calls but status and reload.
+ */
+export const MIN_EXTENSION = "0.1.0";
+
+const isVersion = (v: unknown): v is string => typeof v === "string" && /^\d+\.\d+\.\d+$/.test(v);
+
+type Declaring = Pick<ExtensionInfo, "version" | "capabilities">;
+
+/**
+ * What an extension can do: the features it declares, or, when it declares none (one from before
+ * #219), the ones its version had. An unreadable version has none.
+ */
+export function featuresOfExtension(e: Declaring | undefined): string[] {
+  const declared = e?.capabilities?.features ?? [];
+  if (declared.length) return declared;
+  const version = e?.version;
+  return isVersion(version) ? Object.keys(EXTENSION_FEATURES).filter((f) => !isNewer(EXTENSION_FEATURES[f], version)) : [];
+}
+
+/** The checked features (EXTENSION_FEATURES) an extension lacks. */
+export const missingFeatures = (e: Declaring): string[] => {
+  const has = featuresOfExtension(e);
+  return Object.keys(EXTENSION_FEATURES).filter((f) => !has.includes(f));
+};
+
+/** False for an extension whose readable version is below MIN_EXTENSION; an unreadable one (a dev build) is served. */
+export const extensionSupported = (e: Pick<ExtensionInfo, "version">): boolean => !isNewer(MIN_EXTENSION, e.version);
+
+/** What to do about an old extension, for a copy mcp-teams installed and for one from a browser's store. */
+const UPDATE_EXTENSION =
+  "Update the extension: a copy mcp-teams installed updates with reload_extension (it loads the version mcp-teams put in its folder; run `npx mcp-teams setup` if it was loaded from another folder), and one from the Chrome Web Store or Edge Add-ons updates from the store (chrome://extensions, Update).";
 
 /**
  * What a call fails with when it was never sent (it waited for a turn, or was refused before it
@@ -266,17 +316,24 @@ export const NOT_SENT = Object.freeze({
   hubClosing: "The mcp-teams hub is closing (the AI session that ran it ended); this call was not sent. Try again in a few seconds.",
   /** A send on an extension that can't close its confirmation window when the send is withdrawn. */
   extensionTooOld: (version: unknown) =>
-    `Nothing was sent: the browser extension (${String(version)}) is older than ${MIN_SEND_EXTENSION} and can't close its confirmation window when the AI stops waiting, so a late click could still post. Update it with reload_extension (it loads the version mcp-teams put in its folder), or run \`npx mcp-teams setup\` if it was loaded from another folder, then send again.`,
+    `Nothing was sent: the browser extension (${String(version)}) doesn't declare cancelSend (for one that declares no features: it is older than ${MIN_SEND_EXTENSION}), so it can't close its confirmation window when the AI stops waiting, and a late click could still post. ${UPDATE_EXTENSION} Then send again.`,
+  /** Any call but status and reload, on an extension below MIN_EXTENSION (#219). */
+  extensionUnsupported: (version: unknown) => `Nothing was sent: ${unsupportedExtension(version)}`,
 });
 
-/** True when an extension of `version` closes its confirmation window on a cancel (an unreadable version doesn't). */
-export function closesSendWindow(version: unknown): boolean {
-  return typeof version === "string" && /^\d+\.\d+\.\d+$/.test(version) && !isNewer(MIN_SEND_EXTENSION, version);
+/** Why an extension below MIN_EXTENSION gets no calls, and what to do (get_version's hint, #219). */
+export function unsupportedExtension(version: unknown): string {
+  return `the browser extension (${String(version)}) is older than ${MIN_EXTENSION}, the oldest mcp-teams works with. ${UPDATE_EXTENSION}`;
+}
+
+/** True when an extension closes its confirmation window on a cancel: it has cancelSend (see featuresOfExtension). */
+export function closesSendWindow(e: Declaring | undefined): boolean {
+  return featuresOfExtension(e).includes("cancelSend");
 }
 
 /** The version to name when a send is refused: of the extensions that can't close the window, the oldest (an unreadable one first). */
 function oldestTooOld(extensions: ExtensionInfo[]): string {
-  const tooOld = extensions.map((e) => e.version).filter((v) => !closesSendWindow(v));
+  const tooOld = extensions.filter((e) => !closesSendWindow(e)).map((e) => e.version);
   const unreadable = tooOld.find((v) => !/^\d+\.\d+\.\d+$/.test(v));
   return unreadable ?? tooOld.reduce<string | undefined>((a, v) => (a === undefined || isNewer(a, v) ? v : a), undefined) ?? "unknown";
 }
@@ -632,6 +689,7 @@ export class ExtensionBridge {
   private preferred?: BridgeSocket; // hub: the extension that last answered a call
   private hub?: BridgeSocket; // peer: the hub
   private peers = new Set<BridgeSocket>();
+  private handshaking = new Set<BridgeSocket>(); // hub: connections that haven't said hello yet (#230)
   private peerCalls = new Map<BridgeSocket, Map<string, AbortController>>(); // hub: each peer's calls, by the peer's id
   private peerMax = new WeakMap<BridgeSocket, number>(); // hub: the largest message each peer declared it takes (#193)
   /** Hub: per extension connection, its turns (keyed by session: null for the hub's own calls, else the peer) and who waits. */
@@ -641,6 +699,7 @@ export class ExtensionBridge {
   private peerBeat?: NodeJS.Timeout; // hub: pings the peers
   private retry?: NodeJS.Timeout;
   private retryBackoffMs?: number; // the next role=none wait before jitter; unset: retryMs
+  private hubRestarting = false; // the TCP hub refused our peer-hello with 1012: it just handed over (#230)
   private closed = false;
   private steppingDown = false;
   /** Hub: its session ended and it drains before closing (#112); it starts no new call. */
@@ -769,6 +828,11 @@ export class ExtensionBridge {
     if (await this.join(this.tcpTransport)) return (this.setRole("peer"), this.watchHost());
     this.role = "none";
     clearTimeout(this.retry);
+    if (this.hubRestarting) {
+      this.hubRestarting = false;
+      this.retry = setTimeout(() => void this.start(), 100 + Math.random() * 400);
+      return void this.retry.unref();
+    }
     const backoff = this.retryBackoffMs ?? this.opts.retryMs;
     this.retryBackoffMs = Math.min(backoff * 2, this.opts.retryMaxMs);
     // ±50% jitter, so a dozen servers don't retry in step; no wait exceeds retryMaxMs (#171).
@@ -916,7 +980,9 @@ export class ExtensionBridge {
    * sends (its event says 1006), and which a client could set to anything.
    */
   private refuse(ws: BridgeSocket, code: number, reason: string) {
-    this.refusedWith.set(ws, { code, reason });
+    // The first reason stands: e.g. a hand-over's "restarting" isn't overwritten by the auth
+    // timeout firing while the close handshake still runs (#230).
+    if (!this.refusedWith.has(ws)) this.refusedWith.set(ws, { code, reason });
     ws.close(code, reason);
   }
 
@@ -927,6 +993,7 @@ export class ExtensionBridge {
     let saw: "hello" | "peer-hello" | "none" = "none";
     const authTimer = setTimeout(() => !authed && this.refuse(ws, 4401, "auth timeout"), this.opts.authTimeoutMs);
     const challenge = newNonce();
+    this.handshaking.add(ws);
     ws.send(JSON.stringify({ type: "challenge", nonce: challenge }));
 
     ws.on("message", (raw) => {
@@ -940,6 +1007,10 @@ export class ExtensionBridge {
       if (!authed) {
         if (msg.type !== "hello" && msg.type !== "peer-hello") return void this.refuse(ws, 4401, "bad token");
         saw = msg.type;
+        // A hello that arrives after this hub stopped serving (it handed over between the challenge
+        // and the hello, and the hello crossed its close) is turned away, so the client races for
+        // the port again instead of staying on an ex-hub that pings it and serves nothing (#230).
+        if (this.role !== "hub" || ws.readyState !== OPEN) return void this.refuse(ws, 1012, "restarting");
         // The native host takes extensions only on native messaging (or relayed on its socket): on
         // its TCP port it serves peers only (ADR decision 4, #123 decision 9).
         if (via === "tcp" && this.isHost && msg.type === "hello") {
@@ -960,6 +1031,7 @@ export class ExtensionBridge {
         }
         authed = true;
         clearTimeout(authTimer);
+        this.handshaking.delete(ws);
         const welcome = typeof msg.nonce === "string" ? { proof: proof(this.token, proofRole("server", via), msg.nonce) } : {};
         if (msg.type === "hello") this.acceptExtension(ws, msg, welcome, via, origin);
         else this.acceptPeer(ws, msg.version, welcome, via, capabilitiesOf(msg).maxMessageBytes);
@@ -977,6 +1049,7 @@ export class ExtensionBridge {
 
     ws.on("close", (code?: number) => {
       clearTimeout(authTimer);
+      this.handshaking.delete(ws);
       this.peers.delete(ws);
       const closing = this.sockets.get(ws);
       // Turned away before it was accepted (bad token, auth timeout, an old extension told to
@@ -1013,6 +1086,8 @@ export class ExtensionBridge {
    * turned away, and connecting ours replaces them.
    */
   private acceptExtension(ws: BridgeSocket, msg: any, welcome: object, via: Via, tcpOrigin?: string) {
+    // Only a hub takes extensions (onConnection already checks; #230).
+    if (this.role !== "hub") return void this.refuse(ws, 1012, "restarting");
     // Not on TCP: native messaging, where Chrome checked it is ours, or a hello on the hub socket,
     // which is another browser's host relaying its extension (that host checked it).
     const onTcp = via === "tcp";
@@ -1111,7 +1186,8 @@ export class ExtensionBridge {
   /**
    * Our extension up to 0.2.0 can't prove it knows the token, and anything can claim its
    * origin, so it gets no calls. It is asked once to reload, which loads the update this
-   * server put in its folder, and the new version connects with a proof.
+   * server put in its folder, and the new version connects with a proof. Such an extension is
+   * always a copy mcp-teams installed: web store copies start at 1.0.0 (#219).
    */
   private reloadLegacy(ws: BridgeSocket) {
     if (!this.legacyReloaded) {
@@ -1122,6 +1198,8 @@ export class ExtensionBridge {
   }
 
   private acceptPeer(ws: BridgeSocket, peerVersion: unknown, welcome: object, via: Via, maxMessageBytes: number | null) {
+    // Only a hub takes peers (onConnection already checks; #230).
+    if (this.role !== "hub") return void this.refuse(ws, 1012, "restarting");
     this.peers.add(ws);
     if (maxMessageBytes) this.peerMax.set(ws, maxMessageBytes);
     this.accepted.add(ws);
@@ -1193,8 +1271,12 @@ export class ExtensionBridge {
     this.rejectAll(reason);
     for (const s of this.sockets.keys()) s.close(1012, "restarting");
     for (const peer of this.peers) peer.close(1012, "restarting");
+    // Also those still at their challenge: closing the listener (wss.close()) leaves them open, and
+    // their hello would otherwise reach a server that no longer serves (#230).
+    for (const ws of this.handshaking) this.refuse(ws, 1012, "restarting");
     this.sockets.clear();
     this.peers.clear();
+    this.handshaking.clear();
     this.preferred = undefined;
     this.extension = undefined;
     this.extensions = [];
@@ -1336,6 +1418,8 @@ export class ExtensionBridge {
    * previous one isn't draining its answers and is closed (1013).
    */
   private startPeerBeat(ws: BridgeSocket) {
+    // Only a hub pings peers: an ex-hub's beat would keep a stale peer's watchdog (#149) quiet (#230).
+    if (this.role !== "hub") return;
     this.alive.add(ws);
     ws.on("pong", () => this.alive.add(ws));
     if (this.peerBeat) return;
@@ -1488,6 +1572,12 @@ export class ExtensionBridge {
             if (code === 4401) this.listenError = "The mcp-teams native host on the hub socket rejected this server's token (run `npx mcp-teams setup` again).";
             return resolve(false);
           }
+          // An ex-hub turning this server away as it hands over (#230): not a port problem, and the
+          // new hub is there in a moment. start() retries as quickly as after a hub that closed.
+          if (code === 1012) {
+            this.hubRestarting = true;
+            return resolve(false);
+          }
           this.listenError =
             code === 4401
               ? `The mcp-teams server on port ${this.port} rejected this server's token.`
@@ -1611,6 +1701,9 @@ export class ExtensionBridge {
     }
     // The picked browser can close while the others' status is awaited (#172): take no turn for it.
     if (this.role === "hub" && (!this.sockets.has(target) || target.readyState !== OPEN)) throw new Error(NOT_SENT.gone);
+    // #219: an extension below the floor answers status and reload only (so it can be updated).
+    const below = this.role === "hub" && !BELOW_FLOOR_ALLOWED.has(method) ? this.sockets.get(target) : undefined;
+    if (below && !extensionSupported(below)) throw new Error(NOT_SENT.extensionUnsupported(below.version));
     // A send opens a window that must close once nobody waits for it: an extension that ignores
     // cancel would leave it open for a late click. The hub checks the extension it picked (for its
     // own sends and its peers'). A peer behind a hub that doesn't say it checks (one from before
@@ -1618,9 +1711,9 @@ export class ExtensionBridge {
     // one must close the window.
     if (method === "requestSend") {
       if (this.role === "hub") {
-        const version = this.sockets.get(target)?.version;
-        if (!closesSendWindow(version)) throw new Error(NOT_SENT.extensionTooOld(version ?? "unknown"));
-      } else if (!this.hubChecksSend && (!this.extensions.length || !this.extensions.every((e) => closesSendWindow(e.version)))) {
+        const picked = this.sockets.get(target);
+        if (!closesSendWindow(picked)) throw new Error(NOT_SENT.extensionTooOld(picked?.version ?? "unknown"));
+      } else if (!this.hubChecksSend && (!this.extensions.length || !this.extensions.every((e) => closesSendWindow(e)))) {
         throw new Error(NOT_SENT.extensionTooOld(oldestTooOld(this.extensions)));
       }
     }

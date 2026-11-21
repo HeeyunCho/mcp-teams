@@ -74,7 +74,7 @@
     }
   },
   "get_version": {
-    "description": "Shows the mcp-teams server version and build, the browser extension version, and whether Teams is reachable (which of its services have a session). restartNeeded: true means mcp-teams was updated on disk while this server still runs the old code: the user should reconnect it (in Claude Code: /mcp) and reload the extension.",
+    "description": "Shows the mcp-teams server version and build, the browser extension version (it has its own version line) and whether this server works with it (extensionSupported, and the missingFeatures it lacks), and whether Teams is reachable (which of its services have a session). restartNeeded: true means mcp-teams was updated on disk while this server still runs the old code: the user should reconnect it (in Claude Code: /mcp), and reload the extension if it changed too.",
     "inputSchema": {
       "type": "object",
       "properties": {},

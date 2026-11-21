@@ -58,6 +58,20 @@ _Avoid_: old server, outdated server
 One hub giving its place to a newer one without failing the calls it has in flight.
 _Avoid_: takeover, failover, step-down
 
+### The extension
+
+**Extension version line**:
+The extension's own versions (1.0.0 on, tagged `ext-vX.Y.Z`), which move only when the extension changes; the server never compares them with its own (ADR 0003).
+_Avoid_: matching versions, versionsMatch
+
+**Extension feature**:
+A protocol behaviour the extension declares in its hello (`cancelSend`, `sizeCheck`) and the server checks before relying on it; an extension that declares none is taken to have those its version had.
+_Avoid_: capability flag, minimum version
+
+**Web store copy**:
+The extension installed from the Chrome Web Store or Edge Add-ons, which updates from there, not from the folder mcp-teams keeps.
+_Avoid_: store copy (the **Store** is the launcher's folder of versions)
+
 ### Teams accounts
 
 **Unsure account**:
