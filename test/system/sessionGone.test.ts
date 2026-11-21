@@ -1,4 +1,4 @@
-// mcp-newoutlook #288, with the built server (dist/): a server whose session is gone ends within
+// #234 (found as mcp-newoutlook #288), with the built server (dist/): a server whose session is gone ends within
 // 5 s however it went (its parent exited, its stdin closed, its stdout broke, a signal), and
 // server.log says which. Before, orphans kept running under PID 1 and ignored SIGTERM.
 import { spawn, type ChildProcess } from "node:child_process";
@@ -12,13 +12,18 @@ import { until } from "../helpers/timing.js";
 /** As in drain.test.ts: a cold start can take about 5 s on a busy Windows box. */
 const LISTEN_MS = 15_000;
 const LISTENING = /bridge listening on ws:\/\/127\.0\.0\.1:\d+/;
+/** How long the holder of a server's stdin runs: past a test's timeout, so it never outlives a run by much. */
+const HOLDER_MS = 40_000;
 
 const dirs: string[] = [];
 const procs: ChildProcess[] = [];
 const pids: number[] = [];
+/** Files a server's PID is written to, read at cleanup: a test that fails early still ends it. */
+const pidFiles: string[] = [];
 afterEach(() => {
   for (const p of procs.splice(0)) p.kill("SIGKILL");
-  for (const pid of pids.splice(0)) if (processExists(pid)) process.kill(pid, "SIGKILL");
+  for (const f of pidFiles.splice(0)) if (existsSync(f)) pids.push(Number(readFileSync(f, "utf8")));
+  for (const pid of pids.splice(0)) if (pid > 0 && processExists(pid)) process.kill(pid, "SIGKILL");
   for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });
 });
 
@@ -29,7 +34,9 @@ function home() {
   writeFileSync(join(dir, "config.json"), JSON.stringify({ token: "tok", port: 0 }));
   const log = join(dir, "server.log");
   const exit = () => (existsSync(log) ? (readFileSync(log, "utf8").split("\n").find((l) => / exit /.test(l)) ?? null) : null);
-  return { env: { ...process.env, TEAMS_MCP_HOME: dir } as Record<string, string>, exit };
+  // Not under npx unless a test says so: running the tests through npx or npm sets npm_command.
+  const { npm_command: _, ...env } = process.env;
+  return { env: { ...env, TEAMS_MCP_HOME: dir } as Record<string, string>, exit };
 }
 
 /**
@@ -51,9 +58,12 @@ async function startServer(env: Record<string, string>) {
 
 /**
  * A stand-in for the AI app (the client, which the test kills): it starts the server, directly or
- * through a stand-in for `npm exec` that ends when its child does. A second child of the client
- * holds the write end of the server's stdin, so the server never sees EOF there. The server's
- * stderr goes to a file: the client's pipe breaks when it is killed.
+ * through a stand-in for `npm exec` (which sets npm_command=exec, as npx does) that ends when its
+ * child does. A second child of the client, the holder, holds the write end of the server's stdin,
+ * so the server never sees EOF there (not on Windows, where that handle isn't kept). The holder ends
+ * by itself after HOLDER_MS, and every PID is recorded as soon as it is known, so a failed test
+ * leaves nothing running. The server's stderr goes to a file: the client's pipe breaks when it is
+ * killed.
  */
 async function underClient(env: Record<string, string>, throughNpmExec: boolean) {
   const dir = mkdtempSync(join(tmpdir(), "mt-gone-chain-"));
@@ -62,7 +72,7 @@ async function underClient(env: Record<string, string>, throughNpmExec: boolean)
   const pidFile = join(dir, "server.pid");
   const server = JSON.stringify(resolve("dist/index.js"));
   const wrapper = `
-    const c = require("node:child_process").spawn(process.execPath, [${server}], { stdio: "inherit" });
+    const c = require("node:child_process").spawn(process.execPath, [${server}], { stdio: "inherit", env: { ...process.env, npm_command: "exec" } });
     require("node:fs").writeFileSync(${JSON.stringify(pidFile)}, String(c.pid));
     c.on("exit", (code) => process.exit(code ?? 1));
   `;
@@ -70,27 +80,31 @@ async function underClient(env: Record<string, string>, throughNpmExec: boolean)
     const { spawn } = require("node:child_process");
     const errFd = require("node:fs").openSync(${JSON.stringify(errFile)}, "a");
     const c = spawn(process.execPath, ${throughNpmExec ? `["-e", ${JSON.stringify(wrapper)}]` : `[${server}]`}, { stdio: ["pipe", "ignore", errFd] });
-    const holder = spawn(process.execPath, ["-e", "setInterval(() => {}, 60000)"], { stdio: ["ignore", "ignore", "ignore", c.stdin] });
+    const holder = spawn(process.execPath, ["-e", "setTimeout(() => {}, ${HOLDER_MS})"], { stdio: ["ignore", "ignore", "ignore", c.stdin] });
     process.stderr.write("child=" + c.pid + " holder=" + holder.pid + "\\n");
   `;
+  pidFiles.push(pidFile);
   const p = spawn(process.execPath, ["-e", client], { env, stdio: ["ignore", "ignore", "pipe"] });
   procs.push(p);
   let stderr = "";
-  p.stderr!.on("data", (d) => (stderr += d));
+  p.stderr!.on("data", (d) => {
+    stderr += d;
+    const known = /child=(\d+) holder=(\d+)/.exec(stderr);
+    if (known && !pids.includes(Number(known[2]))) pids.push(Number(known[1]), Number(known[2]));
+  });
   const serverErr = () => (existsSync(errFile) ? readFileSync(errFile, "utf8") : "");
   await until(() => LISTENING.test(serverErr()) && /holder=\d+/.test(stderr), LISTEN_MS, "the server to listen");
   const [, child, holder] = /child=(\d+) holder=(\d+)/.exec(stderr)!.map(Number);
   const serverPid = throughNpmExec ? Number(readFileSync(pidFile, "utf8")) : child;
-  pids.push(serverPid, child, holder);
   return { client: p, server: serverPid, holder, wrapper: throughNpmExec ? child : undefined };
 }
 
-const exited =(p: ChildProcess) =>
+const exited = (p: ChildProcess) =>
   new Promise<{ code: number | null; signal: string | null }>((r) =>
     p.exitCode !== null || p.signalCode !== null ? r({ code: p.exitCode, signal: p.signalCode }) : p.once("exit", (code, signal) => r({ code, signal })),
   );
 
-describe("mcp-newoutlook #288: a server whose session is gone", { timeout: LISTEN_MS + 15_000 }, () => {
+describe("#234: a server whose session is gone", { timeout: LISTEN_MS + 15_000 }, () => {
   it("is gone within 5 s once its parent exits, though its stdin stays open", async () => {
     const { env, exit } = home();
     const { client, server, holder } = await underClient(env, false);
@@ -98,9 +112,14 @@ describe("mcp-newoutlook #288: a server whose session is gone", { timeout: LISTE
     client.kill("SIGKILL");
     await until(() => !processExists(server), 5_000, "the orphaned server to exit");
     expect(Date.now() - t0).toBeLessThan(5_000);
-    expect(processExists(holder)).toBe(true); // its stdin never closed
     await until(() => exit() !== null, 2_000, "the exit in server.log");
-    expect(exit()).toMatch(/ reason=parent-gone code=0$/);
+    if (process.platform === "win32") {
+      // The holder can't keep the server's stdin open there, so the parent's exit may close it first.
+      expect(exit()).toMatch(/ reason=(parent-gone|stdin-closed) code=0$/);
+    } else {
+      expect(processExists(holder)).toBe(true); // its stdin never closed
+      expect(exit()).toMatch(/ reason=parent-gone code=0$/);
+    }
   });
 
   // Under `npx -y mcp-teams@latest`, npm exec sits between the AI app and the server, and outlives
@@ -144,7 +163,7 @@ describe("mcp-newoutlook #288: a server whose session is gone", { timeout: LISTE
 });
 
 // Windows has no SIGTERM or SIGHUP to catch: kill() there ends the process outright.
-describe.skipIf(process.platform === "win32")("mcp-newoutlook #288: a signal", { timeout: LISTEN_MS + 15_000 }, () => {
+describe.skipIf(process.platform === "win32")("#234: a signal", { timeout: LISTEN_MS + 15_000 }, () => {
   it.each(["SIGTERM", "SIGHUP", "SIGINT"] as const)("%s exits with 0 within 5 s and says so in server.log", async (signal) => {
     const { env, exit } = home();
     const { p } = await startServer(env);
