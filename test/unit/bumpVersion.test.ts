@@ -58,8 +58,10 @@ describe("bump-version VERSION_SAMPLES", () => {
   // One bump serves every file's case: the first case to run makes it, the others reuse its result.
   let bumped: ReturnType<typeof runBump> | undefined;
   it.each(VERSION_FILE_NAMES)("%s sample round-trips through a real bump to the new version", async (f) => {
-    const r = await (bumped ??= runBump("0.2.16", ["patch"]));
+    // Both lines at 0.2.16 and both moving (the extension changed since its tag), so every file gets 0.2.17.
+    const r = await (bumped ??= runBump("0.2.16", ["patch"], { tags: ["ext-v0.2.16"], changes: ["fix: x\n"] }));
     expect(r.out).toBe("0.2.17");
+    expect(r.extension).toBe("0.2.17");
     expect(r.texts[f]).toBe(VERSION_SAMPLES[f]("0.2.17"));
   });
 });
@@ -135,21 +137,30 @@ type RunBumpOptions = {
   via?: Via;
   /** The git tags an in-process bump sees. */
   tags?: string[];
+  /** The extension's commit messages since its tag that an in-process bump sees (#219; none: unchanged). */
+  changes?: string[];
 };
+
+/** What the CLI prints, `version=…` and `extension=…` lines, as bumpFiles returns it. */
+function parseCli(printed: string): { version: string; extension: string | null } {
+  const values = Object.fromEntries(printed.split(/\r?\n/).map((l) => l.split("=") as [string, string]));
+  return { version: values.version, extension: values.extension || null };
+}
 
 /**
  * Runs a bump with the CLI's arguments on a copy of the repository's version files in a temporary folder;
- * `out` is what the CLI prints (the new version).
+ * `out` is the package's new version and `extension` the extension's (null: it didn't move), as the CLI prints them.
  */
-async function runBump(version: string, args: string[], { stdin = "", files = {}, via = "bumpFiles", tags = [] }: RunBumpOptions = {}) {
+async function runBump(version: string, args: string[], { stdin = "", files = {}, via = "bumpFiles", tags = [], changes = [] }: RunBumpOptions = {}) {
   const root = makeRoot(version, files);
   try {
-    const out: string = via === "process" ? runScript(root, args, stdin) : await bumpFiles(root, args[0], async () => stdin, async () => tags);
+    const result =
+      via === "process" ? parseCli(runScript(root, args, stdin)) : await bumpFiles(root, args[0], async () => stdin, async () => tags, async () => changes);
     const read = (f: string) => JSON.parse(readFileSync(join(root, f), "utf8"));
     const texts: Record<string, string> = Object.fromEntries(
       VERSION_FILE_NAMES.map((f) => [f, readFileSync(join(root, f), "utf8")]),
     );
-    return { out, texts, pkg: read("package.json"), lock: read("package-lock.json"), manifest: read("extension/manifest.json") };
+    return { out: result.version, extension: result.extension, texts, pkg: read("package.json"), lock: read("package-lock.json"), manifest: read("extension/manifest.json") };
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -238,13 +249,15 @@ describe("bump-version with the new version's tag already taken", () => {
     expect(nextFreeVersion("0.3.21", ["0.3.21", "v0.3.21-rc.1", "v0.3.210", "release-v0.3.21"])).toBe("0.3.21");
   });
 
-  it("a bump from commit messages writes the free version to every file (0.3.20 to 0.3.22 past v0.3.21)", async () => {
-    const r = await runBump("0.3.20", [], { stdin: "fix: y\n\n\0", tags: ["v0.3.20", "v0.3.21"] });
+  it("a bump from commit messages writes the free version to every package file (0.3.20 to 0.3.22 past v0.3.21)", async () => {
+    // The extension changed too: its line moves past its own ext-v tags only, so v0.3.21 doesn't hold it back.
+    const r = await runBump("0.3.20", [], { stdin: "fix: y\n\n\0", tags: ["v0.3.20", "v0.3.21", "ext-v0.3.20"], changes: ["fix: y\n"] });
     expect(r.out).toBe("0.3.22");
     expect(r.pkg.version).toBe("0.3.22");
     expect(r.lock.version).toBe("0.3.22");
     expect(r.lock.packages[""].version).toBe("0.3.22");
-    expect(r.manifest.version).toBe("0.3.22");
+    expect(r.extension).toBe("0.3.21");
+    expect(r.manifest.version).toBe("0.3.21");
   });
 
   it("an explicit level moves past a taken tag by patches too", async () => {
@@ -508,15 +521,17 @@ function failureCases(names: readonly string[], extra: Record<string, string> = 
 
 describe("bump-version CLI", () => {
   // A real process: the script's entry, stdin and stdout, as the version workflow runs it.
-  it("reads NUL-separated commit messages from stdin, prints the new version and writes all three files", async () => {
+  it("reads NUL-separated commit messages from stdin, prints both new versions and writes the package files", async () => {
+    // The temporary repository has no tags: the extension's 0.2.16 has no ext-v tag yet, so it is released as it is.
     const r = await runBump("0.2.16", [], { stdin: "feat: autoSendTo\n\n\0fix: y\n\n\0", via: "process" });
     expect(r.out).toBe("0.2.17");
+    expect(r.extension).toBe("0.2.16");
     expect(r.pkg.version).toBe("0.2.17");
     expect(r.lock.version).toBe("0.2.17");
     expect(r.lock.packages[""].version).toBe("0.2.17");
     expect(r.lock.packages["node_modules/y"].version).toBe("9.9.9");
-    expect(r.manifest.version).toBe("0.2.17");
-    for (const f of VERSION_FILE_NAMES) expect(r.texts[f], f).toContain('"0.2.17"');
+    expect(r.manifest.version).toBe("0.2.16");
+    for (const f of ["package.json", "package-lock.json"]) expect(r.texts[f], f).toContain('"0.2.17"');
   });
 
   it.each([
@@ -548,7 +563,7 @@ describe("bump-version CLI", () => {
     try {
       const link = join(linkDir, "root");
       symlinkSync(root, link, "dir");
-      expect(runScript(link, ["patch"])).toBe("0.2.17");
+      expect(parseCli(runScript(link, ["patch"])).version).toBe("0.2.17");
     } finally {
       rmSync(linkDir, { recursive: true, force: true });
       rmSync(root, { recursive: true, force: true });
@@ -642,5 +657,63 @@ describe("nextVersion with an invalid version", () => {
   // A real process: the workflow relies on the script exiting non-zero.
   it("makes the CLI exit with an error naming the bad version", async () => {
     await expect(runBump("1.2", ["patch"], { via: "process" })).rejects.toThrow(/invalid version "1\.2"/i);
+  });
+});
+
+// #219: the extension has its own version line. The package line (package.json, package-lock.json, tags vX.Y.Z)
+// moves on every release; the extension line (extension/manifest.json, tags ext-vX.Y.Z) only when files under
+// extension/ changed since its last tag, by the same commit-message rules applied to those changes.
+describe("#219: the extension's own version line", () => {
+  /** A root with the package at `pkg` and the extension at `ext`, bumped in-process. `changes`: the extension's commit messages since its tag. */
+  async function bumpLines(pkg: string, ext: string, { level = undefined as string | undefined, stdin = "fix: y\n\n\0", tags = [`ext-v${ext}`], changes = [] as string[] } = {}) {
+    const root = makeRoot(pkg, { "extension/manifest.json": JSON.stringify({ version: ext, version_name: ext }, null, 2) });
+    const asked: string[] = [];
+    try {
+      const manifestBefore = readFileSync(join(root, "extension/manifest.json"), "utf8");
+      const out = await bumpFiles(root, level, async () => stdin, async () => tags, async (tag: string) => (asked.push(tag), changes));
+      const read = (f: string) => JSON.parse(readFileSync(join(root, f), "utf8"));
+      const manifestUntouched = readFileSync(join(root, "extension/manifest.json"), "utf8") === manifestBefore;
+      return { out, asked, pkg: read("package.json"), lock: read("package-lock.json"), manifest: read("extension/manifest.json"), manifestUntouched };
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  }
+
+  it("a release with no change under extension/ leaves the manifest untouched and bumps the package alone", async () => {
+    const r = await bumpLines("0.3.79", "1.0.0");
+    expect(r.out).toEqual({ version: "0.3.80", extension: null });
+    expect(r.pkg.version).toBe("0.3.80");
+    expect(r.lock.version).toBe("0.3.80");
+    expect(r.manifestUntouched).toBe(true);
+    expect(r.asked).toEqual(["ext-v1.0.0"]); // the changes since the extension's own tag
+  });
+
+  it("a change under extension/ bumps the extension on its own line, from its own commit messages", async () => {
+    const fixed = await bumpLines("0.3.79", "1.0.0", { stdin: "feat: a server feature\n\n\0", changes: ["fix(extension): popup\n"] });
+    expect(fixed.out).toEqual({ version: "0.3.80", extension: "1.0.1" });
+    expect(fixed.manifest).toEqual({ version: "1.0.1", version_name: "1.0.1" });
+    expect((await bumpLines("0.3.79", "1.0.1", { changes: ["feat(extension): new request\n"] })).out).toEqual({ version: "0.3.80", extension: "1.1.0" });
+  });
+
+  it("moves past a taken ext-v tag, and a package tag of the same number doesn't block the extension", async () => {
+    const r = await bumpLines("0.3.79", "1.0.0", { tags: ["ext-v1.0.0", "ext-v1.0.1", "v1.0.2", "v0.3.80"], changes: ["fix: x\n"] });
+    expect(r.out).toEqual({ version: "0.3.81", extension: "1.0.2" });
+  });
+
+  it("an extension version without its ext-v tag yet is released as it is, never lower (the first release of 1.0.0)", async () => {
+    const r = await bumpLines("0.3.79", "1.0.0", { tags: ["v0.3.79"] });
+    expect(r.out).toEqual({ version: "0.3.80", extension: "1.0.0" });
+    expect(r.manifest.version).toBe("1.0.0");
+    expect(r.asked).toEqual([]);
+  });
+
+  it("an explicit level bumps the extension by that level only when it changed", async () => {
+    expect((await bumpLines("0.3.79", "1.0.0", { level: "minor" })).out).toEqual({ version: "0.4.0", extension: null });
+    expect((await bumpLines("0.3.79", "1.0.0", { level: "minor", changes: ["fix: x\n"] })).out).toEqual({ version: "0.4.0", extension: "1.1.0" });
+  });
+
+  it("nextFreeVersion takes the tag prefix of the line", () => {
+    expect(nextFreeVersion("1.0.0", ["v1.0.0", "ext-v1.0.0"], "ext-v")).toBe("1.0.1");
+    expect(nextFreeVersion("1.0.0", ["v1.0.0"], "ext-v")).toBe("1.0.0");
   });
 });
