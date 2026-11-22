@@ -190,7 +190,7 @@ describe("MCP server end to end", () => {
     expect((await call("read_transcript", { meeting: "Sync", from: "ten" })).isError).toBe(true);
   });
 
-  // #179: one search reads at most 20 meetings, so it stays within its Teams request budget.
+  // #179: one search reads at most 20 meetings, so a search across them stays within its Teams request budget.
   it("search_transcripts takes at most 20 meetings", async () => {
     expect((await call("search_transcripts", { query: "budget", meetings: 20 })).data.params).toEqual({ query: "budget", meetings: 20, limit: 30 });
     expect((await call("search_transcripts", { query: "budget", meetings: 21 })).isError).toBe(true);
