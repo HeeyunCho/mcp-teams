@@ -317,7 +317,7 @@ function open(target: string, browser?: Browser) {
   }
 }
 
-/** Our extension's connections: any id in the trusted list (#216), a store install too. */
+/** Our extension's connections: any id in the trusted list (#216), a web store install too. */
 const ours = (bridge: ExtensionBridge, ids: ExtensionIds) => bridge.extensions.filter((e) => isTrustedOrigin(e.origin, ids));
 
 async function waitFor(cond: () => boolean, ms: number) {
@@ -411,7 +411,7 @@ function registerNativeHost(options: NativeHostOptions) {
 /**
  * yes: make the changes without asking. nativeHost: where the native host's registration looks and
  * what it registers (tests: a temporary dist/hub.js); left out, this computer and this copy.
- * trustedExtensionIds: the ids counted as our extension (#216; tests add a fictional store id);
+ * trustedExtensionIds: the ids counted as our extension (#216; tests add a fictional web store id);
  * left out, EXTENSION_IDS.
  */
 export async function setup(

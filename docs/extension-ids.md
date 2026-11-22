@@ -17,22 +17,22 @@ Where the list is used:
 
 Every check is an exact match against the list (`isTrustedOrigin`): no prefix, substring, case-insensitive or wildcard match, and no environment variable or config file can add an id.
 
-## Adding a store id
+## Adding a web store id
 
-1. Upload a first draft to the store; it shows the id. Never guess one.
+1. Upload a first draft to the web store; it shows the id. Never guess one.
 2. Add one line to `EXTENSION_IDS` in `src/extension.ts`, e.g. `chromeWebStore: "<the id>",`.
 3. Release, then run setup again on each computer (`npx mcp-teams setup`): it rewrites the native host manifest's `allowed_origins`. Until then Chrome or Edge refuses to start the native host for the new id.
 
 ## Two copies in one browser
 
-A store copy and a sideloaded copy have different ids and different instances, so both stay connected and are served as two browsers. When both are connected in the same browser, `get_version` (`twoCopies`) and setup suggest removing the sideloaded one.
+A web store copy and a sideloaded copy have different ids and different instances, so both stay connected and are served as two browsers. When both are connected in the same browser, `get_version` (`twoCopies`) and setup suggest removing the sideloaded one.
 
-## The store zip
+## The web store zip
 
 `npm run package-extension` (`scripts/package-extension.mjs`) writes `artifacts/mcp-teams-extension-<version>.zip` from `extension/`:
 
 - only the files in its `ALLOWED` list; a file in neither `ALLOWED` nor `SOURCE_ONLY` stops it;
 - never `pairing.json` (the pairing token): its presence stops it;
-- `manifest.json` without `key`. The `key` stays in the repo, since it fixes the sideloaded copy's id; replacing it with a store's public key would change every sideloaded copy's id and drop its `chrome.storage.local`.
+- `manifest.json` without `key`. The `key` stays in the repo, since it fixes the sideloaded copy's id; replacing it with a web store's public key would change every sideloaded copy's id and drop its `chrome.storage.local`.
 
 `test/unit/packageExtension.test.ts` checks the zip.

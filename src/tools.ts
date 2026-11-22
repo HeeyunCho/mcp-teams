@@ -204,7 +204,7 @@ export function registerTools(server: McpServer, bridge: ExtensionBridge, config
         ...(bridge.extensions.length > 1
           ? { browsers: bridge.extensions.map((e) => ({ browser: e.browser ?? null, version: e.version, capabilities: declaredBy(e) })) }
           : {}),
-        // #216: one browser with both the sideloaded copy and a store copy: suggest removing the sideloaded one.
+        // #216: one browser with both the sideloaded copy and a web store copy: suggest removing the sideloaded one.
         ...(twoCopies ? { twoCopies } : {}),
         ...supportOf(bridge.extension),
         bridge: bridge.listenError ?? (bridge.connected ? "connected" : "waiting for extension"),

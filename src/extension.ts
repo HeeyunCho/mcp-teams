@@ -11,11 +11,11 @@ import { CONFIG_DIR } from "./config.js";
 
 /**
  * The extension ids the server, the native host and setup trust as our extension (#216): the
- * sideloaded copy's, and each store's once it is known. Every check that asks "is this our
+ * sideloaded copy's, and each web store's once it is known. Every check that asks "is this our
  * extension?" goes through this list (isTrustedOrigin), and the native host manifest's
  * allowed_origins lists all of them (hostManifest in nativehost.ts).
  *
- * Adding a store id is one line here. The ids come from the store dashboards, assigned on the
+ * Adding a web store id is one line here. The ids come from the web store dashboards, assigned on the
  * first draft upload: the Chrome Web Store's from its Developer Dashboard (the item's id), Edge
  * Add-ons' from Partner Center (the extension's Store/CRX id). Don't guess one. After adding one,
  * run setup again on each computer: it rewrites the native host manifest's allowed_origins, and
@@ -52,7 +52,7 @@ export function isTrustedOrigin(origin: unknown, ids: ExtensionIds = EXTENSION_I
 }
 
 /**
- * The browsers where the sideloaded copy and a store copy (another trusted id) are both connected
+ * The browsers where the sideloaded copy and a web store copy (another trusted id) are both connected
  * (#216). Both are served (they have different instances, so they look like two browsers), but one
  * browser needs only one: get_version and setup suggest removing the sideloaded one. Copies in
  * different browsers, or in two profiles of the same browser with the same id, aren't counted.
@@ -67,7 +67,7 @@ export function browsersWithTwoCopies(extensions: readonly { origin?: string; br
 /** What get_version and setup say about browsersWithTwoCopies (#216); null when there are none. */
 export function twoCopiesNote(browsers: readonly string[]): string | null {
   if (!browsers.length) return null;
-  return `Two copies of the mcp-teams extension are connected in ${browsers.join(" and ")}: the sideloaded one (Load unpacked) and one installed from a store. Remove the sideloaded one on the browser's Extensions page.`;
+  return `Two copies of the mcp-teams extension are connected in ${browsers.join(" and ")}: the sideloaded one (Load unpacked) and one installed from a web store. Remove the sideloaded one on the browser's Extensions page.`;
 }
 
 /** The extension shipped with this package (next to dist/). */

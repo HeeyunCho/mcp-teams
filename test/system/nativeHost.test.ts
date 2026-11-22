@@ -53,7 +53,7 @@ describe("#123: the native host", { timeout: 30_000 }, () => {
     expect(h.logText()).toMatch(/ refused reason=unknown caller origin/);
   });
 
-  it("#216: serves every trusted extension id (sideload and store ids), and records which one connected", async () => {
+  it("#216: serves every trusted extension id (sideload and web store ids), and records which one connected", async () => {
     for (const trusted of trustedOrigins()) {
       h = await nativeHarness();
       // As Chrome passes it on Windows: the origin with its slash, then --parent-window.

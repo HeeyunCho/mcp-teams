@@ -1,5 +1,5 @@
-// #216: the store upload (Chrome Web Store, Edge Add-ons) is a zip of extension/ through an
-// allowlist, whose manifest.json has no "key" (the store assigns its own id; the key stays in the
+// #216: the web store upload (Chrome Web Store, Edge Add-ons) is a zip of extension/ through an
+// allowlist, whose manifest.json has no "key" (the web store assigns its own id; the key stays in the
 // repo for the sideloaded copy) and which never holds pairing.json. On a temporary copy of extension/.
 import { cpSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -21,7 +21,7 @@ afterEach(() => rmSync(dir, { recursive: true, force: true }));
 
 const repoManifest = () => JSON.parse(readFileSync("extension/manifest.json", "utf8"));
 
-describe("#216: packaging the extension for the stores", () => {
+describe("#216: packaging the extension for the web stores", () => {
   it("#216: zips a manifest.json without key, the rest of the manifest as it is", () => {
     const { file } = packageExtension({ from: src, out: join(dir, "store.zip") });
     const zip = readZip(file);

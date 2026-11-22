@@ -1098,7 +1098,7 @@ export class ExtensionBridge {
    * reconnect from the same one (same instance, or for older extensions the same origin
    * and browser) replaces its old connection. While our extension (any id in the trusted list,
    * #216) is connected, copies with another id (e.g. an older one loaded from another folder) are
-   * turned away, and connecting ours replaces them. Two trusted copies (a store install and a
+   * turned away, and connecting ours replaces them. Two trusted copies (a web store install and a
    * sideloaded one) are both kept: they have different instances, so they are served as two
    * browsers, and get_version and setup say two copies are installed.
    */

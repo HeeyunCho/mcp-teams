@@ -23,7 +23,7 @@ describe("#216: the trusted extension ids", () => {
     expect(trustedOrigins(IDS)).toEqual([`chrome-extension://${EXTENSION_ID}`, `chrome-extension://${STORE_ID}`]);
   });
 
-  it("#216: still refuses an id that isn't in the list, and the store id when the list doesn't name it", () => {
+  it("#216: still refuses an id that isn't in the list, and the web store id when the list doesn't name it", () => {
     expect(isTrustedOrigin(`chrome-extension://${OTHER_ID}`, IDS)).toBe(false);
     expect(isTrustedOrigin(`chrome-extension://${STORE_ID}`, { unpacked: EXTENSION_ID })).toBe(false);
     expect(isTrustedOrigin(undefined, IDS)).toBe(false);
@@ -50,18 +50,18 @@ describe("#216: the trusted extension ids", () => {
     for (const origin of near) expect(isTrustedOrigin(origin, IDS), origin).toBe(false);
   });
 
-  it("#216: finds the browsers where a store copy and the sideloaded copy are both connected", () => {
+  it("#216: finds the browsers where a web store copy and the sideloaded copy are both connected", () => {
     const sideloaded = { origin: `chrome-extension://${EXTENSION_ID}`, browser: "Chrome" };
     const store = { origin: `chrome-extension://${STORE_ID}`, browser: "Chrome" };
     expect(browsersWithTwoCopies([sideloaded, store], IDS)).toEqual(["Chrome"]);
-    // Different browsers (sideloaded in Chrome, store copy in Edge): one copy each, nothing to say.
+    // Different browsers (sideloaded in Chrome, web store copy in Edge): one copy each, nothing to say.
     expect(browsersWithTwoCopies([sideloaded, { ...store, browser: "Edge" }], IDS)).toEqual([]);
     // Two profiles with the sideloaded copy, or one copy alone: nothing to say.
     expect(browsersWithTwoCopies([sideloaded, { ...sideloaded }], IDS)).toEqual([]);
     expect(browsersWithTwoCopies([store], IDS)).toEqual([]);
-    // A copy whose id isn't trusted isn't "a store copy".
+    // A copy whose id isn't trusted isn't "a web store copy".
     expect(browsersWithTwoCopies([sideloaded, { origin: `chrome-extension://${OTHER_ID}`, browser: "Chrome" }], IDS)).toEqual([]);
-    // With today's list (no store id yet) nothing is a second copy.
+    // With today's list (no web store id yet) nothing is a second copy.
     expect(browsersWithTwoCopies([sideloaded, store])).toEqual([]);
   });
 

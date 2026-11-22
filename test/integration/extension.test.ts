@@ -143,11 +143,11 @@ describe("two copies of the extension", () => {
     ours.ws.close();
   });
 
-  // #216: a store install has another id; every id in the trusted list is "ours".
+  // #216: a web store install has another id; every id in the trusted list is "ours".
   const STORE_ORIGIN = "chrome-extension://abcdefghijklmnopabcdefghijklmnop";
   const trustedExtensionIds = { unpacked: EXTENSION_ID, chromeWebStore: "abcdefghijklmnopabcdefghijklmnop" };
 
-  it("#216: keeps a store copy (a second trusted id) next to the sideloaded one: neither is refused nor replaced", async () => {
+  it("#216: keeps a web store copy (a second trusted id) next to the sideloaded one: neither is refused nor replaced", async () => {
     bridge = new TestBridge("secret", "0.15.0", { trustedExtensionIds });
     await bridge.start();
     const sideloaded = extension(EXTENSION_ORIGIN, "secret", { instance: "profile-a" });
@@ -157,7 +157,7 @@ describe("two copies of the extension", () => {
     await until(() => bridge!.extensions.length === 2, 2_000, "both copies listed");
     expect(bridge.extensions.map((e) => e.origin).sort()).toEqual([STORE_ORIGIN, EXTENSION_ORIGIN].sort());
     expect(sideloaded.ws.readyState).toBe(WebSocket.OPEN);
-    // The other way round: the sideloaded copy connecting doesn't replace the store copy.
+    // The other way round: the sideloaded copy connecting doesn't replace the web store copy.
     const again = extension(EXTENSION_ORIGIN, "secret", { instance: "profile-c" });
     await again.welcome;
     await until(() => bridge!.extensions.length === 3, 2_000, "all three listed");

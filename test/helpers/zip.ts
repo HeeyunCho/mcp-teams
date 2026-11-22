@@ -1,4 +1,4 @@
-// Reads a .zip file's entries (stored or deflated), for checking what a store upload holds (#216).
+// Reads a .zip file's entries (stored or deflated), for checking what a web store upload holds (#216).
 // Only what scripts/package-extension.mjs writes: no ZIP64, no encryption, no data descriptors.
 import { readFileSync } from "node:fs";
 import { inflateRawSync } from "node:zlib";

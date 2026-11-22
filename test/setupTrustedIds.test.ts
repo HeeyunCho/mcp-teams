@@ -1,5 +1,5 @@
-// #216: setup counts any trusted extension id as our extension (a store install too), and says
-// when one browser has both the sideloaded copy and a store copy connected.
+// #216: setup counts any trusted extension id as our extension (a web store install too), and says
+// when one browser has both the sideloaded copy and a web store copy connected.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ExtensionBridge } from "../src/bridge.js";
 import { EXTENSION_ID, EXTENSION_ORIGIN } from "../src/extension.js";
@@ -27,12 +27,12 @@ vi.mock("../src/config.js", async (original) => ({
   loadConfig: () => ({ token: "fake-token" }),
 }));
 
-// A fictional store id (32 letters a–p).
+// A fictional web store id (32 letters a–p).
 const STORE_ID = "abcdefghijklmnopabcdefghijklmnop";
 const STORE_ORIGIN = `chrome-extension://${STORE_ID}`;
 const trustedExtensionIds = { unpacked: EXTENSION_ID, chromeWebStore: STORE_ID };
 
-describe("#216: setup with a store install", () => {
+describe("#216: setup with a web store install", () => {
   let lines: string[];
   beforeEach(() => {
     vi.resetAllMocks();
@@ -52,7 +52,7 @@ describe("#216: setup with a store install", () => {
   const bridgeWith = (extensions: { origin: string; browser: string }[]) =>
     ({ extensions, connected: true, call: vi.fn(async () => ({ teams: [] })) }) as unknown as ExtensionBridge;
 
-  it("#216: sees a store copy (a second trusted id) connect, without waiting for a sideloaded one", { timeout: 15_000 }, async () => {
+  it("#216: sees a web store copy (a second trusted id) connect, without waiting for a sideloaded one", { timeout: 15_000 }, async () => {
     const bridge = bridgeWith([{ origin: STORE_ORIGIN, browser: "Edge" }]);
     expect(await setup(bridge, "0.0.0", { yes: true, trustedExtensionIds })).toBe(true);
     expect(lines.join("\n")).toContain("Extension connected in Edge");
@@ -60,7 +60,7 @@ describe("#216: setup with a store install", () => {
     expect(lines.join("\n")).not.toContain("Waiting for the extension");
   });
 
-  it("#216: says when one browser has both the sideloaded copy and a store copy, and suggests removing the sideloaded one", async () => {
+  it("#216: says when one browser has both the sideloaded copy and a web store copy, and suggests removing the sideloaded one", async () => {
     const bridge = bridgeWith([
       { origin: EXTENSION_ORIGIN, browser: "Chrome" },
       { origin: STORE_ORIGIN, browser: "Chrome" },

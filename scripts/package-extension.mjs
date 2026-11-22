@@ -8,7 +8,7 @@
  *   so a new file is shipped, or left out, on purpose.
  * - pairing.json (the pairing token, written into the installed copy only) stops it.
  * - manifest.json goes in without "key". The key stays in the repo: it fixes the sideloaded copy's id
- *   (EXTENSION_IDS.unpacked in src/extension.ts), while each store assigns its own id and refuses
+ *   (EXTENSION_IDS.unpacked in src/extension.ts), while each web store assigns its own id and refuses
  *   an upload with a key it didn't issue.
  *
  * extension/ itself is never changed. The zip is written with Node alone (deflate, no dependency).
@@ -35,7 +35,7 @@ export const ALLOWED = Object.freeze([
   "icons/icon-48.png",
   "icons/icon-128.png",
 ]);
-/** In extension/ but not for the stores: the drawing the icons are rendered from (scripts/render-icons.sh). */
+/** In extension/ but not for the web stores: the drawing the icons are rendered from (scripts/render-icons.sh). */
 export const SOURCE_ONLY = Object.freeze(["icons/icon.svg"]);
 const PAIRING_FILE = "pairing.json";
 
@@ -109,7 +109,7 @@ function zip(entries) {
 
 // ------------------------------------------------------------------ package
 
-/** Writes the store zip of `from` to `out`; returns its path and the files in it. Throws, writing nothing, on pairing.json or a file not allowed. */
+/** Writes the web store zip of `from` to `out`; returns its path and the files in it. Throws, writing nothing, on pairing.json or a file not allowed. */
 export function packageExtension({ from = join(ROOT, "extension"), out } = {}) {
   const src = resolve(from);
   const present = filesIn(src);

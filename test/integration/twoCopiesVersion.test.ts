@@ -1,5 +1,5 @@
 // #216: get_version says when one browser has both the sideloaded copy of the extension and a
-// store copy (another trusted id) connected: both are served, but one is enough. The tools against
+// web store copy (another trusted id) connected: both are served, but one is enough. The tools against
 // a scripted bridge.
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
@@ -10,7 +10,7 @@ import { EXTENSION_ID, EXTENSION_ORIGIN } from "../../src/extension.js";
 import { registerTools } from "../../src/tools.js";
 import { TOKEN } from "../helpers/bridgeHarness.js";
 
-// A fictional store id (32 letters a–p).
+// A fictional web store id (32 letters a–p).
 const STORE_ID = "abcdefghijklmnopabcdefghijklmnop";
 const trustedExtensionIds = { unpacked: EXTENSION_ID, chromeWebStore: STORE_ID };
 
@@ -41,7 +41,7 @@ async function version(extensions: ExtensionInfo[]) {
 }
 
 describe("#216: get_version and two copies of the extension", () => {
-  it("#216: warns when the sideloaded copy and a store copy are connected in the same browser", async () => {
+  it("#216: warns when the sideloaded copy and a web store copy are connected in the same browser", async () => {
     const r = await version([
       { version: "0.3.78", browser: "Chrome", origin: EXTENSION_ORIGIN, instance: "a" },
       { version: "0.3.78", browser: "Chrome", origin: `chrome-extension://${STORE_ID}`, instance: "b" },

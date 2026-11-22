@@ -23,15 +23,15 @@ describe("#123: the extension's manifest", () => {
 });
 
 describe("#216: the host manifest trusts every extension id in the list", () => {
-  // A fictional second id (a store's): 32 letters a–p, as Chrome's ids are.
+  // A fictional second id (a web store's): 32 letters a–p, as Chrome's ids are.
   const STORE_ID = "abcdefghijklmnopabcdefghijklmnop";
 
-  it("#216: lists chrome-extension://<id>/ for every trusted id, so Chrome starts the host for a store install too", () => {
+  it("#216: lists chrome-extension://<id>/ for every trusted id, so Chrome starts the host for a web store install too", () => {
     const manifest = JSON.parse(hostManifest("/home/alex/host", { unpacked: EXTENSION_ID, chromeWebStore: STORE_ID }));
     expect(manifest.allowed_origins).toEqual([`chrome-extension://${EXTENSION_ID}/`, `chrome-extension://${STORE_ID}/`]);
   });
 
-  it("#216: by default lists exactly the sideload id while no store id is known", () => {
+  it("#216: by default lists exactly the sideload id while no web store id is known", () => {
     expect(JSON.parse(hostManifest("/home/alex/host")).allowed_origins).toEqual([`chrome-extension://${EXTENSION_ID}/`]);
   });
 });

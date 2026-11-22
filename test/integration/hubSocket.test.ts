@@ -24,7 +24,7 @@ afterEach(async () => {
 
 const unixOnly = it.skipIf(process.platform === "win32");
 
-// #216: fictional extension ids (32 letters a–p): a store install's, and one nobody trusts.
+// #216: fictional extension ids (32 letters a–p): a web store install's, and one nobody trusts.
 const STORE_ID = "abcdefghijklmnopabcdefghijklmnop";
 const STORE_ORIGIN = `chrome-extension://${STORE_ID}`;
 const OTHER_ID = "ponmlkjihgfedcbaponmlkjihgfedcba";
@@ -211,7 +211,7 @@ describe("#123: the native host's hub socket", () => {
     expect(ext.port.readyState).toBe(WebSocket.OPEN);
   });
 
-  it("#216: records the origin the native port came from when it is a second trusted id (a store install), not the sideload id", async () => {
+  it("#216: records the origin the native port came from when it is a second trusted id (a web store install), not the sideload id", async () => {
     const path = tempSocket();
     const hub = await host(path, { trustedExtensionIds: { unpacked: EXTENSION_ID, chromeWebStore: STORE_ID } });
     nativeExtension(hub, undefined, STORE_ORIGIN);

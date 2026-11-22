@@ -200,7 +200,7 @@ npm run probe -- status    # calls one extension method through the bridge (see 
 npm run package-extension  # the zip for the Chrome Web Store and Edge Add-ons (see docs/extension-ids.md)
 ```
 
-The server, the native host and setup trust a fixed list of extension ids: the sideloaded copy's (from the manifest's `key`) and, once the stores have assigned them, the Chrome Web Store's and Edge Add-ons'. Adding a store id is one line in `src/extension.ts`, then run setup again; see [docs/extension-ids.md](docs/extension-ids.md).
+The server, the native host and setup trust a fixed list of extension ids: the sideloaded copy's (from the manifest's `key`) and, once the web stores have assigned them, the Chrome Web Store's and Edge Add-ons'. Adding a web store id is one line in `src/extension.ts`, then run setup again; see [docs/extension-ids.md](docs/extension-ids.md).
 
 Versions are bumped automatically. On every push to `main` (except Markdown-only changes), the **Version bump** GitHub Action runs the tests, then bumps `package.json` and `package-lock.json`, commits `chore(release): vX.Y.Z` and tags it. It bumps the extension (`extension/manifest.json`) on its own line only when files under `extension/` changed since its last `ext-vX.Y.Z` tag, by the same rules applied to the commits that changed it; the commit then says `chore(release): vX.Y.Z (extension A.B.C)` and both tags are pushed with it. While a version is below 1.0.0, a breaking change (`type!:` or a `BREAKING CHANGE:` footer) bumps the minor version and anything else, `feat:` included, the patch. From 1.0.0 on it's standard semver: breaking → major, `feat:` → minor, anything else → patch.
 
