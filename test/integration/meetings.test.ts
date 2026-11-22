@@ -361,7 +361,7 @@ describe("#179: one search_transcripts call makes a bounded number of Teams requ
     expect(meetingChatRequests(fake).length + fake.count("sharepoint") - before).toBe(first.notSearched * 6);
   });
 
-  it("#179: a recurring meeting with 120 transcripts stops at the budget too, and says how many of its transcripts weren't searched", async () => {
+  it("#179: a search of one named meeting reads all its transcripts, even more than the budget of 100 requests", async () => {
     // One page holding 120 calls (callIds 101-220), each with its own transcript.
     const calls = Array.from({ length: 120 }, (_, i) => 101 + i);
     const chatsvc = (req: SentRequest) =>
@@ -370,10 +370,24 @@ describe("#179: one search_transcripts call makes a bounded number of Teams requ
     const worker = await loadWorker(fake);
     const r = await worker.handlers.searchTranscripts({ query: "budget", meeting: meetingId(1), limit: 200 });
     expect(meetingChatRequests(fake)).toHaveLength(1);
-    expect(fake.count("sharepoint")).toBe(99);
-    expect(r.stoppedBy).toBe("budget");
-    expect(r.transcriptsNotSearched).toBe(21);
+    // The budget limits only the search across meetings: one named meeting is searched whole.
+    expect(fake.count("sharepoint")).toBe(120);
+    expect(r.matches).toBe(240);
+    expect(r.stoppedBy).toBeUndefined();
+    expect(r.transcriptsNotSearched).toBeUndefined();
     expect(r.notSearched).toBeUndefined();
-    expect(r.note).toMatch(/21 older transcripts of "Contoso review 1"/);
+    expect(r.note).toBeUndefined();
+  });
+
+  it("#179: a chat cut short says how many pages were read: 20 when get_meeting read it before the search, not 5", async () => {
+    const fake = createFakeChrome({ services: { csa: csaWith(1), chatsvc: chatsvcWith(25), sharepoint } });
+    const worker = await loadWorker(fake);
+    await worker.handlers.getMeeting({ meeting: meetingId(1) });
+    expect(chatRequestsOf(fake, 1)).toHaveLength(20);
+    const r = await worker.handlers.searchTranscripts({ query: "budget", meetings: 1 });
+    expect(chatRequestsOf(fake, 1)).toHaveLength(20); // served from the cache
+    expect(r.chatsCut).toEqual(["Contoso review 1"]);
+    expect(r.note).toMatch(/newest 20 pages/);
+    expect(r.note).not.toMatch(/newest 5 pages/);
   });
 });
