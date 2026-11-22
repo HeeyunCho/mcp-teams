@@ -1,10 +1,60 @@
-# Handoff: mcp-teams after 0.3.82–0.3.84 (#215, #234, #236), updated 2026-11-22 on the Mac
+# Handoff: mcp-teams after 0.3.85–0.3.88 (#228, #227, #226, #224), updated 2026-11-22 on the Mac
 
-## Resume here (session of 2026-11-21/22, Mac)
+## Resume here (session of 2026-11-22, Mac)
 
-Resume notes for the next agent. Repo: `HeeyunCho/mcp-teams`, checkout `~/orca/mcp-teams` (git; scn is not used here). Local `main` = `origin/main` = `b5a9892` (v0.3.84).
+Resume notes for the next agent. Repo: `HeeyunCho/mcp-teams`, checkout `~/orca/mcp-teams` (git; scn is not used here). Local `main` = `origin/main` = `44c63b9` (0.3.88).
 
-### What happened (2026-11-21)
+### What happened (2026-11-22)
+
+**Released** (each merged with `--match-head-commit`, one at a time, waiting for each `version.yml` run before the next merge):
+
+| Release | Commit | PR | For | What changed |
+|---|---|---|---|---|
+| 0.3.85 | `1ec9770` | #228 (`1618bf7`) | #210 | The nativeHost system tests that serve a session or a relaying host use `REAL_HEARTBEAT`, which ends the "#123 … 1 MB" load flake |
+| 0.3.86 (extension **1.0.1**) | `50f0d2c` | #227 (`b1e2383`) | #179 | `search_transcripts`: the 100-request budget limits only the search across meetings. A search of one named meeting reads all its transcripts, and a cut-short note gives the real page count (`readSessions` and the meeting-chat cache keep it). First bump of the extension's own line (ADR 0003) |
+| 0.3.87 | `2ff79ea` | #226 (`f84d7ff`) | #177 | Old `.rotating` files (a day untouched) are removed at the next rotation. Review nits fixed: `escapeRegExp` is exported once, by `src/hubLog.ts` (`bridge.ts` imports it; the other way round would be a cycle), and `docs/testing.md`'s unit row names its two Windows-only exceptions (the real registry in `readRegDefault`'s tests, PowerShell in the held `.rotating` test) |
+| 0.3.88 (extension stays 1.0.1) | `44c63b9` | #224 (`02f0388`) | #216 | Trusted extension ids: the sideloaded copy plus each web store's, `scripts/package-extension.mjs` writes the web store zip (manifest without `"key"`). Follow-ups done before merging: the #230 role check stays first in `acceptExtension` (`src/bridge.ts:1107`, and `onConnection` at `:1028`); "store copy/install" → "web store copy/install" in 18 files (`twoCopiesNote` is the one user-visible text), the launcher's Store untouched |
+
+Docs only (no release): #238, the 2026-11-21/22 resume notes.
+
+**#237 (#178), the transcript cache:** `scripts/measure-worker-cache.mjs` (#190's heap check) is committed in the PR, with `test/system/measureWorkerCache.test.ts` and its line in `docs/testing.md`'s Memory section. Median of 5 runs, Node 24.14.0, real-shaped Stream transcripts of 600 entries:
+
+| transcripts | side | heap held | count | heap / count | heap per entry beyond its strings |
+|---|---|---:|---:|---:|---:|
+| 10 × 600 | before (`main`) | 3.78 MB | 3.15 MB | 1.20 | 306 B |
+| 10 × 600 | after | 1.72 MB | 1.66 MB | 1.04 | 140 B |
+| 20 × 600 | before (`main`) | 7.57 MB | 6.31 MB | 1.20 | 307 B |
+| 20 × 600 | after | 3.38 MB | 3.32 MB | 1.02 | 133 B |
+
+55% less heap; the count tracks the heap within 2–4%. `TRANSCRIPT_ENTRY_BYTES` stays 128 (measured 133–140 B on 64-bit Node; Chrome's compressed pointers should need less, not measured). The code comment's old "110-120" is corrected. The PR description has the full table.
+
+**#223 (#218):** `origin/main` merged (`da2b54d`, no conflict in `extension/manifest.json`: `version` stays on the extension's line, the five hosts stay). The Spec rerun says it meets #218, no blocker. Its partial item is now **#239** (`ready-for-agent`, sub-issue of #218): keep `api_traffic`'s hosts in the sideloaded copy and drop them only in the web store zip (option B, via `scripts/package-extension.mjs`), plus the stale `api_traffic` wording at `src/sessionNote.ts:71` and `src/tools.ts:253`.
+
+**Worktrees:** the Orca worktree `fix-149-keepalive-drop-logs` (removed through Orca at the user's request, branch deleted locally and on origin), `.claude/worktrees/fix-178-cache-bytes`, `.claude/worktrees/pr226-rotating` and `.claude/worktrees/agent-a8002e5d1f0dfcde0` are all removed, with their merged branches. Only `main` is checked out.
+
+**Flakes seen** (none in the code under change):
+- CI on #238: `diagnose.test.ts` "expected 299 to be ≥ 300". `gh run rerun <id> --failed` passed.
+- Node 20 locally: `readMessagesCut.test.ts` 1.4, a snapshot mismatch whose "Received" is empty. It passed 3/3 alone (`npx -y -p node@20 -c 'node node_modules/vitest/vitest.mjs run <file>'`; a nested `npx vitest` fails). This is #185's Node 20 flake.
+
+### Open work, in priority order
+
+1. **#237 (#178):** MERGEABLE, CI green, heap numbers in. Ready to merge when the user asks. Standards judgement calls, none blocking: fixture GUIDs not in the `00000000-` form; the Stream fixture duplicated in the unit and integration tests; the "first `spokenLanguageTag`" rule and the kept-field list in two places (`slimTranscript` and `background.js`); `let language = false` would read better as `languageKept`.
+2. **#223 (#218):** CI was green at `da2b54d`, but it is **CONFLICTING** again since #224 landed. Merge `origin/main` into it (no rebase), resolve, run both test runs, push. The manual sign-in checks for Chrome and Edge (a–e in the PR) are the user's. Merge when the user asks.
+3. **#239:** `ready-for-agent`, after #223 (#224 is merged).
+4. **#224 leftovers** (no issue yet): the trailing-slash cleanup duplicated 4×; `EXTENSION_ORIGIN` naming; "two copies" grouped by browser, not by profile; no test of a late hello from a trusted, non-sideloaded id; identifiers `STORE_ID`/`STORE_ORIGIN` and the `store` parameter in `browsersWithTwoCopies` still say "store".
+5. **#227 leftovers** (no issue yet): with no budget, a search of one named meeting with many transcripts behind 429 waits can reach the tool's 300 s timeout (`src/tools.ts:413`); a chat cut at 2,000 messages reports its page count untested.
+6. **Older work:** the 2026-11-18 and 2026-11-17 sections below (#173 readings, #230's leftovers, the `ready-for-agent` lanes, items waiting on the user).
+
+### Rules learned in this session
+
+- `gh pr merge --match-head-commit` needs the full 40-character SHA.
+- Merge one PR at a time and wait for its `version.yml` run before the next. Two bumps at once make one fail (#174/#175).
+- After a merge, recheck the other open PRs: #226 and #224 both went CONFLICTING in `docs/testing.md` after neighbours merged. Bring them up to date by merging `origin/main`, testing both Node versions, and pushing.
+- Subagents running test suites at the same time take a shared lock: `lockf -t 7200 <scratchpad>/npm-test.lock npm test`.
+- The harness locks a subagent's worktree (`git worktree list` shows `locked`). After the subagent has finished and its work is pushed, check the lock's pid is this session, then `git worktree unlock` and `git worktree remove`.
+- An Orca worktree is removed with `orca worktree rm --worktree path:<path> --delete-branch`, so Orca's list stays right, and only when the user asks.
+
+### What happened (2026-11-21), earlier in this session
 
 The user reported orphaned MCP server processes slowing the Mac when several Claude Code sessions are open. Findings and fixes, all on GitHub:
 
@@ -15,33 +65,6 @@ The user reported orphaned MCP server processes slowing the Mac when several Cla
 - `~/.claude/hooks/mcp-orphan-check.sh` now skips the codebase-memory-mcp daemon and graft/trail's `sync-run.js`/`stale-count-run.js`. Backup: `~/.claude/hooks/mcp-orphan-check.sh.bak-before-cbm-daemon-exclusion-20261121222913`.
 - **Flaky test diagnosis:** `nativeHost.test.ts` "#123 … 1 MB" fails under load with "The mcp-teams hub restarted". It's a test timing issue (200 ms test heartbeat → `no-pong` drop at `src/bridge.ts:1450` → `LOST_CALL.hubRestarted` at `:1601`), not a hub bug. PR #228 (#210) already moves it, and seven other nativeHost tests, to `REAL_HEARTBEAT`. Confirmed: with `stall(600)` in the handler the 200 ms ping fails 3/3, and `REAL_HEARTBEAT` passes 3/3.
 - **Known load flakes on `main`**, which pass when run alone: `byteCache.test.ts` 3.4 (shrunk by #178), `meetings.test.ts` 2.1, `diagnose.test.ts` 299 ms. Run full suites one at a time; other sessions also run vitest on this Mac.
-
-### Open work, in priority order
-
-1. **#178: PR #237 is open** (branch `fix/178-transcript-cache-bytes`, "Fixes #178"). CI passed on test, test-windows and gitleaks. Review and merge when the user asks (`--match-head-commit`). Full `npm test` passed on Node 24 and Node 20 (80 files, 1026 passed). Summary: a new `slimTranscript` in `extension/teams.js`; `transcriptOf` caches the slim form and counts its UTF-8 size; the over-the-cap test uses 10 MB. It overlaps #227 in `transcriptOf` but merges cleanly. Its worktree `.claude/worktrees/fix-178-cache-bytes` is removed (the branch is pushed).
-2. **#226 (#177):** `origin/main` merged and pushed (`a2a5071`). Full suites passed on Node 24 and Node 20 (1028 passed). MERGEABLE. Watch CI and merge when the user asks. Remove worktree `.claude/worktrees/pr226-rotating` (clean, pushed). Review nits from the two-axis review:
-   - the PowerShell test in `test/unit` breaks the unit-layer rule (add a clause to `docs/testing.md` or move it);
-   - `docs/HANDOFF.md` still lists "clean up old .rotating files";
-   - the regex escape is duplicated from `src/bridge.ts` `escapeRegExp`.
-3. **#228 (#210):** `origin/main` merged and pushed (`3ffd394`). CI passed on test, test-windows and gitleaks. MERGEABLE. Merge when the user asks (`--match-head-commit`).
-4. **#224 (#216): half done.** Worktree `.claude/worktrees/agent-a8002e5d1f0dfcde0`, branch `feat/216-trusted-extension-ids`. The `origin/main` merge is committed locally (`33a894b`, 29 ahead of the PR, not pushed), but it hasn't been built or tested. Still to do:
-   - check that `acceptExtension` in `src/bridge.ts` keeps #230's role check first, then #224's origin logic;
-   - rename every "store copy" / "store install" / "a store" (meaning the web stores) that #224 added to "web store copy" etc. per `GLOSSARY.md` line 71–73, in comments, `docs/extension-ids.md`, README, `.gitignore`, test names and `twoCopiesNote`; don't touch the launcher's **Store** (ADR 0002);
-   - run `npm test` and the Node 20 run, then push.
-
-   Other review findings:
-   - the trailing-slash cleanup is duplicated 4×;
-   - `EXTENSION_ORIGIN` naming;
-   - "two copies" groups by browser, not by profile;
-   - the hub system test never uses a second trusted ID.
-5. **#223 (#218):** CONFLICTING. The Standards review passed with nits:
-   - says "the store(s)" instead of "web store";
-   - the five hosts are duplicated in 4 places;
-   - `scripts/probe.mjs` matches on error text.
-
-   The Spec review was stopped by the usage limit, so rerun it. It needs a merge of `origin/main`, which likely conflicts in `extension/manifest.json` (ADR 0003 version line).
-6. **#227 (#179):** MERGEABLE (33 behind, no conflicts). Standards passed with nits. Spec meets spec, with gaps: an unrequested 100-request budget also caps a search of one named meeting (stops at 99 of 120 transcripts), and a cut-short note can say "5 pages" when 20 were read. Ask the user whether to drop or scope the budget.
-7. **Cleanup: done.** The Orca worktree `~/orca/workspaces/mcp-teams/fix-149-keepalive-drop-logs` was removed through Orca (`orca worktree rm --delete-branch`) at the user's request on 2026-11-22, and branch `HeeyunCho/fix-149-keepalive-drop-logs` was deleted locally and on origin. Its work was already in `main` through #209. Other Orca worktrees stay the user's: remove one only when asked.
 
 ### Working rules the user set in this session
 
