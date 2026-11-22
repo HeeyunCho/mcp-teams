@@ -1150,8 +1150,9 @@ function utf8Bytes(s) {
 
 /**
  * What a slim transcript entry costs beyond its strings' UTF-8 bytes: the object, its string
- * headers and its slot in the array. Measured at about 110-120 bytes on Node's heap (64-bit
- * pointers), which is more than Chrome's compressed pointers need, so it errs high (#178).
+ * headers and its slot in the array. scripts/measure-worker-cache.mjs measured 133-140 bytes on
+ * Node 24's heap (64-bit pointers), so there the count is 2-4% under the heap; Chrome's compressed
+ * pointers need less, so in the browser it should be at or above the heap (#178, #190).
  */
 const TRANSCRIPT_ENTRY_BYTES = 128;
 
