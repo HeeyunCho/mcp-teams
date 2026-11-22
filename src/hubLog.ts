@@ -20,6 +20,9 @@ export type Log = (event: string, fields?: LogFields) => void;
 /** A rotation lock older than this was left by a process that died while rotating. */
 const STALE_LOCK_MS = 30_000;
 
+/** `t` with every regular-expression special character escaped, to match it literally. */
+export const escapeRegExp = (t: string) => t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
 /** A `.rotating` file not written to for this long is removed at the next rotation (#177). */
 const ROTATING_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 
@@ -34,7 +37,7 @@ const ROTATING_MAX_AGE_MS = 24 * 60 * 60 * 1000;
  */
 function removeOldRotating(file: string, keep?: string) {
   const dir = dirname(file);
-  const name = new RegExp(`^${basename(file).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\.\\d+-[0-9a-f]{8}\\.rotating$`);
+  const name = new RegExp(`^${escapeRegExp(basename(file))}\\.\\d+-[0-9a-f]{8}\\.rotating$`);
   let names: string[];
   try {
     names = readdirSync(dir).filter((n) => name.test(n) && join(dir, n) !== keep);

@@ -6,7 +6,7 @@ import { dirname } from "node:path";
 import { WebSocketServer, WebSocket } from "ws";
 import { EXTENSION_ORIGIN as TRUSTED_EXTENSION_ORIGIN } from "./extension.js";
 import { FairQueue } from "./fairqueue.js";
-import { errorFields, logVersion } from "./hubLog.js";
+import { errorFields, escapeRegExp, logVersion } from "./hubLog.js";
 
 /**
  * Local WebSocket bridge between MCP server processes and the browser extension.
@@ -427,7 +427,6 @@ const utf8Bytes = (text: string, max: number) => (text.length * 3 <= max ? text.
 
 // Each LOST_CALL message as a pattern: its text, with anything in the place of a value.
 const SLOT = "\u0000";
-const escapeRegExp = (t: string) => t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 const LOST_CALL_PATTERNS = Object.values(LOST_CALL).map((m) => {
   const text = typeof m === "string" ? m : (m as (value: string) => string)(SLOT);
   return new RegExp(`^${text.split(SLOT).map(escapeRegExp).join(".*")}`, "s");
