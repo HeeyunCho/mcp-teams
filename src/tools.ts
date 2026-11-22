@@ -4,6 +4,7 @@ import { extensionSupported, isLostCall, missingFeatures, unsupportedExtension, 
 import type { Config } from "./config.js";
 import { readBuildInfo, restartCheck, restartHint } from "./buildInfo.js";
 import { BUILD_DIR, RUNNING_BUILD } from "./config.js";
+import { browsersWithTwoCopies, twoCopiesNote, type ExtensionIds } from "./extension.js";
 import { nativeHostReport } from "./nativehost.js";
 import { failedCallNote, isMissingSession, sessionNote, type TeamsStatus } from "./sessionNote.js";
 import type { DiagnosticLog } from "./serverLog.js";
@@ -119,6 +120,8 @@ export interface ToolsOptions {
   /** server.log (#143): failed and slow calls, the Teams state from each status read, restartNeeded once seen. */
   diagnostics?: DiagnosticLog;
   nativeHost?: Parameters<typeof nativeHostReport>[0];
+  /** The extension ids counted as ours for get_version's twoCopies (#216); left out, EXTENSION_IDS. */
+  trustedExtensionIds?: ExtensionIds;
 }
 
 /**
@@ -189,6 +192,7 @@ export function registerTools(server: McpServer, bridge: ExtensionBridge, config
         // #77: whether the account is unsure after a switch; an extension from before it doesn't say (null).
         if (teams && typeof teams === "object" && !("error" in teams)) teams = { ...teams, accountUnsure: (teams as TeamsStatus).accountUnsure ?? null };
       }
+      const twoCopies = twoCopiesNote(browsersWithTwoCopies(bridge.extensions, options.trustedExtensionIds));
       return text({
         server: serverVersion,
         build: running.buildId,
@@ -200,6 +204,8 @@ export function registerTools(server: McpServer, bridge: ExtensionBridge, config
         ...(bridge.extensions.length > 1
           ? { browsers: bridge.extensions.map((e) => ({ browser: e.browser ?? null, version: e.version, capabilities: declaredBy(e) })) }
           : {}),
+        // #216: one browser with both the sideloaded copy and a web store copy: suggest removing the sideloaded one.
+        ...(twoCopies ? { twoCopies } : {}),
         ...supportOf(bridge.extension),
         bridge: bridge.listenError ?? (bridge.connected ? "connected" : "waiting for extension"),
         // #111: what the user can do; the extension tries to connect every 30 s on its own.

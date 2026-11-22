@@ -9,9 +9,66 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { CONFIG_DIR } from "./config.js";
 
-/** Chrome derives it from the manifest "key"; a test checks that they agree. */
-export const EXTENSION_ID = "iolllncadcdlmihknnomfhcadbnnignl";
+/**
+ * The extension ids the server, the native host and setup trust as our extension (#216): the
+ * sideloaded copy's, and each web store's once it is known. Every check that asks "is this our
+ * extension?" goes through this list (isTrustedOrigin), and the native host manifest's
+ * allowed_origins lists all of them (hostManifest in nativehost.ts).
+ *
+ * Adding a web store id is one line here. The ids come from the web store dashboards, assigned on the
+ * first draft upload: the Chrome Web Store's from its Developer Dashboard (the item's id), Edge
+ * Add-ons' from Partner Center (the extension's Store/CRX id). Don't guess one. After adding one,
+ * run setup again on each computer: it rewrites the native host manifest's allowed_origins, and
+ * until then Chrome or Edge refuses to start the native host for that id.
+ * No environment variable or config file can add to this list.
+ */
+export const EXTENSION_IDS: Readonly<Record<string, string>> = Object.freeze({
+  /** Chrome derives it from the manifest "key"; a test checks that they agree. */
+  unpacked: "iolllncadcdlmihknnomfhcadbnnignl",
+  // chromeWebStore: "<TODO(#216): the id from the Chrome Web Store dashboard after the first draft upload>",
+  // edgeAddons: "<TODO(#216): the id from Partner Center after the first draft upload>",
+});
+
+/** The sideloaded ("Load unpacked") copy's id only: where "the unpacked copy" is meant (the key test, the legacy reload). */
+export const EXTENSION_ID = EXTENSION_IDS.unpacked;
 export const EXTENSION_ORIGIN = `chrome-extension://${EXTENSION_ID}`;
+
+/** A trusted list of ids: the ids themselves, or a record of them like EXTENSION_IDS. */
+export type ExtensionIds = Readonly<Record<string, string>> | readonly string[];
+
+/** The trusted origins ("chrome-extension://<id>", no trailing slash) of a list of ids. */
+export function trustedOrigins(ids: ExtensionIds = EXTENSION_IDS): string[] {
+  return [...new Set(Object.values(ids))].map((id) => `chrome-extension://${id}`);
+}
+
+/**
+ * Whether `origin` is one of our extension's: an exact match against the trusted list, after
+ * dropping trailing slashes ("chrome-extension://<id>/", as Chrome passes it to a native host).
+ * No prefix, substring, case-insensitive or wildcard match: the hub's origin check and the
+ * bridge's "ours / another copy" rest on it.
+ */
+export function isTrustedOrigin(origin: unknown, ids: ExtensionIds = EXTENSION_IDS): origin is string {
+  return typeof origin === "string" && trustedOrigins(ids).includes(origin.replace(/\/+$/, ""));
+}
+
+/**
+ * The browsers where the sideloaded copy and a web store copy (another trusted id) are both connected
+ * (#216). Both are served (they have different instances, so they look like two browsers), but one
+ * browser needs only one: get_version and setup suggest removing the sideloaded one. Copies in
+ * different browsers, or in two profiles of the same browser with the same id, aren't counted.
+ */
+export function browsersWithTwoCopies(extensions: readonly { origin?: string; browser?: string }[], ids: ExtensionIds = EXTENSION_IDS): string[] {
+  const has = (browser: string | undefined, store: boolean) =>
+    extensions.some((e) => e.browser === browser && isTrustedOrigin(e.origin, ids) && (e.origin !== EXTENSION_ORIGIN) === store);
+  const browsers = new Set(extensions.map((e) => e.browser).filter((b): b is string => !!b));
+  return [...browsers].filter((b) => has(b, false) && has(b, true));
+}
+
+/** What get_version and setup say about browsersWithTwoCopies (#216); null when there are none. */
+export function twoCopiesNote(browsers: readonly string[]): string | null {
+  if (!browsers.length) return null;
+  return `Two copies of the mcp-teams extension are connected in ${browsers.join(" and ")}: the sideloaded one (Load unpacked) and one installed from a web store. Remove the sideloaded one on the browser's Extensions page.`;
+}
 
 /** The extension shipped with this package (next to dist/). */
 export const PACKAGED_EXTENSION_DIR = fileURLToPath(new URL("../extension/", import.meta.url));

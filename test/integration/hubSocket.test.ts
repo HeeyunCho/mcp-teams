@@ -12,7 +12,7 @@ import { PassThrough } from "node:stream";
 import WebSocket, { WebSocketServer } from "ws";
 import { afterEach, describe, expect, it } from "vitest";
 import { ExtensionBridge, proof, type BridgeOptions } from "../../src/bridge.js";
-import { EXTENSION_ORIGIN } from "../../src/extension.js";
+import { EXTENSION_ID, EXTENSION_ORIGIN } from "../../src/extension.js";
 import { FrameDecoder, NativePort } from "../../src/native.js";
 import { fakeExtension, FAST, TOKEN } from "../helpers/bridgeHarness.js";
 import { until } from "../helpers/timing.js";
@@ -23,6 +23,11 @@ afterEach(async () => {
 });
 
 const unixOnly = it.skipIf(process.platform === "win32");
+
+// #216: fictional extension ids (32 letters a–p): a web store install's, and one nobody trusts.
+const STORE_ID = "abcdefghijklmnopabcdefghijklmnop";
+const STORE_ORIGIN = `chrome-extension://${STORE_ID}`;
+const OTHER_ID = "ponmlkjihgfedcbaponmlkjihgfedcba";
 
 /** A hub socket of its own: a Unix socket in a temporary folder, or a named pipe named after it. */
 function tempSocket() {
@@ -79,7 +84,7 @@ function rawClient(path: string, hello: object, token?: string, role: "client" |
 }
 
 /** The extension attached as the host's native port, over in-memory pipes (Chrome's framing). */
-function nativeExtension(b: ExtensionBridge, hello: object = { type: "hello", version: "0.3.56", browser: "Chrome", instance: "profile-1" }) {
+function nativeExtension(b: ExtensionBridge, hello: object = { type: "hello", version: "0.3.56", browser: "Chrome", instance: "profile-1" }, origin?: string) {
   const toExtension = new PassThrough();
   const port = new NativePort(toExtension);
   const received: any[] = [];
@@ -90,7 +95,8 @@ function nativeExtension(b: ExtensionBridge, hello: object = { type: "hello", ve
     if (m.type === "request" && m.method !== "never") port.receive(Buffer.from(JSON.stringify({ type: "response", id: m.id, ok: true, result: { via: "native", method: m.method } })));
   });
   toExtension.on("data", (d: Buffer) => decoder.push(d));
-  b.attachExtension(port);
+  if (origin) b.attachExtension(port, origin);
+  else b.attachExtension(port);
   port.receive(Buffer.from(JSON.stringify(hello)));
   cleanups.push(() => port.close());
   return { port, received };
@@ -203,6 +209,39 @@ describe("#123: the native host's hub socket", () => {
     await until(() => ext.received.filter((m) => m.type === "ping").length >= 4, 5_000, "four keep-alive ticks");
     expect(hub.connected).toBe(true);
     expect(ext.port.readyState).toBe(WebSocket.OPEN);
+  });
+
+  it("#216: records the origin the native port came from when it is a second trusted id (a web store install), not the sideload id", async () => {
+    const path = tempSocket();
+    const hub = await host(path, { trustedExtensionIds: { unpacked: EXTENSION_ID, chromeWebStore: STORE_ID } });
+    nativeExtension(hub, undefined, STORE_ORIGIN);
+    await until(() => hub.connected, 3_000, "the native extension");
+    expect(hub.extensions.map((e) => e.origin)).toEqual([STORE_ORIGIN]);
+  });
+
+  it("#216: refuses to attach a native port from an origin that isn't trusted", async () => {
+    const path = tempSocket();
+    const hub = await host(path);
+    expect(() => hub.attachExtension(new NativePort(new PassThrough()), `chrome-extension://${OTHER_ID}/`)).toThrow(/not a trusted extension origin/);
+    expect(hub.extensions).toEqual([]);
+  });
+
+  it("#216: a relaying host's hello names its extension's origin, which the serving host records when it is trusted", async () => {
+    const path = tempSocket();
+    const hub = await host(path, { trustedExtensionIds: { unpacked: EXTENSION_ID, chromeWebStore: STORE_ID } });
+    const r = await rawClient(path, { type: "hello", version: "0.3.56", browser: "Edge", instance: "profile-2", origin: STORE_ORIGIN });
+    expect(r.msg).toMatchObject({ type: "welcome" });
+    await until(() => hub.connected);
+    expect(hub.extension).toMatchObject({ browser: "Edge", origin: STORE_ORIGIN });
+  });
+
+  it("#216: an origin in a relayed hello that isn't trusted is not recorded: the extension counts as the sideloaded one, as before", async () => {
+    const path = tempSocket();
+    const hub = await host(path);
+    const r = await rawClient(path, { type: "hello", version: "0.3.56", browser: "Edge", instance: "profile-2", origin: `chrome-extension://${OTHER_ID}` });
+    expect(r.msg).toMatchObject({ type: "welcome" });
+    await until(() => hub.connected);
+    expect(hub.extension).toMatchObject({ browser: "Edge", origin: EXTENSION_ORIGIN });
   });
 
   unixOnly("#123: replaces a socket file nobody listens on (a host that crashed)", async () => {

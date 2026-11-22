@@ -25,6 +25,8 @@ export const REAL_HEARTBEAT = { TEAMS_MCP_HUB_KEEPALIVE_MS: String(DEFAULT_BRIDG
 export interface NativeExtensionOptions {
   /** The caller origin Chrome passes (default: our extension's, with the trailing slash Chrome adds). */
   origin?: string;
+  /** Arguments after the origin, as Chrome passes them on Windows (--parent-window=…). */
+  args?: string[];
   handle?: Handler;
   /** Methods it never answers. */
   silentFor?: string[];
@@ -95,7 +97,7 @@ export function nativeExtension(home: string, socket: string, opts: NativeExtens
     version = "0.3.56",
     lingerMs = 30_000,
   } = opts;
-  const child: ChildProcessWithoutNullStreams = spawn(process.execPath, [HUB_JS, origin], {
+  const child: ChildProcessWithoutNullStreams = spawn(process.execPath, [HUB_JS, origin, ...(opts.args ?? [])], {
     env: {
       ...process.env,
       TEAMS_MCP_HOME: home,
