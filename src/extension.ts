@@ -64,8 +64,8 @@ export function isTrustedOrigin(origin: unknown, ids: ExtensionIds = EXTENSION_I
  * different browsers, or in two profiles of the same browser with the same id, aren't counted.
  */
 export function browsersWithTwoCopies(extensions: readonly { origin?: string; browser?: string }[], ids: ExtensionIds = EXTENSION_IDS): string[] {
-  const has = (browser: string | undefined, store: boolean) =>
-    extensions.some((e) => e.browser === browser && isTrustedOrigin(e.origin, ids) && (e.origin !== SIDELOADED_ORIGIN) === store);
+  const has = (browser: string | undefined, webStore: boolean) =>
+    extensions.some((e) => e.browser === browser && isTrustedOrigin(e.origin, ids) && (e.origin !== SIDELOADED_ORIGIN) === webStore);
   const browsers = new Set(extensions.map((e) => e.browser).filter((b): b is string => !!b));
   return [...browsers].filter((b) => has(b, false) && has(b, true));
 }

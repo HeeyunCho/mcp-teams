@@ -144,7 +144,7 @@ describe("two copies of the extension", () => {
   });
 
   // #216: a web store install has another id; every id in the trusted list is "ours".
-  const STORE_ORIGIN = "chrome-extension://abcdefghijklmnopabcdefghijklmnop";
+  const WEB_STORE_ORIGIN = "chrome-extension://abcdefghijklmnopabcdefghijklmnop";
   const trustedExtensionIds = { unpacked: EXTENSION_ID, chromeWebStore: "abcdefghijklmnopabcdefghijklmnop" };
 
   it("#216: keeps a web store copy (a second trusted id) next to the sideloaded one: neither is refused nor replaced", async () => {
@@ -152,28 +152,28 @@ describe("two copies of the extension", () => {
     await bridge.start();
     const sideloaded = extension(SIDELOADED_ORIGIN, "secret", { instance: "profile-a" });
     await sideloaded.welcome;
-    const store = extension(STORE_ORIGIN, "secret", { instance: "profile-b" });
-    expect(await store.welcome).toMatchObject({ type: "welcome" });
+    const webStore = extension(WEB_STORE_ORIGIN, "secret", { instance: "profile-b" });
+    expect(await webStore.welcome).toMatchObject({ type: "welcome" });
     await until(() => bridge!.extensions.length === 2, 2_000, "both copies listed");
-    expect(bridge.extensions.map((e) => e.origin).sort()).toEqual([STORE_ORIGIN, SIDELOADED_ORIGIN].sort());
+    expect(bridge.extensions.map((e) => e.origin).sort()).toEqual([WEB_STORE_ORIGIN, SIDELOADED_ORIGIN].sort());
     expect(sideloaded.ws.readyState).toBe(WebSocket.OPEN);
     // The other way round: the sideloaded copy connecting doesn't replace the web store copy.
     const again = extension(SIDELOADED_ORIGIN, "secret", { instance: "profile-c" });
     await again.welcome;
     await until(() => bridge!.extensions.length === 3, 2_000, "all three listed");
-    expect(store.ws.readyState).toBe(WebSocket.OPEN);
-    for (const e of [sideloaded, store, again]) e.ws.close();
+    expect(webStore.ws.readyState).toBe(WebSocket.OPEN);
+    for (const e of [sideloaded, webStore, again]) e.ws.close();
   });
 
   it("#216: still turns away an id that isn't trusted while a trusted copy is connected (4409)", async () => {
     bridge = new TestBridge("secret", "0.15.0", { trustedExtensionIds });
     await bridge.start();
-    const store = extension(STORE_ORIGIN, "secret");
-    await store.welcome;
+    const webStore = extension(WEB_STORE_ORIGIN, "secret");
+    await webStore.welcome;
     const other = extension("chrome-extension://ponmlkjihgfedcbaponmlkjihgfedcba", "secret");
     expect(await new Promise((r) => other.ws.on("close", r))).toBe(4409);
-    expect(bridge.extensions.map((e) => e.origin)).toEqual([STORE_ORIGIN]);
-    store.ws.close();
+    expect(bridge.extensions.map((e) => e.origin)).toEqual([WEB_STORE_ORIGIN]);
+    webStore.ws.close();
   });
 });
 

@@ -301,7 +301,7 @@ export const missingFeatures = (e: Declaring): string[] => {
 /** False for an extension whose readable version is below MIN_EXTENSION; an unreadable one (a dev build) is served. */
 export const extensionSupported = (e: Pick<ExtensionInfo, "version">): boolean => !isNewer(MIN_EXTENSION, e.version);
 
-/** What to do about an old extension, for a copy mcp-teams installed and for one from a browser's store. */
+/** What to do about an old extension, for a copy mcp-teams installed and for a web store copy. */
 const UPDATE_EXTENSION =
   "Update the extension: a copy mcp-teams installed updates with reload_extension (it loads the version mcp-teams put in its folder; run `npx mcp-teams setup` if it was loaded from another folder), and one from the Chrome Web Store or Edge Add-ons updates from the store (chrome://extensions, Update).";
 

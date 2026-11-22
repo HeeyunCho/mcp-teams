@@ -11,8 +11,8 @@ import { registerTools } from "../../src/tools.js";
 import { TOKEN } from "../helpers/bridgeHarness.js";
 
 // A fictional web store id (32 letters a–p).
-const STORE_ID = "abcdefghijklmnopabcdefghijklmnop";
-const trustedExtensionIds = { unpacked: EXTENSION_ID, chromeWebStore: STORE_ID };
+const WEB_STORE_ID = "abcdefghijklmnopabcdefghijklmnop";
+const trustedExtensionIds = { unpacked: EXTENSION_ID, chromeWebStore: WEB_STORE_ID };
 
 let client: Client | undefined;
 afterEach(async () => {
@@ -44,7 +44,7 @@ describe("#216: get_version and two copies of the extension", () => {
   it("#216: warns when the sideloaded copy and a web store copy are connected in the same browser", async () => {
     const r = await version([
       { version: "0.3.78", browser: "Chrome", origin: SIDELOADED_ORIGIN, instance: "a" },
-      { version: "0.3.78", browser: "Chrome", origin: `chrome-extension://${STORE_ID}`, instance: "b" },
+      { version: "0.3.78", browser: "Chrome", origin: `chrome-extension://${WEB_STORE_ID}`, instance: "b" },
     ]);
     expect(r.twoCopies).toMatch(/Two copies of the mcp-teams extension are connected in Chrome.*Remove the sideloaded one/);
   });
@@ -52,7 +52,7 @@ describe("#216: get_version and two copies of the extension", () => {
   it("#216: says nothing with one copy per browser", async () => {
     const r = await version([
       { version: "0.3.78", browser: "Chrome", origin: SIDELOADED_ORIGIN, instance: "a" },
-      { version: "0.3.78", browser: "Edge", origin: `chrome-extension://${STORE_ID}`, instance: "b" },
+      { version: "0.3.78", browser: "Edge", origin: `chrome-extension://${WEB_STORE_ID}`, instance: "b" },
     ]);
     expect(r).not.toHaveProperty("twoCopies");
   });

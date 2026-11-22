@@ -25,8 +25,8 @@ afterEach(async () => {
 const unixOnly = it.skipIf(process.platform === "win32");
 
 // #216: fictional extension ids (32 letters a–p): a web store install's, and one nobody trusts.
-const STORE_ID = "abcdefghijklmnopabcdefghijklmnop";
-const STORE_ORIGIN = `chrome-extension://${STORE_ID}`;
+const WEB_STORE_ID = "abcdefghijklmnopabcdefghijklmnop";
+const WEB_STORE_ORIGIN = `chrome-extension://${WEB_STORE_ID}`;
 const OTHER_ID = "ponmlkjihgfedcbaponmlkjihgfedcba";
 
 /** A hub socket of its own: a Unix socket in a temporary folder, or a named pipe named after it. */
@@ -213,10 +213,10 @@ describe("#123: the native host's hub socket", () => {
 
   it("#216: records the origin the native port came from when it is a second trusted id (a web store install), not the sideload id", async () => {
     const path = tempSocket();
-    const hub = await host(path, { trustedExtensionIds: { unpacked: EXTENSION_ID, chromeWebStore: STORE_ID } });
-    nativeExtension(hub, undefined, STORE_ORIGIN);
+    const hub = await host(path, { trustedExtensionIds: { unpacked: EXTENSION_ID, chromeWebStore: WEB_STORE_ID } });
+    nativeExtension(hub, undefined, WEB_STORE_ORIGIN);
     await until(() => hub.connected, 3_000, "the native extension");
-    expect(hub.extensions.map((e) => e.origin)).toEqual([STORE_ORIGIN]);
+    expect(hub.extensions.map((e) => e.origin)).toEqual([WEB_STORE_ORIGIN]);
   });
 
   it("#216: refuses to attach a native port from an origin that isn't trusted", async () => {
@@ -228,11 +228,11 @@ describe("#123: the native host's hub socket", () => {
 
   it("#216: a relaying host's hello names its extension's origin, which the serving host records when it is trusted", async () => {
     const path = tempSocket();
-    const hub = await host(path, { trustedExtensionIds: { unpacked: EXTENSION_ID, chromeWebStore: STORE_ID } });
-    const r = await rawClient(path, { type: "hello", version: "0.3.56", browser: "Edge", instance: "profile-2", origin: STORE_ORIGIN });
+    const hub = await host(path, { trustedExtensionIds: { unpacked: EXTENSION_ID, chromeWebStore: WEB_STORE_ID } });
+    const r = await rawClient(path, { type: "hello", version: "0.3.56", browser: "Edge", instance: "profile-2", origin: WEB_STORE_ORIGIN });
     expect(r.msg).toMatchObject({ type: "welcome" });
     await until(() => hub.connected);
-    expect(hub.extension).toMatchObject({ browser: "Edge", origin: STORE_ORIGIN });
+    expect(hub.extension).toMatchObject({ browser: "Edge", origin: WEB_STORE_ORIGIN });
   });
 
   it("#216: an origin in a relayed hello that isn't trusted is not recorded: the extension counts as the sideloaded one, as before", async () => {
