@@ -31,7 +31,8 @@ export const EXTENSION_IDS: Readonly<Record<string, string>> = Object.freeze({
 
 /** The sideloaded ("Load unpacked") copy's id only: where "the unpacked copy" is meant (the key test, the legacy reload). */
 export const EXTENSION_ID = EXTENSION_IDS.unpacked;
-export const EXTENSION_ORIGIN = `chrome-extension://${EXTENSION_ID}`;
+/** The sideloaded copy's origin (EXTENSION_IDS.unpacked's), no trailing slash. */
+export const SIDELOADED_ORIGIN = `chrome-extension://${EXTENSION_ID}`;
 
 /** A trusted list of ids: the ids themselves, or a record of them like EXTENSION_IDS. */
 export type ExtensionIds = Readonly<Record<string, string>> | readonly string[];
@@ -64,7 +65,7 @@ export function isTrustedOrigin(origin: unknown, ids: ExtensionIds = EXTENSION_I
  */
 export function browsersWithTwoCopies(extensions: readonly { origin?: string; browser?: string }[], ids: ExtensionIds = EXTENSION_IDS): string[] {
   const has = (browser: string | undefined, store: boolean) =>
-    extensions.some((e) => e.browser === browser && isTrustedOrigin(e.origin, ids) && (e.origin !== EXTENSION_ORIGIN) === store);
+    extensions.some((e) => e.browser === browser && isTrustedOrigin(e.origin, ids) && (e.origin !== SIDELOADED_ORIGIN) === store);
   const browsers = new Set(extensions.map((e) => e.browser).filter((b): b is string => !!b));
   return [...browsers].filter((b) => has(b, false) && has(b, true));
 }

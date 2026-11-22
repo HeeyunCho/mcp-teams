@@ -2,7 +2,7 @@
 // when one browser has both the sideloaded copy and a web store copy connected.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ExtensionBridge } from "../src/bridge.js";
-import { EXTENSION_ID, EXTENSION_ORIGIN } from "../src/extension.js";
+import { EXTENSION_ID, SIDELOADED_ORIGIN } from "../src/extension.js";
 import { setup } from "../src/setup.js";
 
 // Doubles at the edges, as in setupOpensTeams.test.ts: no `claude` CLI is run, and no AI app's
@@ -62,7 +62,7 @@ describe("#216: setup with a web store install", () => {
 
   it("#216: says when one browser has both the sideloaded copy and a web store copy, and suggests removing the sideloaded one", async () => {
     const bridge = bridgeWith([
-      { origin: EXTENSION_ORIGIN, browser: "Chrome" },
+      { origin: SIDELOADED_ORIGIN, browser: "Chrome" },
       { origin: STORE_ORIGIN, browser: "Chrome" },
     ]);
     expect(await setup(bridge, "0.0.0", { yes: true, trustedExtensionIds })).toBe(true);
@@ -70,7 +70,7 @@ describe("#216: setup with a web store install", () => {
   });
 
   it("#216: says nothing about two copies with only the sideloaded one", async () => {
-    const bridge = bridgeWith([{ origin: EXTENSION_ORIGIN, browser: "Chrome" }]);
+    const bridge = bridgeWith([{ origin: SIDELOADED_ORIGIN, browser: "Chrome" }]);
     expect(await setup(bridge, "0.0.0", { yes: true, trustedExtensionIds })).toBe(true);
     expect(lines.join("\n")).not.toContain("Two copies");
   });

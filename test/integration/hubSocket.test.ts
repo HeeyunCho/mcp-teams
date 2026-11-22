@@ -12,7 +12,7 @@ import { PassThrough } from "node:stream";
 import WebSocket, { WebSocketServer } from "ws";
 import { afterEach, describe, expect, it } from "vitest";
 import { ExtensionBridge, proof, type BridgeOptions } from "../../src/bridge.js";
-import { EXTENSION_ID, EXTENSION_ORIGIN } from "../../src/extension.js";
+import { EXTENSION_ID, SIDELOADED_ORIGIN } from "../../src/extension.js";
 import { FrameDecoder, NativePort } from "../../src/native.js";
 import { fakeExtension, FAST, TOKEN } from "../helpers/bridgeHarness.js";
 import { until } from "../helpers/timing.js";
@@ -193,7 +193,7 @@ describe("#123: the native host's hub socket", () => {
     const r = await rawClient(path, { type: "hello", version: "0.3.56", browser: "Edge", instance: "profile-2" }, TOKEN);
     expect(r.msg).toMatchObject({ type: "welcome", capabilities: { features: expect.arrayContaining(["native"]) } });
     await until(() => hub.connected);
-    expect(hub.extension).toMatchObject({ browser: "Edge", origin: EXTENSION_ORIGIN });
+    expect(hub.extension).toMatchObject({ browser: "Edge", origin: SIDELOADED_ORIGIN });
   });
 
   it("#123: the native port is the host's extension: welcome, calls, and the keep-alive keeps it (synthetic pong)", async () => {
@@ -202,7 +202,7 @@ describe("#123: the native host's hub socket", () => {
     const ext = nativeExtension(hub);
     await until(() => hub.connected, 3_000, "the native extension");
     expect(ext.received.find((m) => m.type === "welcome")).toMatchObject({ type: "welcome", heartbeatMs: FAST.keepAliveMs, capabilities: { features: expect.arrayContaining(["native"]) } });
-    expect(hub.extension).toMatchObject({ browser: "Chrome", origin: EXTENSION_ORIGIN });
+    expect(hub.extension).toMatchObject({ browser: "Chrome", origin: SIDELOADED_ORIGIN });
     await expect(hub.call("listChats", {}, 2_000)).resolves.toEqual({ via: "native", method: "listChats" });
     // A port that never answered ping() would be dropped at the keep-alive's second tick. Wait
     // for four ticks (the extension sees each one's {type:"ping"}): it is still there.
@@ -241,7 +241,7 @@ describe("#123: the native host's hub socket", () => {
     const r = await rawClient(path, { type: "hello", version: "0.3.56", browser: "Edge", instance: "profile-2", origin: `chrome-extension://${OTHER_ID}` });
     expect(r.msg).toMatchObject({ type: "welcome" });
     await until(() => hub.connected);
-    expect(hub.extension).toMatchObject({ browser: "Edge", origin: EXTENSION_ORIGIN });
+    expect(hub.extension).toMatchObject({ browser: "Edge", origin: SIDELOADED_ORIGIN });
   });
 
   unixOnly("#123: replaces a socket file nobody listens on (a host that crashed)", async () => {

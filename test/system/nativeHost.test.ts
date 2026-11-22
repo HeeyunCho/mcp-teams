@@ -9,7 +9,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { afterEach, describe, expect, it } from "vitest";
 import { proof, socketTransport, type BridgeSocket, type ExtensionBridge } from "../../src/bridge.js";
 import { SERVER_VERSION } from "../../src/config.js";
-import { EXTENSION_ORIGIN, trustedOrigins } from "../../src/extension.js";
+import { SIDELOADED_ORIGIN, trustedOrigins } from "../../src/extension.js";
 import { registerTools } from "../../src/tools.js";
 import { fakeExtension, TOKEN } from "../helpers/bridgeHarness.js";
 import { nativeHarness, REAL_HEARTBEAT } from "../helpers/nativeHost.js";
@@ -68,7 +68,7 @@ describe("#123: the native host", { timeout: 30_000 }, () => {
   });
 
   it("#216: still refuses an id that isn't trusted, or one that only starts like a trusted one", async () => {
-    for (const origin of ["chrome-extension://ponmlkjihgfedcbaponmlkjihgfedcba/", `${EXTENSION_ORIGIN}x/`, `${EXTENSION_ORIGIN.toUpperCase()}/`]) {
+    for (const origin of ["chrome-extension://ponmlkjihgfedcbaponmlkjihgfedcba/", `${SIDELOADED_ORIGIN}x/`, `${SIDELOADED_ORIGIN.toUpperCase()}/`]) {
       h = await nativeHarness();
       const ext = await h.host({ origin });
       expect(await ext.exited).not.toBe(0);

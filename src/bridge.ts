@@ -4,7 +4,7 @@ import { createServer as createHttpServer, type IncomingMessage } from "node:htt
 import { connect } from "node:net";
 import { dirname } from "node:path";
 import { WebSocketServer, WebSocket } from "ws";
-import { EXTENSION_IDS, EXTENSION_ORIGIN as UNPACKED_EXTENSION_ORIGIN, isTrustedOrigin, normalizeOrigin, type ExtensionIds } from "./extension.js";
+import { EXTENSION_IDS, isTrustedOrigin, normalizeOrigin, SIDELOADED_ORIGIN, type ExtensionIds } from "./extension.js";
 import { FairQueue } from "./fairqueue.js";
 import { errorFields, escapeRegExp, logVersion } from "./hubLog.js";
 
@@ -131,7 +131,8 @@ interface Turn {
   done?: boolean;
 }
 
-const EXTENSION_ORIGIN = /^(chrome-extension|extension):\/\/[a-z0-9]+$/i;
+/** Any extension's origin, trusted or not: what the TCP port lets connect (an extension or no Origin). */
+const ANY_EXTENSION_ORIGIN = /^(chrome-extension|extension):\/\/[a-z0-9]+$/i;
 /** Largest message accepted on the bridge. Attachments travel one per message as base64 (+33%). */
 export const MAX_MESSAGE_BYTES = 256 * 1024 * 1024;
 
@@ -550,7 +551,7 @@ export function webSocketTransport({ port, maxMessageBytes }: { port: number; ma
           host: "127.0.0.1",
           port,
           maxPayload: maxMessageBytes,
-          verifyClient: ({ origin }: { origin?: string; req: IncomingMessage }) => !origin || EXTENSION_ORIGIN.test(origin),
+          verifyClient: ({ origin }: { origin?: string; req: IncomingMessage }) => !origin || ANY_EXTENSION_ORIGIN.test(origin),
         });
         let listening = false;
         wss.once("listening", () => {
@@ -779,7 +780,7 @@ export class ExtensionBridge {
    * dist/hub.js checks the origin it was given (`origin`, #216: any trusted id), so it is trusted
    * as our extension (no proof). An origin that isn't trusted is refused here as well.
    */
-  attachExtension(conn: BridgeSocket, origin: string = UNPACKED_EXTENSION_ORIGIN) {
+  attachExtension(conn: BridgeSocket, origin: string = SIDELOADED_ORIGIN) {
     if (!this.isOurs(origin)) throw new Error("attachExtension: not a trusted extension origin");
     this.onConnection(conn, { via: "native", origin: normalizeOrigin(origin) });
   }
@@ -1040,7 +1041,7 @@ export class ExtensionBridge {
         const trusted = via === "native" || (via === "socket" && !this.socketNeedsProof);
         if (!proven && !trusted) {
           // Our extension up to 0.2.0 says hello with neither; it is only told to reload.
-          if (via === "tcp" && msg.type === "hello" && origin === UNPACKED_EXTENSION_ORIGIN && msg.token == null && msg.proof == null) return this.reloadLegacy(ws);
+          if (via === "tcp" && msg.type === "hello" && origin === SIDELOADED_ORIGIN && msg.token == null && msg.proof == null) return this.reloadLegacy(ws);
           return void this.refuse(ws, 4401, "bad token");
         }
         authed = true;
@@ -1110,7 +1111,7 @@ export class ExtensionBridge {
     // this hub trusts it too. A relaying host from before #216 names none, and an origin this hub
     // doesn't trust isn't taken from it: both count as the sideloaded copy, as before.
     const onTcp = via === "tcp";
-    const relayed = isTrustedOrigin(msg.origin, this.trustedIds) ? normalizeOrigin(msg.origin) : UNPACKED_EXTENSION_ORIGIN;
+    const relayed = isTrustedOrigin(msg.origin, this.trustedIds) ? normalizeOrigin(msg.origin) : SIDELOADED_ORIGIN;
     const origin = via === "socket" ? relayed : connOrigin;
     const transport = onTcp ? "websocket" : "native";
     const info: ExtensionInfo = {

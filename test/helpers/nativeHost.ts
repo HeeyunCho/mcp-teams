@@ -8,7 +8,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "no
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { DEFAULT_BRIDGE_OPTIONS, ExtensionBridge, type BridgeOptions } from "../../src/bridge.js";
-import { EXTENSION_ORIGIN } from "../../src/extension.js";
+import { SIDELOADED_ORIGIN } from "../../src/extension.js";
 import { FAST, TOKEN, type Handler, type Request } from "./bridgeHarness.js";
 import type { FakeNativeHost } from "./fakeChrome.js";
 import { until } from "./timing.js";
@@ -52,7 +52,7 @@ export interface NativeExtensionOptions {
 export function chromeNativeHost(home: string, socket: string, env: Record<string, string> = {}) {
   const children: ChildProcessWithoutNullStreams[] = [];
   const attach = (host: FakeNativeHost) => {
-    const child = spawn(process.execPath, [HUB_JS, `${EXTENSION_ORIGIN}/`], {
+    const child = spawn(process.execPath, [HUB_JS, `${SIDELOADED_ORIGIN}/`], {
       env: { ...process.env, TEAMS_MCP_HOME: home, TEAMS_MCP_HUB_SOCKET: socket, TEAMS_MCP_HUB_KEEPALIVE_MS: String(FAST.keepAliveMs), ...env },
       stdio: ["pipe", "pipe", "pipe"],
     });
@@ -89,7 +89,7 @@ export function chromeNativeHost(home: string, socket: string, env: Record<strin
 /** A host child process with a fake extension on its stdio. */
 export function nativeExtension(home: string, socket: string, opts: NativeExtensionOptions = {}) {
   const {
-    origin = `${EXTENSION_ORIGIN}/`,
+    origin = `${SIDELOADED_ORIGIN}/`,
     handle = () => ({ ok: true }),
     silentFor = [],
     browser = "Chrome",

@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ExtensionBridge } from "../src/bridge.js";
-import { EXTENSION_ORIGIN } from "../src/extension.js";
+import { SIDELOADED_ORIGIN } from "../src/extension.js";
 import { setup } from "../src/setup.js";
 
 // Doubles at the edges: no `claude` CLI is run, and no AI app's config, extension folder or
@@ -42,7 +42,7 @@ describe("setup with no Teams tab open", () => {
 
   it("asks the extension to open Teams, since a new user has no tab yet", async () => {
     const call = vi.fn(async () => ({ teams: [] }));
-    const bridge = { extensions: [{ origin: EXTENSION_ORIGIN, browser: "Chrome" }], connected: true, call } as unknown as ExtensionBridge;
+    const bridge = { extensions: [{ origin: SIDELOADED_ORIGIN, browser: "Chrome" }], connected: true, call } as unknown as ExtensionBridge;
     expect(await setup(bridge, "0.0.0", { yes: true })).toBe(true);
     expect(call).toHaveBeenCalledWith("listTeams", { refresh: true, openTab: true }, expect.any(Number));
   });
@@ -52,7 +52,7 @@ describe("setup with no Teams tab open", () => {
     const lines: string[] = [];
     vi.mocked(console.log).mockImplementation((line: string) => void lines.push(line));
     const call = vi.fn(async () => ({ teams: [], note }));
-    const bridge = { extensions: [{ origin: EXTENSION_ORIGIN, browser: "Chrome" }], connected: true, call } as unknown as ExtensionBridge;
+    const bridge = { extensions: [{ origin: SIDELOADED_ORIGIN, browser: "Chrome" }], connected: true, call } as unknown as ExtensionBridge;
     expect(await setup(bridge, "0.0.0", { yes: true })).toBe(true);
     expect(lines.join("\n")).toContain("Teams reachable (0 teams)");
     expect(lines.join("\n")).toContain(note);
