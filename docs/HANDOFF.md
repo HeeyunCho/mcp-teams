@@ -1,8 +1,8 @@
-# Handoff: mcp-teams after 0.3.85–0.3.94 (#228, #227, #226, #224, #237, #243, #223, #248, #251, #249), updated 2026-11-22 on the Mac
+# Handoff: mcp-teams after 0.3.85–0.3.95 (#228, #227, #226, #224, #237, #243, #223, #248, #251, #249, #252), updated 2026-11-22 on the Mac
 
 ## Resume here (session of 2026-11-22, Mac)
 
-Resume notes for the next agent. Repo: `HeeyunCho/mcp-teams`, checkout `~/orca/mcp-teams` (git; scn is not used here). Local `main` = `origin/main` = `c2e67a1` (0.3.94, extension 1.1.1). Only `main` is checked out; no other worktrees.
+Resume notes for the next agent. Repo: `HeeyunCho/mcp-teams`, checkout `~/orca/mcp-teams` (git; scn is not used here). Local `main` = `origin/main` = `1d131ac` (0.3.95, extension 1.1.1). Only `main` is checked out; no other worktrees.
 
 ### What happened (2026-11-22)
 
@@ -20,8 +20,9 @@ Resume notes for the next agent. Repo: `HeeyunCho/mcp-teams`, checkout `~/orca/m
 | 0.3.92 (extension stays 1.1.0) | `93c2734` | #248 (`afcb3fe`) | #246 | Test only: a meeting chat that reaches 2,000 messages on page 8 of a 20-page read gets "newest 8 pages" in the cut-short note. The code was already right; reporting `maxPages` instead of `read.pages` makes it fail |
 | 0.3.93 (extension stays 1.1.0) | `c04344d` | #251 (`c30c39f`) | #250 | Test only: nativeHost's "#216: still refuses an id that isn't trusted…" is an `it.each` over the three origins, each waiting for the host's exit, not a welcome. The wait that gave up was `host()`'s 8 s welcome wait (`test/helpers/nativeHost.ts:230`, "timed out waiting for welcome from the host"): a refused host only exits, and under load its start took about 8 s. Reproduced with a preload that slows only the host's start |
 | 0.3.94 (extension **1.1.1**) | `c2e67a1` | #249 (`bd7df06`) | #239 | Option B: the repo manifest (the sideloaded copy, which `setup` installs) keeps `api_traffic`'s 13 host patterns; `webStoreManifest()` in `scripts/package-extension.mjs` writes the web store zip with only the five `EXTENSION_HOSTS` (now in `extension/teams.js`) and no `key`, and throws `Missing from manifest.json host_permissions: …` if one of the five is missing. The `api_traffic` wording (`src/sessionNote.ts`, `src/tools.ts`, the tool snapshot) and README's Security notes say which copy records. New GLOSSARY entry "Sideloaded copy". Two fresh-subagent reviews: the first found README's "five hosts only" wrong for setup's copy, fixed in `6654991`; the second said ready |
+| 0.3.95 (extension stays 1.1.1) | `1d131ac` | #252 (`819760f`) | #245 (items 1, 2, 4) | No behaviour change: `normalizeOrigin` (`src/extension.ts`) replaces the four trailing-slash copies; the sideloaded origin string is `SIDELOADED_ORIGIN` (no `UNPACKED_EXTENSION_ORIGIN` alias) and the bridge's regex `ANY_EXTENSION_ORIGIN`; `store` → `webStore`, and the tests' `WEB_STORE_ID`/`WEB_STORE_ORIGIN`. It says "Part of #245", so #245 stays open (item 3 is #253) |
 
-Docs only (no release): #238, #240, #244 and #247, the earlier resume notes.
+Docs only (no release): #238, #240, #244, #247 and #254, the earlier resume notes.
 
 **Issues opened** (all `ready-for-agent`, each linked as a sub-issue with `gh api …/sub_issues`):
 - **#239** (sub-issue of #218): option B for `api_traffic`'s hosts. Keep them in the repo manifest, drop them only in the web store zip (`scripts/package-extension.mjs`), and fix the stale `api_traffic` wording at `src/sessionNote.ts:71` and `src/tools.ts:253`. Unblocked now that #223 is merged.
@@ -34,9 +35,9 @@ Docs only (no release): #238, #240, #244 and #247, the earlier resume notes.
 
 **#223 (#218):** merged as `c1be71c` → 0.3.91 (extension 1.1.0), after `origin/main` was merged into it twice (no rebase; the README conflict kept #223's "Two development aids are off…" paragraph, then #224's trusted-ids paragraph). `feat/218-narrow-host-permissions` is deleted on origin.
 
-**#252 (#245 items 1, 2 and 4), open:** `normalizeOrigin` for the four trailing-slash copies, `SIDELOADED_ORIGIN` / `ANY_EXTENSION_ORIGIN` for the two `EXTENSION_ORIGIN`s, `store` → `webStore` / `WEB_STORE_ID` / `WEB_STORE_ORIGIN`. It says "Part of #245", not "Fixes" (item 3 moved to #253). It went **CONFLICTING** when #249 landed; a worktree subagent is merging `origin/main` into it (keep #252's names and #249's `EXTENSION_HOSTS`/`webStoreManifest`).
+**#252 (#245 items 1, 2 and 4):** went **CONFLICTING** when #251 landed (not #249): the only conflict was `test/system/nativeHost.test.ts`, resolved by keeping #251's `it.each` refusal tests with `SIDELOADED_ORIGIN`. A worktree subagent merged `origin/main` in (no rebase) at `6804ec0`; #249's changes merged cleanly, and its `_storeHosts`/`storeRest` in `packageExtension.test.ts` became `_webStoreHosts`/`webStoreRest`. Both full runs passed with no flakes. Merged as `819760f` → 0.3.95. **#245 stays open** for its item 3 (now #253): close it, or let #253's PR close it.
 
-**Worktrees removed** (all with their merged branches): the Orca worktree `fix-149-keepalive-drop-logs` (at the user's request, through Orca), `.claude/worktrees/fix-178-cache-bytes`, `pr226-rotating`, `agent-a8002e5d1f0dfcde0`, and #243's subagent worktree. `fix/178-transcript-cache-bytes`, `test/230-late-trusted-hello` `feat/218-narrow-host-permissions`, `test/246-chat-cut-2000`, `test/250-native-refusal-flake` and `fix/239-web-store-traffic-hosts` are deleted on origin, and their subagent worktrees removed.
+**Worktrees removed** (all with their merged branches): the Orca worktree `fix-149-keepalive-drop-logs` (at the user's request, through Orca), `.claude/worktrees/fix-178-cache-bytes`, `pr226-rotating`, `agent-a8002e5d1f0dfcde0`, and #243's subagent worktree. `fix/178-transcript-cache-bytes`, `test/230-late-trusted-hello` `feat/218-narrow-host-permissions`, `test/246-chat-cut-2000`, `test/250-native-refusal-flake`, `fix/239-web-store-traffic-hosts` and `refactor/245-origin-helpers` are deleted on origin, and their subagent worktrees removed.
 
 **Flakes seen** (none in the code under change; all passed alone):
 - CI on #238: `diagnose.test.ts` "expected 299 to be ≥ 300". `gh run rerun <id> --failed` passed.
@@ -46,7 +47,7 @@ Docs only (no release): #238, #240, #244 and #247, the earlier resume notes.
 
 ### Open work, in priority order
 
-1. **#252:** after the `origin/main` merge is pushed, check CI and mergeability, then merge with `--match-head-commit` when the user asks.
+1. **#245:** still open after #252 ("Part of #245"); its item 3 is #253. Close #245 by hand, or have #253's PR say "Fixes #245" too.
 2. **Extension 1.1.1 live check (the user's):** reload the sideloaded copy in Chrome and Edge; check sign-in, a read, and that `api_traffic` records. Build the web store zip (`node scripts/package-extension.mjs`) and check its manifest has the five hosts and no `key`.
 3. **#241, #242, #253:** `ready-for-agent`.
 4. **#221** (outside contributor, `fix/epipe-client-gone`, last updated 2026-11-17): still open and unreviewed. #222 already fixed #215's EPIPE loop, so check whether anything in it is still needed before reviewing.
