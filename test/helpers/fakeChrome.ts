@@ -19,7 +19,7 @@ const MANIFEST: { version: string; permissions: string[]; host_permissions: stri
   readFileSync(new URL("../../extension/manifest.json", import.meta.url), "utf8"),
 );
 
-/** The worker reports its manifest's version, as in the browser (sends need 0.2.13 or newer). */
+/** The worker reports its manifest's version, as in the browser (on its own line since #219; sends need the cancelSend it declares). */
 export const EXTENSION_VERSION: string = MANIFEST.version;
 
 /**

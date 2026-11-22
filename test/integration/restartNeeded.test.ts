@@ -97,7 +97,7 @@ describe("restartNeeded", () => {
           type: "text",
           text:
             "No Teams tab is open.\n" +
-            "mcp-teams was updated on disk (running 0.9.1 0a1b2c3d4e5f, on disk 0.9.2 f5e4d3c2b1a0): reconnect it with /mcp, then reload the extension.",
+            "mcp-teams was updated on disk (running 0.9.1 0a1b2c3d4e5f, on disk 0.9.2 f5e4d3c2b1a0): reconnect it with /mcp. If the browser extension changed too, reload_extension loads it (a copy from the Chrome Web Store or Edge Add-ons updates from the store instead).",
         },
       ],
     });
@@ -127,7 +127,7 @@ describe("restartNeeded", () => {
     });
     expect((await tools.failing()).content[0].text).toBe(
       "No Teams tab is open.\n" +
-        "mcp-teams was updated on disk (running 0.9.1 0a1b2c3d4e5f, on disk 0.9.2 0a1b2c3d4e5f): reconnect it with /mcp, then reload the extension.",
+        "mcp-teams was updated on disk (running 0.9.1 0a1b2c3d4e5f, on disk 0.9.2 0a1b2c3d4e5f): reconnect it with /mcp. If the browser extension changed too, reload_extension loads it (a copy from the Chrome Web Store or Edge Add-ons updates from the store instead).",
     );
   });
 
@@ -172,7 +172,7 @@ describe("restartNeeded after a rebuild", { timeout: 30_000 }, () => {
     expect(v.onDisk.build).not.toBe(build);
     expect((await tools.failing()).content[0].text).toBe(
       "No Teams tab is open.\n" +
-        `mcp-teams was updated on disk (running 0.9.1 ${build}, on disk 0.9.1 ${v.onDisk.build}): reconnect it with /mcp, then reload the extension.`,
+        `mcp-teams was updated on disk (running 0.9.1 ${build}, on disk 0.9.1 ${v.onDisk.build}): reconnect it with /mcp. If the browser extension changed too, reload_extension loads it (a copy from the Chrome Web Store or Edge Add-ons updates from the store instead).`,
     );
   });
 

@@ -505,11 +505,17 @@ describe("#218: the manifest's permissions", () => {
 describe("versions", () => {
   const read = (f: string) => JSON.parse(readFileSync(f, "utf8"));
 
-  it("package.json, package-lock.json and the extension manifest agree", () => {
+  it("package.json and package-lock.json agree", () => {
     const { version } = read("package.json");
-    expect(read("extension/manifest.json").version).toBe(version);
     expect(read("package-lock.json").version).toBe(version);
     expect(read("package-lock.json").packages[""].version).toBe(version);
+  });
+
+  // #219: the extension has its own line, from 1.0.0. It must stay above 0.3.79, the last version
+  // bumped with the package, or the never-downgrade folder sync keeps sideloaded copies on that one.
+  it("the extension manifest is on its own line, above every version bumped with the package", () => {
+    const [major] = String(read("extension/manifest.json").version).split(".").map(Number);
+    expect(major).toBeGreaterThanOrEqual(1);
   });
 });
 
