@@ -67,16 +67,19 @@ describe("#123: the native host", { timeout: 30_000 }, () => {
     }
   });
 
-  it("#216: still refuses an id that isn't trusted, or one that only starts like a trusted one", async () => {
-    for (const origin of ["chrome-extension://ponmlkjihgfedcbaponmlkjihgfedcba/", `${EXTENSION_ORIGIN}x/`, `${EXTENSION_ORIGIN.toUpperCase()}/`]) {
-      h = await nativeHarness();
-      const ext = await h.host({ origin });
-      expect(await ext.exited).not.toBe(0);
-      expect(ext.received).toEqual([]);
-      expect(h.logText()).toMatch(/ refused reason=unknown caller origin/);
-      await h.cleanup();
-      h = undefined;
-    }
+  // #250: one test per origin, so each host start has the whole budget, and no wait for a welcome
+  // the refused host never sends: host()'s 8 s welcome-or-exit wait gave up when a loaded Mac took
+  // that long to start the host's node process. ext.exited is bounded by the test's timeout.
+  it.each([
+    ["an id that isn't trusted", "chrome-extension://ponmlkjihgfedcbaponmlkjihgfedcba/"],
+    ["one that only starts like a trusted one", `${EXTENSION_ORIGIN}x/`],
+    ["a trusted one in capitals", `${EXTENSION_ORIGIN.toUpperCase()}/`],
+  ])("#216: still refuses %s", async (_, origin) => {
+    h = await nativeHarness();
+    const ext = await h.host({ origin }, false);
+    expect(await ext.exited).not.toBe(0);
+    expect(ext.received).toEqual([]);
+    expect(h.logText()).toMatch(/ refused reason=unknown caller origin/);
   });
 
   it("#123: with nativeHost off in config.json it does nothing and exits, so the extension stays on TCP", async () => {
