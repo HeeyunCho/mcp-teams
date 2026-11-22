@@ -62,6 +62,9 @@ export function isTrustedOrigin(origin: unknown, ids: ExtensionIds = EXTENSION_I
  * (#216). Both are served (they have different instances, so they look like two browsers), but one
  * browser needs only one: get_version and setup suggest removing the sideloaded one. Copies in
  * different browsers, or in two profiles of the same browser with the same id, aren't counted.
+ * Two profiles of one browser each with one of the two copies are counted too (#245): nothing on a
+ * connection names its profile. `instance` is kept in each copy's own chrome.storage.local, so two
+ * copies in one profile already differ in it, as two profiles do.
  */
 export function browsersWithTwoCopies(extensions: readonly { origin?: string; browser?: string }[], ids: ExtensionIds = EXTENSION_IDS): string[] {
   const has = (browser: string | undefined, webStore: boolean) =>
