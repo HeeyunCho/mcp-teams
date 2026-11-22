@@ -7,7 +7,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { randomUUID } from "node:crypto";
 import WebSocket, { WebSocketServer } from "ws";
 import { proof, type BridgeOptions } from "../../src/bridge.js";
-import { EXTENSION_ORIGIN } from "../../src/extension.js";
+import { EXTENSION_ID, EXTENSION_ORIGIN } from "../../src/extension.js";
 import { FAST, TOKEN, bridgeHarness, type BridgeHarness } from "../helpers/bridgeHarness.js";
 import { until } from "../helpers/timing.js";
 
@@ -43,16 +43,21 @@ const SLOW_AUTH: BridgeOptions = { ...FAST, authTimeoutMs: 10_000 };
  * A "0.3.72" hub, a client at its challenge, then a "0.3.80" session that the hub hands the port to.
  * paused: the client stops reading once it has its challenge, so it never sees the ex-hub's close.
  */
-async function handOverWith({ origin, oldHubOptions = {}, paused = false }: { origin?: string; oldHubOptions?: BridgeOptions; paused?: boolean } = {}) {
+async function handOverWith({
+  origin,
+  oldHubOptions = {},
+  newHubOptions = {},
+  paused = false,
+}: { origin?: string; oldHubOptions?: BridgeOptions; newHubOptions?: BridgeOptions; paused?: boolean } = {}) {
   h = await bridgeHarness(SLOW_AUTH);
   const oldHub = await h.session("0.3.72", oldHubOptions);
   expect(oldHub.role).toBe("hub");
   const late = await challenged(h.port, origin);
   if (paused) (late.ws as any)._socket.pause();
   // A newer server joins: the old hub hands over (handover, role=none) and closes its listener.
-  await h.session("0.3.80");
+  const newHub = await h.session("0.3.80", newHubOptions);
   await until(() => oldHub.role === "none", 2_000, "the old hub to step down");
-  return { oldHub, late };
+  return { oldHub, newHub, late };
 }
 
 // Longer than a peer's watchdog would wait for its hub's ping (2 periods, never under 2 s), and
@@ -102,6 +107,54 @@ describe("a hello that arrives after the hub handed over", () => {
     late.ws.terminate();
 
     expect(events.slice(handedOver)).not.toContain("extension-connected");
+  }, 10_000);
+});
+
+// #216: a web store install has another id, which a hub counts as our extension when it is in its
+// trusted ids (trustedExtensionIds, #224). The ex-hub's role check (#230) comes before that origin
+// logic, so a trusted id doesn't get a late hello past it.
+describe("a late hello from a trusted web store id", () => {
+  // A fictional web store id (32 letters a-p).
+  const STORE_ID = "abcdefghijklmnopabcdefghijklmnop";
+  const STORE_ORIGIN = `chrome-extension://${STORE_ID}`;
+  const trustedExtensionIds = { unpacked: EXTENSION_ID, chromeWebStore: STORE_ID };
+
+  it("is refused by the ex-hub with 1012, while a serving hub with the same trusted ids takes that id", async () => {
+    const events: { event: string; fields?: Record<string, string | number | undefined> }[] = [];
+    const diagnose = (event: string, fields?: Record<string, string | number | undefined>) => void events.push({ event, fields });
+    // As in "a hello that crosses the ex-hub's close on the wire": the client stops reading before
+    // the hand-over, so its hello reaches the ex-hub on a connection it is already closing.
+    const { oldHub, newHub, late } = await handOverWith({
+      origin: STORE_ORIGIN,
+      oldHubOptions: { diagnose, trustedExtensionIds },
+      newHubOptions: { trustedExtensionIds },
+      paused: true,
+    });
+    expect(late.closed).toBeUndefined();
+    const handedOver = events.length;
+    late.ws.send(JSON.stringify({ type: "hello", proof: proof(TOKEN, "client", late.challenge!), nonce: "n-late", version: "0.1.0", browser: "Chrome", instance: "late" }));
+    await new Promise((r) => setTimeout(r, 500));
+    // Now it reads what the ex-hub sent: its close, and nothing else.
+    (late.ws as any)._socket.resume();
+    await until(() => late.closed !== undefined, 2_000, "the ex-hub's close");
+    const after = events.slice(handedOver);
+    const snapshot = {
+      closed: late.closed,
+      welcomed: late.seen.includes("welcome"),
+      pings: late.pings,
+      takenAsExtension: after.some((e) => e.event === "extension-connected") || oldHub.extensions.some((e) => e.origin === STORE_ORIGIN),
+    };
+    late.ws.terminate();
+    expect(snapshot).toEqual({ closed: 1012, welcomed: false, pings: 0, takenAsExtension: false });
+    expect(after.find((e) => e.event === "handshake-closed")?.fields).toMatchObject({ code: 1012, reason: "restarting", hello: "hello" });
+
+    // The same id is ours to a serving hub with the same trusted ids: with the sideloaded copy
+    // connected, it is welcomed beside it, not turned away as another copy (4409).
+    await h.extension({ origin: EXTENSION_ORIGIN, instance: "profile-a" });
+    const store = await h.extension({ origin: STORE_ORIGIN, instance: "profile-b" });
+    expect(store.welcome).toMatchObject({ type: "welcome" });
+    await until(() => newHub.extensions.length === 2, 2_000, "both copies on the new hub");
+    expect(newHub.extensions.map((e) => e.origin).sort()).toEqual([EXTENSION_ORIGIN, STORE_ORIGIN].sort());
   }, 10_000);
 });
 
