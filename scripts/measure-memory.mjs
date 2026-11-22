@@ -144,9 +144,9 @@ if (args.includes("--hub")) {
 } else if (args.includes("--extension")) {
   const { default: WebSocket } = await import("ws");
   const { proof } = await import("../dist/bridge.js");
-  const { EXTENSION_ORIGIN } = await import("../dist/extension.js");
+  const { SIDELOADED_ORIGIN } = await import("../dist/extension.js");
   const answers = extensionAnswers(transcript(opt("lines", 0)), opt("messages", 0));
-  const ws = new WebSocket(`ws://127.0.0.1:${PORT}`, { origin: EXTENSION_ORIGIN, maxPayload: 256 * MB });
+  const ws = new WebSocket(`ws://127.0.0.1:${PORT}`, { origin: SIDELOADED_ORIGIN, maxPayload: 256 * MB });
   const nonce = randomUUID();
   await new Promise((resolve, reject) => {
     ws.on("error", reject);

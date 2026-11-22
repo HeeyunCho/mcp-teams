@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import WebSocket from "ws";
 import { ExtensionBridge, isNewer, NOT_SENT, proof } from "../../src/bridge.js";
-import { EXTENSION_ID, EXTENSION_ORIGIN, extensionIdFromKey, installedVersion, syncExtension, writePairing } from "../../src/extension.js";
+import { EXTENSION_ID, SIDELOADED_ORIGIN, extensionIdFromKey, installedVersion, syncExtension, writePairing } from "../../src/extension.js";
 // @ts-expect-error plain JS module shared with the extension
 import { pairingProof } from "../../extension/teams.js";
 import { until } from "../helpers/timing.js";
@@ -88,17 +88,17 @@ describe("pairing", () => {
   it("accepts our extension when it proves the token, proves itself back, and records where it connected from", async () => {
     bridge = new TestBridge("secret", "0.15.0");
     await bridge.start();
-    const ext = extension(EXTENSION_ORIGIN, "secret");
+    const ext = extension(SIDELOADED_ORIGIN, "secret");
     const welcome = await ext.welcome;
     expect(welcome.proof).toBe(proof("secret", "server", ext.nonce));
-    expect(bridge.extension).toMatchObject({ version: "0.15.0", origin: EXTENSION_ORIGIN });
+    expect(bridge.extension).toMatchObject({ version: "0.15.0", origin: SIDELOADED_ORIGIN });
     ext.ws.close();
   });
 
   it("turns away anything with our extension's origin but a wrong proof", async () => {
     bridge = new TestBridge("secret", "0.15.0");
     await bridge.start();
-    const ext = extension(EXTENSION_ORIGIN, "guess");
+    const ext = extension(SIDELOADED_ORIGIN, "guess");
     expect(await ext.welcome).toBeNull();
     expect(bridge.connected).toBe(false);
   });
@@ -107,14 +107,14 @@ describe("pairing", () => {
     bridge = new TestBridge("secret", "0.15.0");
     await bridge.start();
     const got: string[] = [];
-    const old = extension(EXTENSION_ORIGIN, null, { onRequest: (_, msg) => got.push(msg.method) });
+    const old = extension(SIDELOADED_ORIGIN, null, { onRequest: (_, msg) => got.push(msg.method) });
     const code = await new Promise((r) => old.ws.on("close", r));
     expect(code).toBe(4426);
     expect(got).toEqual(["reload"]);
     expect(bridge.connected).toBe(false);
     await expect(bridge.call("listChats")).rejects.toThrow(/not connected/);
     const again: string[] = [];
-    const second = extension(EXTENSION_ORIGIN, null, { onRequest: (_, msg) => again.push(msg.method) });
+    const second = extension(SIDELOADED_ORIGIN, null, { onRequest: (_, msg) => again.push(msg.method) });
     await new Promise((r) => second.ws.on("close", r));
     expect(again).toEqual([]);
   });
@@ -134,46 +134,46 @@ describe("two copies of the extension", () => {
   it("keeps our extension connected and turns an older copy away", async () => {
     bridge = new TestBridge("secret", "0.15.0");
     await bridge.start();
-    const ours = extension(EXTENSION_ORIGIN, "secret");
+    const ours = extension(SIDELOADED_ORIGIN, "secret");
     await ours.welcome;
     const old = extension("chrome-extension://eppconghijagecilnpngjgafbnphfhpd", "secret");
     expect(await new Promise((r) => old.ws.on("close", r))).toBe(4409);
     expect(bridge.connected).toBe(true);
-    expect(bridge.extension?.origin).toBe(EXTENSION_ORIGIN);
+    expect(bridge.extension?.origin).toBe(SIDELOADED_ORIGIN);
     ours.ws.close();
   });
 
   // #216: a web store install has another id; every id in the trusted list is "ours".
-  const STORE_ORIGIN = "chrome-extension://abcdefghijklmnopabcdefghijklmnop";
+  const WEB_STORE_ORIGIN = "chrome-extension://abcdefghijklmnopabcdefghijklmnop";
   const trustedExtensionIds = { unpacked: EXTENSION_ID, chromeWebStore: "abcdefghijklmnopabcdefghijklmnop" };
 
   it("#216: keeps a web store copy (a second trusted id) next to the sideloaded one: neither is refused nor replaced", async () => {
     bridge = new TestBridge("secret", "0.15.0", { trustedExtensionIds });
     await bridge.start();
-    const sideloaded = extension(EXTENSION_ORIGIN, "secret", { instance: "profile-a" });
+    const sideloaded = extension(SIDELOADED_ORIGIN, "secret", { instance: "profile-a" });
     await sideloaded.welcome;
-    const store = extension(STORE_ORIGIN, "secret", { instance: "profile-b" });
-    expect(await store.welcome).toMatchObject({ type: "welcome" });
+    const webStore = extension(WEB_STORE_ORIGIN, "secret", { instance: "profile-b" });
+    expect(await webStore.welcome).toMatchObject({ type: "welcome" });
     await until(() => bridge!.extensions.length === 2, 2_000, "both copies listed");
-    expect(bridge.extensions.map((e) => e.origin).sort()).toEqual([STORE_ORIGIN, EXTENSION_ORIGIN].sort());
+    expect(bridge.extensions.map((e) => e.origin).sort()).toEqual([WEB_STORE_ORIGIN, SIDELOADED_ORIGIN].sort());
     expect(sideloaded.ws.readyState).toBe(WebSocket.OPEN);
     // The other way round: the sideloaded copy connecting doesn't replace the web store copy.
-    const again = extension(EXTENSION_ORIGIN, "secret", { instance: "profile-c" });
+    const again = extension(SIDELOADED_ORIGIN, "secret", { instance: "profile-c" });
     await again.welcome;
     await until(() => bridge!.extensions.length === 3, 2_000, "all three listed");
-    expect(store.ws.readyState).toBe(WebSocket.OPEN);
-    for (const e of [sideloaded, store, again]) e.ws.close();
+    expect(webStore.ws.readyState).toBe(WebSocket.OPEN);
+    for (const e of [sideloaded, webStore, again]) e.ws.close();
   });
 
   it("#216: still turns away an id that isn't trusted while a trusted copy is connected (4409)", async () => {
     bridge = new TestBridge("secret", "0.15.0", { trustedExtensionIds });
     await bridge.start();
-    const store = extension(STORE_ORIGIN, "secret");
-    await store.welcome;
+    const webStore = extension(WEB_STORE_ORIGIN, "secret");
+    await webStore.welcome;
     const other = extension("chrome-extension://ponmlkjihgfedcbaponmlkjihgfedcba", "secret");
     expect(await new Promise((r) => other.ws.on("close", r))).toBe(4409);
-    expect(bridge.extensions.map((e) => e.origin)).toEqual([STORE_ORIGIN]);
-    store.ws.close();
+    expect(bridge.extensions.map((e) => e.origin)).toEqual([WEB_STORE_ORIGIN]);
+    webStore.ws.close();
   });
 });
 
@@ -188,7 +188,7 @@ describe("several browsers at once", () => {
   const browser = (name: string, instance: string, signedIn: boolean, teamsTabs = 1) => {
     const got: string[] = [];
     const state = { teamsTabs };
-    const { ws, welcome } = extension(EXTENSION_ORIGIN, "secret", {
+    const { ws, welcome } = extension(SIDELOADED_ORIGIN, "secret", {
       browser: name,
       instance,
       onRequest: (ws, msg) => {
@@ -276,7 +276,7 @@ describe("several browsers at once", () => {
       await bridge.start();
       /** Answers calls but never its status, like a browser whose service worker is stuck. */
       const frozen = (name: string, instance: string) => {
-        const { ws, welcome } = extension(EXTENSION_ORIGIN, "secret", {
+        const { ws, welcome } = extension(SIDELOADED_ORIGIN, "secret", {
           browser: name,
           instance,
           onRequest: (ws, msg) => {
@@ -308,7 +308,7 @@ describe("several browsers at once", () => {
     await bridge.start();
     // Edge has the Teams tab, so it's picked; it answers its status and then closes. Chrome
     // answers only once the hub has seen Edge go, so the pick lands after the close.
-    const edge = extension(EXTENSION_ORIGIN, "secret", {
+    const edge = extension(SIDELOADED_ORIGIN, "secret", {
       browser: "Edge",
       instance: "edge-1",
       onRequest: (ws, msg) => {
@@ -318,7 +318,7 @@ describe("several browsers at once", () => {
     });
     await edge.welcome;
     const chromeGot: string[] = [];
-    const chrome = extension(EXTENSION_ORIGIN, "secret", {
+    const chrome = extension(SIDELOADED_ORIGIN, "secret", {
       browser: "Chrome",
       instance: "chrome-1",
       onRequest: async (ws, msg) => {
@@ -409,7 +409,7 @@ describe("robustness", () => {
   const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
   /** A fake extension of ours that never answers requests. */
   const silent = async (instance: string) => {
-    const ext = extension(EXTENSION_ORIGIN, "secret", { instance });
+    const ext = extension(SIDELOADED_ORIGIN, "secret", { instance });
     await ext.welcome;
     return ext.ws;
   };

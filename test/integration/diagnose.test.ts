@@ -11,7 +11,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { afterEach, describe, expect, it } from "vitest";
 import WebSocket from "ws";
 import { proof } from "../../src/bridge.js";
-import { EXTENSION_ORIGIN } from "../../src/extension.js";
+import { SIDELOADED_ORIGIN } from "../../src/extension.js";
 import { diagnosticLog } from "../../src/serverLog.js";
 import { registerTools } from "../../src/tools.js";
 import { bridgeHarness, TOKEN, type BridgeHarness } from "../helpers/bridgeHarness.js";
@@ -158,7 +158,7 @@ describe("#156: why a handshake was refused", () => {
     h = await bridgeHarness();
     const { events, diagnose } = recorder();
     await h.session("1.0.0", { diagnose, authTimeoutMs: AUTH_MS });
-    const client = await refusedClient(h.port, undefined, EXTENSION_ORIGIN);
+    const client = await refusedClient(h.port, undefined, SIDELOADED_ORIGIN);
     const fields = await closed(events);
     expect(client.code).toBe(4401);
     expect(fields).toMatchObject({ code: 4401, reason: "auth timeout", via: "tcp", hello: "none", port: client.port });
@@ -170,7 +170,7 @@ describe("#156: why a handshake was refused", () => {
     h = await bridgeHarness();
     const { events, diagnose } = recorder();
     await h.session("1.0.0", { diagnose, authTimeoutMs: 10_000 });
-    await refusedClient(h.port, { type: "hello", proof: proof("not-the-token", "client", "x"), nonce: "n", version: "0.3.66" }, EXTENSION_ORIGIN);
+    await refusedClient(h.port, { type: "hello", proof: proof("not-the-token", "client", "x"), nonce: "n", version: "0.3.66" }, SIDELOADED_ORIGIN);
     const fields = await closed(events);
     expect(fields).toMatchObject({ code: 4401, reason: "bad token", via: "tcp", hello: "hello" });
     expect(fields.ms).toBeLessThan(10_000);
@@ -189,7 +189,7 @@ describe("#156: why a handshake was refused", () => {
     h = await bridgeHarness();
     const { events, diagnose } = recorder();
     await h.session("1.0.0", { diagnose, authTimeoutMs: AUTH_MS });
-    const socket = new WebSocket(`ws://127.0.0.1:${h.port}`, { origin: EXTENSION_ORIGIN });
+    const socket = new WebSocket(`ws://127.0.0.1:${h.port}`, { origin: SIDELOADED_ORIGIN });
     socket.on("error", () => {});
     // After the challenge, the next bytes are the hub's close frame: drop the connection without
     // sending a close back, so the hub's close event carries no code or reason of its own (1006).
@@ -207,7 +207,7 @@ describe("#156: why a handshake was refused", () => {
     h = await bridgeHarness();
     const { events, diagnose } = recorder();
     await h.session("1.0.0", { diagnose, authTimeoutMs: 10_000 });
-    const socket = new WebSocket(`ws://127.0.0.1:${h.port}`, { origin: EXTENSION_ORIGIN });
+    const socket = new WebSocket(`ws://127.0.0.1:${h.port}`, { origin: SIDELOADED_ORIGIN });
     socket.on("error", () => {});
     socket.once("message", () => socket.close(4401, "bad token")); // the client's words, not the hub's
     const fields = await closed(events);

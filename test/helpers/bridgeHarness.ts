@@ -4,7 +4,7 @@
 import { randomUUID } from "node:crypto";
 import WebSocket from "ws";
 import { ExtensionBridge, proof, type BridgeOptions } from "../../src/bridge.js";
-import { EXTENSION_ORIGIN } from "../../src/extension.js";
+import { SIDELOADED_ORIGIN } from "../../src/extension.js";
 
 export const TOKEN = "test-token";
 
@@ -59,7 +59,7 @@ export async function fakeExtension(port: number, opts: FakeExtensionOptions = {
     latencyMs = 0,
     silent = false,
     token = TOKEN,
-    origin = EXTENSION_ORIGIN,
+    origin = SIDELOADED_ORIGIN,
     browser = "Chrome",
     instance = "profile-1",
     version = "0.1.0", // MIN_EXTENSION: below it the hub answers only status and reload (#219)

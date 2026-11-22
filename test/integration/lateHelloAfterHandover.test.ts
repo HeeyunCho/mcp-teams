@@ -7,7 +7,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { randomUUID } from "node:crypto";
 import WebSocket, { WebSocketServer } from "ws";
 import { proof, type BridgeOptions } from "../../src/bridge.js";
-import { EXTENSION_ID, EXTENSION_ORIGIN } from "../../src/extension.js";
+import { EXTENSION_ID, SIDELOADED_ORIGIN } from "../../src/extension.js";
 import { FAST, TOKEN, bridgeHarness, type BridgeHarness } from "../helpers/bridgeHarness.js";
 import { until } from "../helpers/timing.js";
 
@@ -78,7 +78,7 @@ describe("a hello that arrives after the hub handed over", () => {
   }, 10_000);
 
   it("an extension's hello is not accepted by the ex-hub either", async () => {
-    const { oldHub, late } = await handOverWith({ origin: EXTENSION_ORIGIN });
+    const { oldHub, late } = await handOverWith({ origin: SIDELOADED_ORIGIN });
     const hello = { type: "hello", proof: proof(TOKEN, "client", late.challenge!), nonce: "n-late", version: "0.1.0", browser: "Chrome", instance: "late" };
     late.ws.send(JSON.stringify(hello));
     await settle();
@@ -99,7 +99,7 @@ describe("a hello that arrives after the hub handed over", () => {
     const diagnose = (event: string) => void events.push(event);
     // The client stops reading before the hand-over, so it sends its hello without having seen the
     // ex-hub's close frame; the ex-hub reads that hello on a connection it is already closing.
-    const { late } = await handOverWith({ origin: EXTENSION_ORIGIN, oldHubOptions: { diagnose }, paused: true });
+    const { late } = await handOverWith({ origin: SIDELOADED_ORIGIN, oldHubOptions: { diagnose }, paused: true });
     expect(late.closed).toBeUndefined();
     const handedOver = events.length;
     late.ws.send(JSON.stringify({ type: "hello", proof: proof(TOKEN, "client", late.challenge!), nonce: "n-late", version: "0.1.0", browser: "Chrome", instance: "late" }));
@@ -115,9 +115,9 @@ describe("a hello that arrives after the hub handed over", () => {
 // logic, so a trusted id doesn't get a late hello past it.
 describe("a late hello from a trusted web store id", () => {
   // A fictional web store id (32 letters a-p).
-  const STORE_ID = "abcdefghijklmnopabcdefghijklmnop";
-  const STORE_ORIGIN = `chrome-extension://${STORE_ID}`;
-  const trustedExtensionIds = { unpacked: EXTENSION_ID, chromeWebStore: STORE_ID };
+  const WEB_STORE_ID = "abcdefghijklmnopabcdefghijklmnop";
+  const WEB_STORE_ORIGIN = `chrome-extension://${WEB_STORE_ID}`;
+  const trustedExtensionIds = { unpacked: EXTENSION_ID, chromeWebStore: WEB_STORE_ID };
 
   it("is refused by the ex-hub with 1012, while a serving hub with the same trusted ids takes that id", async () => {
     const events: { event: string; fields?: Record<string, string | number | undefined> }[] = [];
@@ -125,7 +125,7 @@ describe("a late hello from a trusted web store id", () => {
     // As in "a hello that crosses the ex-hub's close on the wire": the client stops reading before
     // the hand-over, so its hello reaches the ex-hub on a connection it is already closing.
     const { oldHub, newHub, late } = await handOverWith({
-      origin: STORE_ORIGIN,
+      origin: WEB_STORE_ORIGIN,
       oldHubOptions: { diagnose, trustedExtensionIds },
       newHubOptions: { trustedExtensionIds },
       paused: true,
@@ -142,7 +142,7 @@ describe("a late hello from a trusted web store id", () => {
       closed: late.closed,
       welcomed: late.seen.includes("welcome"),
       pings: late.pings,
-      takenAsExtension: after.some((e) => e.event === "extension-connected") || oldHub.extensions.some((e) => e.origin === STORE_ORIGIN),
+      takenAsExtension: after.some((e) => e.event === "extension-connected") || oldHub.extensions.some((e) => e.origin === WEB_STORE_ORIGIN),
     };
     late.ws.terminate();
     expect(snapshot).toEqual({ closed: 1012, welcomed: false, pings: 0, takenAsExtension: false });
@@ -150,11 +150,11 @@ describe("a late hello from a trusted web store id", () => {
 
     // The same id is ours to a serving hub with the same trusted ids: with the sideloaded copy
     // connected, it is welcomed beside it, not turned away as another copy (4409).
-    await h.extension({ origin: EXTENSION_ORIGIN, instance: "profile-a" });
-    const store = await h.extension({ origin: STORE_ORIGIN, instance: "profile-b" });
-    expect(store.welcome).toMatchObject({ type: "welcome" });
+    await h.extension({ origin: SIDELOADED_ORIGIN, instance: "profile-a" });
+    const webStore = await h.extension({ origin: WEB_STORE_ORIGIN, instance: "profile-b" });
+    expect(webStore.welcome).toMatchObject({ type: "welcome" });
     await until(() => newHub.extensions.length === 2, 2_000, "both copies on the new hub");
-    expect(newHub.extensions.map((e) => e.origin).sort()).toEqual([EXTENSION_ORIGIN, STORE_ORIGIN].sort());
+    expect(newHub.extensions.map((e) => e.origin).sort()).toEqual([SIDELOADED_ORIGIN, WEB_STORE_ORIGIN].sort());
   }, 10_000);
 });
 

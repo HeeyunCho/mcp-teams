@@ -29,7 +29,7 @@ import { join } from "node:path";
 import WebSocket from "ws";
 import { DEFAULT_BRIDGE_OPTIONS, ExtensionBridge, MAX_MESSAGE_BYTES, proof, socketTransport, type BridgeSocket } from "./bridge.js";
 import { CONFIG_DIR, SERVER_VERSION, loadConfig } from "./config.js";
-import { isTrustedOrigin } from "./extension.js";
+import { isTrustedOrigin, normalizeOrigin } from "./extension.js";
 import { errorFields, hubLog, trafficLogger } from "./hubLog.js";
 import { FrameDecoder, NativePort, hubSocketPath, msFromEnv, socketNeedsProof } from "./native.js";
 
@@ -63,7 +63,7 @@ process.on("uncaughtException", (err) => log("error", { what: "uncaught-exceptio
 // Chrome passes the caller's origin first ("chrome-extension://<id>/"; on Windows a
 // --parent-window argument follows). Only our extension may use this host: any id in the trusted
 // list (#216: sideload, Chrome Web Store, Edge Add-ons), matched exactly (isTrustedOrigin).
-const origin = (process.argv[2] ?? "").replace(/\/+$/, "");
+const origin = normalizeOrigin(process.argv[2] ?? "");
 if (!isTrustedOrigin(origin)) {
   log("refused", { reason: "unknown caller origin" });
   process.stderr.write("mcp-teams hub: refused: only the mcp-teams extension may start this host.\n");

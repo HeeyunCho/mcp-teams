@@ -12,7 +12,7 @@ import { PassThrough } from "node:stream";
 import WebSocket, { WebSocketServer } from "ws";
 import { afterEach, describe, expect, it } from "vitest";
 import { ExtensionBridge, proof, type BridgeOptions } from "../../src/bridge.js";
-import { EXTENSION_ID, EXTENSION_ORIGIN } from "../../src/extension.js";
+import { EXTENSION_ID, SIDELOADED_ORIGIN } from "../../src/extension.js";
 import { FrameDecoder, NativePort } from "../../src/native.js";
 import { fakeExtension, FAST, TOKEN } from "../helpers/bridgeHarness.js";
 import { until } from "../helpers/timing.js";
@@ -25,8 +25,8 @@ afterEach(async () => {
 const unixOnly = it.skipIf(process.platform === "win32");
 
 // #216: fictional extension ids (32 letters a–p): a web store install's, and one nobody trusts.
-const STORE_ID = "abcdefghijklmnopabcdefghijklmnop";
-const STORE_ORIGIN = `chrome-extension://${STORE_ID}`;
+const WEB_STORE_ID = "abcdefghijklmnopabcdefghijklmnop";
+const WEB_STORE_ORIGIN = `chrome-extension://${WEB_STORE_ID}`;
 const OTHER_ID = "ponmlkjihgfedcbaponmlkjihgfedcba";
 
 /** A hub socket of its own: a Unix socket in a temporary folder, or a named pipe named after it. */
@@ -193,7 +193,7 @@ describe("#123: the native host's hub socket", () => {
     const r = await rawClient(path, { type: "hello", version: "0.3.56", browser: "Edge", instance: "profile-2" }, TOKEN);
     expect(r.msg).toMatchObject({ type: "welcome", capabilities: { features: expect.arrayContaining(["native"]) } });
     await until(() => hub.connected);
-    expect(hub.extension).toMatchObject({ browser: "Edge", origin: EXTENSION_ORIGIN });
+    expect(hub.extension).toMatchObject({ browser: "Edge", origin: SIDELOADED_ORIGIN });
   });
 
   it("#123: the native port is the host's extension: welcome, calls, and the keep-alive keeps it (synthetic pong)", async () => {
@@ -202,7 +202,7 @@ describe("#123: the native host's hub socket", () => {
     const ext = nativeExtension(hub);
     await until(() => hub.connected, 3_000, "the native extension");
     expect(ext.received.find((m) => m.type === "welcome")).toMatchObject({ type: "welcome", heartbeatMs: FAST.keepAliveMs, capabilities: { features: expect.arrayContaining(["native"]) } });
-    expect(hub.extension).toMatchObject({ browser: "Chrome", origin: EXTENSION_ORIGIN });
+    expect(hub.extension).toMatchObject({ browser: "Chrome", origin: SIDELOADED_ORIGIN });
     await expect(hub.call("listChats", {}, 2_000)).resolves.toEqual({ via: "native", method: "listChats" });
     // A port that never answered ping() would be dropped at the keep-alive's second tick. Wait
     // for four ticks (the extension sees each one's {type:"ping"}): it is still there.
@@ -213,10 +213,10 @@ describe("#123: the native host's hub socket", () => {
 
   it("#216: records the origin the native port came from when it is a second trusted id (a web store install), not the sideload id", async () => {
     const path = tempSocket();
-    const hub = await host(path, { trustedExtensionIds: { unpacked: EXTENSION_ID, chromeWebStore: STORE_ID } });
-    nativeExtension(hub, undefined, STORE_ORIGIN);
+    const hub = await host(path, { trustedExtensionIds: { unpacked: EXTENSION_ID, chromeWebStore: WEB_STORE_ID } });
+    nativeExtension(hub, undefined, WEB_STORE_ORIGIN);
     await until(() => hub.connected, 3_000, "the native extension");
-    expect(hub.extensions.map((e) => e.origin)).toEqual([STORE_ORIGIN]);
+    expect(hub.extensions.map((e) => e.origin)).toEqual([WEB_STORE_ORIGIN]);
   });
 
   it("#216: refuses to attach a native port from an origin that isn't trusted", async () => {
@@ -228,11 +228,11 @@ describe("#123: the native host's hub socket", () => {
 
   it("#216: a relaying host's hello names its extension's origin, which the serving host records when it is trusted", async () => {
     const path = tempSocket();
-    const hub = await host(path, { trustedExtensionIds: { unpacked: EXTENSION_ID, chromeWebStore: STORE_ID } });
-    const r = await rawClient(path, { type: "hello", version: "0.3.56", browser: "Edge", instance: "profile-2", origin: STORE_ORIGIN });
+    const hub = await host(path, { trustedExtensionIds: { unpacked: EXTENSION_ID, chromeWebStore: WEB_STORE_ID } });
+    const r = await rawClient(path, { type: "hello", version: "0.3.56", browser: "Edge", instance: "profile-2", origin: WEB_STORE_ORIGIN });
     expect(r.msg).toMatchObject({ type: "welcome" });
     await until(() => hub.connected);
-    expect(hub.extension).toMatchObject({ browser: "Edge", origin: STORE_ORIGIN });
+    expect(hub.extension).toMatchObject({ browser: "Edge", origin: WEB_STORE_ORIGIN });
   });
 
   it("#216: an origin in a relayed hello that isn't trusted is not recorded: the extension counts as the sideloaded one, as before", async () => {
@@ -241,7 +241,7 @@ describe("#123: the native host's hub socket", () => {
     const r = await rawClient(path, { type: "hello", version: "0.3.56", browser: "Edge", instance: "profile-2", origin: `chrome-extension://${OTHER_ID}` });
     expect(r.msg).toMatchObject({ type: "welcome" });
     await until(() => hub.connected);
-    expect(hub.extension).toMatchObject({ browser: "Edge", origin: EXTENSION_ORIGIN });
+    expect(hub.extension).toMatchObject({ browser: "Edge", origin: SIDELOADED_ORIGIN });
   });
 
   unixOnly("#123: replaces a socket file nobody listens on (a host that crashed)", async () => {

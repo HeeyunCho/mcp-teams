@@ -2,7 +2,7 @@
 // when one browser has both the sideloaded copy and a web store copy connected.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ExtensionBridge } from "../src/bridge.js";
-import { EXTENSION_ID, EXTENSION_ORIGIN } from "../src/extension.js";
+import { EXTENSION_ID, SIDELOADED_ORIGIN } from "../src/extension.js";
 import { setup } from "../src/setup.js";
 
 // Doubles at the edges, as in setupOpensTeams.test.ts: no `claude` CLI is run, and no AI app's
@@ -28,9 +28,9 @@ vi.mock("../src/config.js", async (original) => ({
 }));
 
 // A fictional web store id (32 letters a–p).
-const STORE_ID = "abcdefghijklmnopabcdefghijklmnop";
-const STORE_ORIGIN = `chrome-extension://${STORE_ID}`;
-const trustedExtensionIds = { unpacked: EXTENSION_ID, chromeWebStore: STORE_ID };
+const WEB_STORE_ID = "abcdefghijklmnopabcdefghijklmnop";
+const WEB_STORE_ORIGIN = `chrome-extension://${WEB_STORE_ID}`;
+const trustedExtensionIds = { unpacked: EXTENSION_ID, chromeWebStore: WEB_STORE_ID };
 
 describe("#216: setup with a web store install", () => {
   let lines: string[];
@@ -53,7 +53,7 @@ describe("#216: setup with a web store install", () => {
     ({ extensions, connected: true, call: vi.fn(async () => ({ teams: [] })) }) as unknown as ExtensionBridge;
 
   it("#216: sees a web store copy (a second trusted id) connect, without waiting for a sideloaded one", { timeout: 15_000 }, async () => {
-    const bridge = bridgeWith([{ origin: STORE_ORIGIN, browser: "Edge" }]);
+    const bridge = bridgeWith([{ origin: WEB_STORE_ORIGIN, browser: "Edge" }]);
     expect(await setup(bridge, "0.0.0", { yes: true, trustedExtensionIds })).toBe(true);
     expect(lines.join("\n")).toContain("Extension connected in Edge");
     // Not the first-time steps for a browser where no copy connected.
@@ -62,15 +62,15 @@ describe("#216: setup with a web store install", () => {
 
   it("#216: says when one browser has both the sideloaded copy and a web store copy, and suggests removing the sideloaded one", async () => {
     const bridge = bridgeWith([
-      { origin: EXTENSION_ORIGIN, browser: "Chrome" },
-      { origin: STORE_ORIGIN, browser: "Chrome" },
+      { origin: SIDELOADED_ORIGIN, browser: "Chrome" },
+      { origin: WEB_STORE_ORIGIN, browser: "Chrome" },
     ]);
     expect(await setup(bridge, "0.0.0", { yes: true, trustedExtensionIds })).toBe(true);
     expect(lines.join("\n")).toMatch(/Two copies of the mcp-teams extension are connected in Chrome.*Remove the sideloaded one/);
   });
 
   it("#216: says nothing about two copies with only the sideloaded one", async () => {
-    const bridge = bridgeWith([{ origin: EXTENSION_ORIGIN, browser: "Chrome" }]);
+    const bridge = bridgeWith([{ origin: SIDELOADED_ORIGIN, browser: "Chrome" }]);
     expect(await setup(bridge, "0.0.0", { yes: true, trustedExtensionIds })).toBe(true);
     expect(lines.join("\n")).not.toContain("Two copies");
   });

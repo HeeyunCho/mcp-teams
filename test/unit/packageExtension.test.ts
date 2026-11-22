@@ -29,8 +29,8 @@ describe("#216: packaging the extension for the web stores", () => {
     expect(manifest).not.toHaveProperty("key");
     const { key, host_permissions: _hosts, ...rest } = repoManifest();
     expect(typeof key).toBe("string"); // the repo keeps it: it fixes the sideload id
-    const { host_permissions: _storeHosts, ...storeRest } = manifest;
-    expect(storeRest).toEqual(rest);
+    const { host_permissions: _webStoreHosts, ...webStoreRest } = manifest;
+    expect(webStoreRest).toEqual(rest);
   });
 
   // #239 (#218 option B): the sideloaded copy's manifest holds the api_traffic patterns; the web store

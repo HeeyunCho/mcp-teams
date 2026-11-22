@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ExtensionBridge } from "../src/bridge.js";
-import { EXTENSION_ORIGIN } from "../src/extension.js";
+import { SIDELOADED_ORIGIN } from "../src/extension.js";
 import { describeNativeHost, setup } from "../src/setup.js";
 
 // Doubles at the edges: no `claude` CLI or `reg` is run, and no AI app's config, extension folder
@@ -105,7 +105,7 @@ describe("#123: setup and the nativeHost switch", () => {
   });
 
   const connected = () =>
-    ({ extensions: [{ origin: EXTENSION_ORIGIN, browser: "Chrome" }], connected: true, call: vi.fn(async () => ({ teams: [] })) }) as unknown as ExtensionBridge;
+    ({ extensions: [{ origin: SIDELOADED_ORIGIN, browser: "Chrome" }], connected: true, call: vi.fn(async () => ({ teams: [] })) }) as unknown as ExtensionBridge;
   const regCalls = () => doubles.execFileSync.mock.calls.filter(([file]) => /(^|\\)reg(\.exe)?$/i.test(String(file)));
 
   it("#123: off (the default): no line about a native host, no registry key, no host folder", async () => {

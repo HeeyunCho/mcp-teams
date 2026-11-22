@@ -9,7 +9,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { afterEach, describe, expect, it } from "vitest";
 import { proof, socketTransport, type BridgeSocket, type ExtensionBridge } from "../../src/bridge.js";
 import { SERVER_VERSION } from "../../src/config.js";
-import { EXTENSION_ORIGIN, trustedOrigins } from "../../src/extension.js";
+import { SIDELOADED_ORIGIN, trustedOrigins } from "../../src/extension.js";
 import { registerTools } from "../../src/tools.js";
 import { fakeExtension, TOKEN } from "../helpers/bridgeHarness.js";
 import { nativeHarness, REAL_HEARTBEAT } from "../helpers/nativeHost.js";
@@ -72,8 +72,8 @@ describe("#123: the native host", { timeout: 30_000 }, () => {
   // that long to start the host's node process. ext.exited is bounded by the test's timeout.
   it.each([
     ["an id that isn't trusted", "chrome-extension://ponmlkjihgfedcbaponmlkjihgfedcba/"],
-    ["one that only starts like a trusted one", `${EXTENSION_ORIGIN}x/`],
-    ["a trusted one in capitals", `${EXTENSION_ORIGIN.toUpperCase()}/`],
+    ["one that only starts like a trusted one", `${SIDELOADED_ORIGIN}x/`],
+    ["a trusted one in capitals", `${SIDELOADED_ORIGIN.toUpperCase()}/`],
   ])("#216: still refuses %s", async (_, origin) => {
     h = await nativeHarness();
     const ext = await h.host({ origin }, false);

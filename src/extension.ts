@@ -31,10 +31,16 @@ export const EXTENSION_IDS: Readonly<Record<string, string>> = Object.freeze({
 
 /** The sideloaded ("Load unpacked") copy's id only: where "the unpacked copy" is meant (the key test, the legacy reload). */
 export const EXTENSION_ID = EXTENSION_IDS.unpacked;
-export const EXTENSION_ORIGIN = `chrome-extension://${EXTENSION_ID}`;
+/** The sideloaded copy's origin (EXTENSION_IDS.unpacked's), no trailing slash. */
+export const SIDELOADED_ORIGIN = `chrome-extension://${EXTENSION_ID}`;
 
 /** A trusted list of ids: the ids themselves, or a record of them like EXTENSION_IDS. */
 export type ExtensionIds = Readonly<Record<string, string>> | readonly string[];
+
+/** An origin without trailing slashes: "chrome-extension://<id>/", as Chrome passes it to a native host, becomes "chrome-extension://<id>". */
+export function normalizeOrigin(origin: string): string {
+  return origin.replace(/\/+$/, "");
+}
 
 /** The trusted origins ("chrome-extension://<id>", no trailing slash) of a list of ids. */
 export function trustedOrigins(ids: ExtensionIds = EXTENSION_IDS): string[] {
@@ -48,7 +54,7 @@ export function trustedOrigins(ids: ExtensionIds = EXTENSION_IDS): string[] {
  * bridge's "ours / another copy" rest on it.
  */
 export function isTrustedOrigin(origin: unknown, ids: ExtensionIds = EXTENSION_IDS): origin is string {
-  return typeof origin === "string" && trustedOrigins(ids).includes(origin.replace(/\/+$/, ""));
+  return typeof origin === "string" && trustedOrigins(ids).includes(normalizeOrigin(origin));
 }
 
 /**
@@ -56,10 +62,13 @@ export function isTrustedOrigin(origin: unknown, ids: ExtensionIds = EXTENSION_I
  * (#216). Both are served (they have different instances, so they look like two browsers), but one
  * browser needs only one: get_version and setup suggest removing the sideloaded one. Copies in
  * different browsers, or in two profiles of the same browser with the same id, aren't counted.
+ * Two profiles of one browser each with one of the two copies are counted too (#245): nothing on a
+ * connection names its profile. `instance` is kept in each copy's own chrome.storage.local, so two
+ * copies in one profile already differ in it, as two profiles do.
  */
 export function browsersWithTwoCopies(extensions: readonly { origin?: string; browser?: string }[], ids: ExtensionIds = EXTENSION_IDS): string[] {
-  const has = (browser: string | undefined, store: boolean) =>
-    extensions.some((e) => e.browser === browser && isTrustedOrigin(e.origin, ids) && (e.origin !== EXTENSION_ORIGIN) === store);
+  const has = (browser: string | undefined, webStore: boolean) =>
+    extensions.some((e) => e.browser === browser && isTrustedOrigin(e.origin, ids) && (e.origin !== SIDELOADED_ORIGIN) === webStore);
   const browsers = new Set(extensions.map((e) => e.browser).filter((b): b is string => !!b));
   return [...browsers].filter((b) => has(b, false) && has(b, true));
 }

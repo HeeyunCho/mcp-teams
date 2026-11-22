@@ -195,7 +195,7 @@ describe("#219: the send gate checks the cancelSend feature", () => {
     const r = await sendMessage(hub);
     expectRefused(r, ext);
     expect(r.text).toMatch(/cancelSend/);
-    expect(r.text).toMatch(/store/i); // says what to do for a store copy too
+    expect(r.text).toMatch(/store/i); // says what to do for a web store copy too
   });
 
   it("a peer behind a current hub gets the send through an extension that declares cancelSend", async () => {
