@@ -617,3 +617,21 @@ describe("after a browser start with a Teams tab open and no session", () => {
     expect(fake.spies.tabsCreate).toHaveBeenCalledTimes(2);
   });
 });
+
+// #218: without the tabs permission, the worker still reads the URL of a tab on a Teams host it holds, so
+// the background tab opens on the user's own Teams origin (teamsOrigin), not only on the default one.
+describe("#218: the background tab opens on the origin of the user's Teams tab", () => {
+  it("a Teams tab on teams.microsoft.com: the background tab opens on https://teams.microsoft.com/", async () => {
+    const fake = createFakeChrome({ captured: ["chatsvc", "mt", "substrate"], services: { csa: () => ({ teams: [], chats: [] }) } });
+    fake.tabs[0].url = "https://teams.microsoft.com/v2/";
+    const worker = await loadWorker(fake);
+    worker.registerListeners();
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+    const { done } = request(worker, "listChats");
+    await pass(5_000);
+    expect(fake.spies.tabsCreate).toHaveBeenCalledTimes(1);
+    expect(fake.spies.tabsCreate.mock.calls[0][0]).toMatchObject({ url: "https://teams.microsoft.com/", active: false });
+    await pass(120_000);
+    await done;
+  });
+});

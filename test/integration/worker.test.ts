@@ -48,7 +48,9 @@ describe("service worker outside Chrome", () => {
     const fake = createFakeChrome();
     const worker = await loadWorker(fake);
     worker.registerListeners();
-    expect(fake.listenerCounts()).toEqual({ onMessage: 2, windowsOnRemoved: 1, storageOnChanged: 1, webRequest: 3, onAlarm: 1 });
+    // webRequest: the session capture and the last calls (#103); the api_traffic log's two only where the
+    // manifest requests its hosts (#218), which the shipped one doesn't.
+    expect(fake.listenerCounts()).toEqual({ onMessage: 2, windowsOnRemoved: 1, storageOnChanged: 1, webRequest: 2, onAlarm: 1 });
     expect(openedSockets).toEqual([]);
   });
 

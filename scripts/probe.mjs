@@ -6,6 +6,11 @@
 //   npm run probe -- status
 //   npm run probe -- listChats '{"limit":3}'
 //   npm run probe -- probe '{"service":"csa","path":"/api/v1/teams/users/me"}'   (GET only)
+//
+// The extension refuses the `probe` method unless it was turned on in that browser (#218): in
+// chrome://extensions, open the mcp-teams bridge's "service worker" console and run
+//   chrome.storage.local.set({ devProbe: true })
+// (chrome.storage.local.remove("devProbe") turns it off). Other methods need nothing.
 import { ExtensionBridge } from "../dist/bridge.js";
 import { SERVER_VERSION, loadConfig } from "../dist/config.js";
 
@@ -22,6 +27,9 @@ try {
   console.log(typeof result?.text === "string" ? `HTTP ${result.status}\n${result.text}` : JSON.stringify(result, null, 2));
 } catch (err) {
   console.error(err.message);
+  if (method === "probe" && /probe is off/.test(err.message ?? "")) {
+    console.error('Turn it on in chrome://extensions > mcp-teams bridge > "service worker" console: chrome.storage.local.set({ devProbe: true })');
+  }
   process.exitCode = 1;
 }
 await bridge.close();

@@ -53,18 +53,18 @@ describe("#103: the Teams tab's last calls", () => {
 
   it("a call with a bearer token is the last signed-in call, with recording off, and a restart of the worker keeps both", async () => {
     vi.useFakeTimers({ toFake: ["Date"] });
-    const fake = createFakeChrome({ captured: [] });
+    const fake = createFakeChrome({ captured: [], trafficHosts: true });
     const first = await loadWorker(fake);
     first.registerListeners();
     at("2026-10-01T10:00:00Z");
     await teamsCalls(fake, "https://teams.cloud.microsoft/api/csa/emea/api/v1/teams/users/me", [{ name: "Authorization", value: "Bearer fictional-token" }]);
     at("2026-10-01T10:00:05Z");
-    await teamsCalls(fake, "https://config.teams.microsoft.com/config/v1/fictional");
+    await teamsCalls(fake, "https://teams.microsoft.com/config/v1/fictional");
     first.savePendingCalls(); // the save that would run half a second later, now
     // Chrome stops the worker and starts it again; chrome.storage.session is kept.
     const worker = await loadWorker(fake);
     expect(await worker.handlers.status({})).toMatchObject({
-      lastTeamsCall: { at: "2026-10-01T10:00:05.000Z", host: "config.teams.microsoft.com" },
+      lastTeamsCall: { at: "2026-10-01T10:00:05.000Z", host: "teams.microsoft.com" },
       lastSignedInCall: { at: "2026-10-01T10:00:00.000Z", host: "teams.cloud.microsoft" },
     });
     expect((await first.handlers.apiTraffic({})).recorded).toBe(0);
@@ -92,11 +92,11 @@ describe("#103: the Teams tab's last calls", () => {
   // the page goes away), so neither on its own says the tab is active.
   it("a websocket or ping from the Teams tab is not a last call", async () => {
     vi.useFakeTimers({ toFake: ["Date"] });
-    const fake = createFakeChrome({ captured: [] });
+    const fake = createFakeChrome({ captured: [], trafficHosts: true });
     const worker = await loadWorker(fake);
     worker.registerListeners();
     at("2026-10-01T10:00:00Z");
-    await teamsCalls(fake, "https://config.teams.microsoft.com/config/v1/fictional");
+    await teamsCalls(fake, "https://teams.microsoft.com/config/v1/fictional");
     at("2026-10-01T10:00:05Z");
     await fake.fire("beforeSendHeaders", { url: "wss://go.trouter.teams.microsoft.com/v4/c", type: "websocket" });
     await fake.fire("beforeSendHeaders", {
@@ -106,7 +106,7 @@ describe("#103: the Teams tab's last calls", () => {
       requestHeaders: [{ name: "Authorization", value: "Bearer fictional-token" }],
     });
     expect(await worker.handlers.status({})).toMatchObject({
-      lastTeamsCall: { at: "2026-10-01T10:00:00.000Z", host: "config.teams.microsoft.com" },
+      lastTeamsCall: { at: "2026-10-01T10:00:00.000Z", host: "teams.microsoft.com" },
       lastSignedInCall: null,
     });
   });
@@ -121,11 +121,11 @@ describe("#103: the Teams tab's last calls", () => {
   it("a pending save goes to the storage of the browser the call was made in, not to the next one's", async () => {
     const first = createFakeChrome({ captured: [] });
     (await loadWorker(first)).registerListeners();
-    await teamsCalls(first, "https://config.teams.microsoft.com/config/v1/fictional");
+    await teamsCalls(first, "https://teams.microsoft.com/config/v1/fictional");
     const next = createFakeChrome({ captured: [] });
     await loadWorker(next);
     await vi.waitFor(async () =>
-      expect(await first.chrome.storage.session.get("teamsCalls")).toHaveProperty("teamsCalls.lastTeamsCall.host", "config.teams.microsoft.com"),
+      expect(await first.chrome.storage.session.get("teamsCalls")).toHaveProperty("teamsCalls.lastTeamsCall.host", "teams.microsoft.com"),
     );
     expect(await next.chrome.storage.session.get("teamsCalls")).toEqual({});
   });
@@ -141,9 +141,9 @@ describe("#103: the Teams tab's last calls", () => {
     const worker = await loadWorker(fake);
     worker.registerListeners();
     at("2026-10-01T10:00:00Z");
-    await teamsCalls(fake, "https://config.teams.microsoft.com/config/v1/fictional");
+    await teamsCalls(fake, "https://teams.microsoft.com/config/v1/fictional");
     expect(await worker.handlers.status({})).toMatchObject({
-      lastTeamsCall: { at: "2026-10-01T10:00:00.000Z", host: "config.teams.microsoft.com" },
+      lastTeamsCall: { at: "2026-10-01T10:00:00.000Z", host: "teams.microsoft.com" },
       lastSignedInCall: null,
     });
   });
@@ -155,7 +155,7 @@ describe("#103: the Teams tab's last calls", () => {
     const worker = await loadWorker(fake);
     worker.registerListeners();
     at("2026-10-01T10:00:00Z");
-    await teamsCalls(fake, "https://go.trouter.teams.microsoft.com/v4/fictionalCheck");
+    await teamsCalls(fake, "https://teams.cloud.microsoft/diagnostics/network");
     expect(sessionNote((await worker.handlers.status({})) as TeamsStatus, Date.now())).toMatch(/stuck at sign-in/);
     at("2026-10-01T10:00:05Z");
     await teamsCalls(fake, `${BASES.chatsvc}/v1/users/ME/conversations?view=fictional`, [{ name: "Authorization", value: "Bearer fictional-token" }]);
@@ -167,5 +167,30 @@ describe("#103: the Teams tab's last calls", () => {
       lastSignedInCall: { at: "2026-10-01T10:00:05.000Z", host: "teams.cloud.microsoft" },
     });
     expect(sessionNote(status, Date.now())).toBeNull();
+  });
+
+  // #218: the last calls don't depend on the api_traffic hosts, which the manifest no longer requests:
+  // calls to the five kept hosts still count, from every one of them.
+  it("#218: without the traffic hosts, calls to each kept host update the last call and the last signed-in call", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    const fake = createFakeChrome({ captured: [] });
+    const worker = await loadWorker(fake);
+    worker.registerListeners();
+    const bearer = [{ name: "Authorization", value: "Bearer fictional-token" }];
+    const calls: [string, string, { name: string; value: string }[], string | null][] = [
+      ["2026-10-01T10:00:00Z", "https://teams.microsoft.com/config/v1/fictional", [], null],
+      ["2026-10-01T10:00:01Z", "https://substrate.office.com/search/api/v2/query", bearer, "substrate.office.com"],
+      ["2026-10-01T10:00:02Z", "https://emea.ng.msg.teams.microsoft.com/v1/users/ME/properties", bearer, "emea.ng.msg.teams.microsoft.com"],
+      ["2026-10-01T10:00:03Z", "https://contoso-my.sharepoint.com/_api/fictional", [], null],
+      ["2026-10-01T10:00:04Z", `${BASES.mt}/beta/users/fictional`, bearer, "teams.cloud.microsoft"],
+    ];
+    let signedIn: { at: string; host: string } | null = null;
+    for (const [iso, url, headers, signedHost] of calls) {
+      at(iso);
+      await teamsCalls(fake, url, headers);
+      const at_ = new Date(iso).toISOString();
+      if (signedHost) signedIn = { at: at_, host: signedHost };
+      expect(await worker.handlers.status({})).toMatchObject({ lastTeamsCall: { at: at_, host: new URL(url).host }, lastSignedInCall: signedIn });
+    }
   });
 });
