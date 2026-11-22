@@ -383,6 +383,35 @@ describe("#179: one search_transcripts call makes a bounded number of Teams requ
     };
   };
 
+  it("#246: a named meeting's chat that reaches 2,000 messages on page 8 says it read the newest 8 pages, not 20", async () => {
+    // 12 pages of 250 messages each (the newest: the call and 247 notes). Every message counts
+    // toward the 2,000, system events too (meeting chats are read with them), so the read stops
+    // after page 8, short of the 20-page cap. Page 10 holds an older call (callId 40) with a transcript.
+    const PER_PAGE = 250;
+    const chatsvc = chatsvcWith(12);
+    const notes = (page: number, count: number) =>
+      Array.from({ length: count }, (_, i) => ({ id: `p${page}-${i}`, messagetype: "RichText/Html", content: `<p>Notes ${page}.${i}</p>`, originalarrivaltime: dayOf(2).toISOString() }));
+    const bigPages = (req: SentRequest) => {
+      const res = chatsvc(req) as { messages: unknown[] } | undefined;
+      if (!res || !decodeURIComponent(req.path).includes(meetingId(1))) return res;
+      const page = Number(/syncState=(\d+)/.exec(req.path)?.[1] ?? 0);
+      if (page === 0) res.messages = [...callMessages(1), ...notes(0, PER_PAGE - 3)];
+      else if (page === 9) res.messages = callMessages(40);
+      else res.messages = notes(page, PER_PAGE);
+      return res;
+    };
+    const fake = createFakeChrome({ services: { csa: csaWith(1), chatsvc: bigPages, sharepoint } });
+    const worker = await loadWorker(fake);
+    const r = await worker.handlers.searchTranscripts({ query: "budget", meeting: meetingId(1) });
+    expect(chatRequestsOf(fake, 1)).toHaveLength(8);
+    expect(r.chatsCut).toEqual(["Contoso review 1"]);
+    expect(r.note).toMatch(/newest 8 pages/);
+    expect(r.note).not.toMatch(/newest 20 pages/);
+    // The older call, beyond page 8, isn't found, and its transcript isn't read.
+    expect(r.results.map((x: { callId: string }) => x.callId)).toEqual([callId(1)]);
+    expect(fake.sent.filter((q) => q.service === "sharepoint" && q.url.includes("/items/i40/"))).toHaveLength(0);
+  });
+
   it("#179: get_meeting after a search reads the whole chat again: a chat the search cut short isn't served from the cache", async () => {
     const fake = createFakeChrome({ services: { csa: csaWith(1), chatsvc: withOlderCall(), sharepoint } });
     const worker = await loadWorker(fake);
