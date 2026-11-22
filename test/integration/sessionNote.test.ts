@@ -108,7 +108,7 @@ describe("#103: get_version names why there is no session", () => {
       "2026-10-01T10:00:10Z",
     );
     expect(v.note).toBe(
-      "The Teams tab made a signed-in call at 2026-10-01T10:00:08.000Z (teams.cloud.microsoft), but no chat session was captured. Refresh the Teams tab or reload the extension; if that doesn't help, this looks like a capture problem: please report it with api_traffic output (call it with record: true, use Teams for a minute, then call it again).",
+      "The Teams tab made a signed-in call at 2026-10-01T10:00:08.000Z (teams.cloud.microsoft), but no chat session was captured. Refresh the Teams tab or reload the extension; if that doesn't help, this looks like a capture problem: please report it. In the sideloaded copy, add api_traffic output (call it with record: true, use Teams for a minute, then call it again); the web store copy doesn't record it.",
     );
   });
 
@@ -116,7 +116,7 @@ describe("#103: get_version names why there is no session", () => {
     const call = { at: "2026-10-01T10:00:08.000Z", host: "teams.cloud.microsoft" };
     const v = await getVersion(uncaptured({ lastTeamsCall: call, lastSignedInCall: call }), "2026-10-01T10:00:10Z");
     expect(v.note).toBe(
-      "The Teams tab made a signed-in call at 2026-10-01T10:00:08.000Z (teams.cloud.microsoft), but no chat session was captured. Refresh the Teams tab or reload the extension; if that doesn't help, this looks like a capture problem: please report it with api_traffic output (call it with record: true, use Teams for a minute, then call it again).",
+      "The Teams tab made a signed-in call at 2026-10-01T10:00:08.000Z (teams.cloud.microsoft), but no chat session was captured. Refresh the Teams tab or reload the extension; if that doesn't help, this looks like a capture problem: please report it. In the sideloaded copy, add api_traffic output (call it with record: true, use Teams for a minute, then call it again); the web store copy doesn't record it.",
     );
   });
 
@@ -149,7 +149,7 @@ describe("#103: get_version names why there is no session", () => {
       "2026-10-01T10:00:10Z",
     );
     expect(v.note).toBe(
-      "The Teams tab made a signed-in call at 2026-10-01T10:00:08.500Z (teams.cloud.microsoft), but no chat session was captured. Refresh the Teams tab or reload the extension; if that doesn't help, this looks like a capture problem: please report it with api_traffic output (call it with record: true, use Teams for a minute, then call it again).",
+      "The Teams tab made a signed-in call at 2026-10-01T10:00:08.500Z (teams.cloud.microsoft), but no chat session was captured. Refresh the Teams tab or reload the extension; if that doesn't help, this looks like a capture problem: please report it. In the sideloaded copy, add api_traffic output (call it with record: true, use Teams for a minute, then call it again); the web store copy doesn't record it.",
     );
   });
 });

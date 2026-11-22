@@ -523,22 +523,26 @@ describe("traffic log", () => {
   });
 });
 
-// #218: the manifest asks only for what the bridge needs (store review). Chrome reports a request to a
-// webRequest listener only on a host the extension holds, so the api_traffic diagnostic, which listens on
-// broad https:// and wss:// patterns (#200), works only in a copy whose manifest adds them by hand.
-describe("#218: the manifest's permissions", () => {
+// #218 #239: the repo's manifest is the sideloaded copy's. It requests the five Teams and SharePoint hosts
+// plus the broad https:// and wss:// patterns the api_traffic diagnostic listens on (#200), so a clone
+// loaded unpacked records with no hand edit. The web store copy's manifest, which
+// scripts/package-extension.mjs writes, drops those patterns (test/unit/packageExtension.test.ts).
+describe("#218 #239: the repo manifest's permissions", () => {
   const manifest = JSON.parse(readFileSync("extension/manifest.json", "utf8"));
 
-  it("host_permissions are exactly the five Teams and SharePoint hosts", () => {
-    expect([...manifest.host_permissions].sort()).toEqual(
-      [
-        "https://teams.cloud.microsoft/*",
-        "https://teams.microsoft.com/*",
-        "https://*.ng.msg.teams.microsoft.com/*",
-        "https://substrate.office.com/*",
-        "https://*.sharepoint.com/*",
-      ].sort(),
-    );
+  it("host_permissions are the five Teams and SharePoint hosts plus every api_traffic pattern, https:// and wss://", () => {
+    expect(teams.TRAFFIC_WS_URLS).toContain("wss://*.microsoft.com/*");
+    const expected = new Set([
+      "https://teams.cloud.microsoft/*",
+      "https://teams.microsoft.com/*",
+      "https://*.ng.msg.teams.microsoft.com/*",
+      "https://substrate.office.com/*",
+      "https://*.sharepoint.com/*",
+      ...teams.TRAFFIC_URLS,
+      ...teams.TRAFFIC_WS_URLS,
+    ]);
+    expect(expected.size).toBe(18);
+    expect([...manifest.host_permissions].sort()).toEqual([...expected].sort());
   });
 
   it("permissions are storage, scripting, webRequest, alarms and nativeMessaging: no tabs", () => {
@@ -547,11 +551,16 @@ describe("#218: the manifest's permissions", () => {
     expect(manifest).not.toHaveProperty("optional_permissions");
   });
 
-  it("none of the api_traffic patterns beyond the five hosts is requested, https:// or wss://", () => {
-    expect(teams.TRAFFIC_WS_URLS).toContain("wss://*.microsoft.com/*");
-    const extra = [...teams.TRAFFIC_URLS, ...teams.TRAFFIC_WS_URLS].filter((p: string) => p !== "https://*.sharepoint.com/*");
-    expect(extra).toHaveLength(13);
-    for (const p of extra) expect(manifest.host_permissions).not.toContain(p);
+  it("the five hosts the extension works with are written once, in teams.EXTENSION_HOSTS", () => {
+    expect([...teams.EXTENSION_HOSTS].sort()).toEqual(
+      [
+        "https://teams.cloud.microsoft/*",
+        "https://teams.microsoft.com/*",
+        "https://*.ng.msg.teams.microsoft.com/*",
+        "https://substrate.office.com/*",
+        "https://*.sharepoint.com/*",
+      ].sort(),
+    );
   });
 });
 

@@ -1,7 +1,9 @@
 // The api_traffic log (3.4, #19): the worker records the Teams tab's API calls only while the
-// AI has turned recording on with api_traffic({ record: true }). Since #218 the manifest doesn't request
-// the hosts it listens on, so these tests run a developer's copy that adds them (trafficHosts: true).
+// AI has turned recording on with api_traffic({ record: true }). Only the sideloaded copy's manifest (the
+// repo's) requests the hosts it listens on (#218, #239), so these tests run it (trafficHosts: true).
 import { afterEach, describe, expect, it, vi } from "vitest";
+// @ts-expect-error plain JS extension module without types
+import { EXTENSION_HOSTS } from "../../extension/teams.js";
 import { createFakeChrome, loadWorker, openedSockets, type FakeChrome } from "../helpers/fakeChrome.js";
 import { until } from "../helpers/timing.js";
 
@@ -143,16 +145,10 @@ describe("#200: the traffic log records the Teams tab's websocket and ping reque
   });
 });
 
-// #218: the store build's manifest requests only the five Teams and SharePoint hosts, not the hosts the
+// #218 #239: the web store copy's manifest requests only the five Teams and SharePoint hosts, not the hosts the
 // traffic log listens on, so api_traffic isn't available there: it says so, and the worker doesn't listen.
-describe("#218: api_traffic without the traffic hosts (the manifest as shipped)", () => {
-  const SHIPPED_HOSTS = [
-    "https://teams.cloud.microsoft/*",
-    "https://teams.microsoft.com/*",
-    "https://*.ng.msg.teams.microsoft.com/*",
-    "https://substrate.office.com/*",
-    "https://*.sharepoint.com/*",
-  ];
+describe("#218: api_traffic without the traffic hosts (the web store copy)", () => {
+  const SHIPPED_HOSTS: string[] = [...EXTENSION_HOSTS];
   /** Whether a listener's pattern lies within one of the shipped hosts (the host itself, or a path below it). */
   const withinShipped = (pattern: string) => SHIPPED_HOSTS.some((host) => pattern === host || pattern.startsWith(host.slice(0, -1)));
 
@@ -179,7 +175,7 @@ describe("#218: api_traffic without the traffic hosts (the manifest as shipped)"
     expect(fake.webRequestUrls().filter((p: string) => !withinShipped(p))).toEqual([]);
   });
 
-  it("with the traffic hosts added to the manifest (a developer's copy), it listens on them and records as before", async () => {
+  it("with the traffic hosts added to the manifest (the sideloaded copy), it listens on them and records as before", async () => {
     const fake = createFakeChrome({ trafficHosts: true });
     const worker = await loadWorker(fake);
     worker.registerListeners();

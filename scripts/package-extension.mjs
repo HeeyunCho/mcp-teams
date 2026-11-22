@@ -10,6 +10,10 @@
  * - manifest.json goes in without "key". The key stays in the repo: it fixes the sideloaded copy's id
  *   (EXTENSION_IDS.unpacked in src/extension.ts), while each web store assigns its own id and refuses
  *   an upload with a key it didn't issue.
+ * - manifest.json goes in with only the five hosts the extension works with (EXTENSION_HOSTS in
+ *   extension/teams.js) in host_permissions (#239). The repo's manifest is the sideloaded copy's and also
+ *   requests the hosts api_traffic listens on (TRAFFIC_URLS, TRAFFIC_WS_URLS), so a clone records with no
+ *   hand edit; the web store copy answers that api_traffic isn't available in this build.
  *
  * extension/ itself is never changed. The zip is written with Node alone (deflate, no dependency).
  */
@@ -17,6 +21,7 @@ import { mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { deflateRawSync } from "node:zlib";
+import { EXTENSION_HOSTS } from "../extension/teams.js";
 
 /** What the extension runs: the manifest, the service worker and its modules, the pages, the icons. */
 export const ALLOWED = Object.freeze([
@@ -109,6 +114,12 @@ function zip(entries) {
 
 // ------------------------------------------------------------------ package
 
+/** The web store copy's manifest made from the repo's: no "key", and host_permissions only EXTENSION_HOSTS (#216, #239). */
+export function webStoreManifest(repoManifest) {
+  const { key: _key, ...manifest } = repoManifest;
+  return { ...manifest, host_permissions: (manifest.host_permissions ?? []).filter((h) => EXTENSION_HOSTS.includes(h)) };
+}
+
 /** Writes the web store zip of `from` to `out`; returns its path and the files in it. Throws, writing nothing, on pairing.json or a file not allowed. */
 export function packageExtension({ from = join(ROOT, "extension"), out } = {}) {
   const src = resolve(from);
@@ -119,7 +130,7 @@ export function packageExtension({ from = join(ROOT, "extension"), out } = {}) {
   const missing = ALLOWED.filter((f) => !present.includes(f));
   if (missing.length) throw new Error(`Missing from ${src}: ${missing.join(", ")}`);
 
-  const { key: _key, ...manifest } = JSON.parse(readFileSync(join(src, "manifest.json"), "utf8"));
+  const manifest = webStoreManifest(JSON.parse(readFileSync(join(src, "manifest.json"), "utf8")));
   const entries = ALLOWED.map((f) => [f, f === "manifest.json" ? Buffer.from(`${JSON.stringify(manifest, null, 2)}\n`, "utf8") : readFileSync(join(src, f))]);
   const file = resolve(out ?? join(ROOT, "artifacts", `mcp-teams-extension-${manifest.version}.zip`));
   mkdirSync(dirname(file), { recursive: true });
@@ -137,7 +148,7 @@ export function packageExtension({ from = join(ROOT, "extension"), out } = {}) {
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   try {
     const { file, files } = packageExtension({ out: process.argv[2] });
-    console.log(`${file}: ${files.length} files, manifest.json without "key"`);
+    console.log(`${file}: ${files.length} files, manifest.json without "key" or the api_traffic hosts`);
   } catch (err) {
     console.error(`package-extension: ${err.message}`);
     process.exit(1);
