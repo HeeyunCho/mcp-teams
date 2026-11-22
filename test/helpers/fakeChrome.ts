@@ -12,7 +12,7 @@ import { NATIVE_MAX_MESSAGE_BYTES } from "../../extension/chunks.js";
 export type Service = "chatsvc" | "csa" | "mt" | "substrate" | "sharepoint";
 export const TEAMS_SERVICES = ["chatsvc", "csa", "mt", "substrate"] as const;
 
-/** The worker reports its manifest's version, as in the browser (sends need 0.2.13 or newer). */
+/** The worker reports its manifest's version, as in the browser (on its own line since #219; sends need the cancelSend it declares). */
 export const EXTENSION_VERSION: string = JSON.parse(readFileSync(new URL("../../extension/manifest.json", import.meta.url), "utf8")).version;
 
 /** What a fake service answers: a JSON body (HTTP 200) or reply(status, ...), maybe later. */

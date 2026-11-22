@@ -3,20 +3,12 @@
 // session Teams itself uses.
 
 import { NATIVE_MAX_MESSAGE_BYTES, Reassembler } from "./chunks.js";
+import { CAPABILITIES } from "./features.js";
 import { fitting, withinLimit } from "./sizes.js";
 import * as teams from "./teams.js";
 
 const VERSION = chrome.runtime.getManifest().version;
 const DEFAULT_PORT = 47393;
-/**
- * What hello declares to the hub (#115), as mcp-newoutlook's extension does (EXTENSION_FEATURES in
- * its extension/background.js). No features yet: "native" is only for a native host's port.
- * maxMessageBytes: the largest message it takes, the server's own MAX_MESSAGE_BYTES (Chrome's
- * WebSocket sets no lower limit of its own). It is what the extension receives, on native messaging
- * too (the host's chunks are joined up to it); what it sends there is capped at Chrome's 64 MB
- * (NATIVE_MAX_MESSAGE_BYTES).
- */
-const CAPABILITIES = Object.freeze({ features: Object.freeze([]), maxMessageBytes: 256 * 1024 * 1024 });
 const CONFIRM_TIMEOUT_MS = 5 * 60_000;
 // One Teams request; below the server's own timeout.
 const REQUEST_TIMEOUT_MS = 60_000;

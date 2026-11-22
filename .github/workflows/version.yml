@@ -60,21 +60,30 @@ jobs:
           else
             RANGE="$BEFORE..HEAD"
           fi
-          VERSION=$(git log --format=%B%x00 "$RANGE" | node scripts/bump-version.mjs)
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          # Prints version=X.Y.Z (the package) and extension=X.Y.Z (#219: the extension's own line,
+          # empty when nothing under extension/ changed since its ext-v tag), the step's outputs.
+          BUMPED=$(git log --format=%B%x00 "$RANGE" | node scripts/bump-version.mjs)
+          echo "$BUMPED" >> "$GITHUB_OUTPUT"
 
       - name: Commit and tag
         if: github.event_name == 'push'
         env:
           VERSION: ${{ steps.bump.outputs.version }}
+          EXTENSION: ${{ steps.bump.outputs.extension }}
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git commit -am "chore(release): v$VERSION"
-          git tag "v$VERSION"
-          # Atomic: if main has moved on, the tag must not land without it. A refused push fails
+          TAGS=("v$VERSION")
+          MESSAGE="chore(release): v$VERSION"
+          if [ -n "${EXTENSION:-}" ]; then
+            TAGS+=("ext-v$EXTENSION")
+            MESSAGE="$MESSAGE (extension $EXTENSION)"
+          fi
+          git commit -am "$MESSAGE"
+          for TAG in "${TAGS[@]}"; do git tag "$TAG"; done
+          # Atomic: if main has moved on, the tags must not land without it. A refused push fails
           # this run, so nothing is published; the next push's run releases these commits too.
-          git push --atomic origin HEAD:main "v$VERSION"
+          git push --atomic origin HEAD:main "${TAGS[@]}"
 
       # npm test built dist/ before the bump, so its dist/build.json still names the previous version,
       # and the publish below skips scripts. Build again so the published build.json names this one (#96).

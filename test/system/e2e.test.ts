@@ -8,6 +8,8 @@ import WebSocket from "ws";
 
 // Runs the built server (dist/) over stdio, with a fake extension on the bridge.
 const VERSION: string = JSON.parse(readFileSync("package.json", "utf8")).version;
+/** #219: the extension has its own version line. */
+const EXTENSION_VERSION: string = JSON.parse(readFileSync("extension/manifest.json", "utf8")).version;
 let PORT: number;
 const home = mkdtempSync(join(tmpdir(), "mcp-teams-"));
 const calls: { method: string; params: any }[] = [];
@@ -64,7 +66,7 @@ beforeAll(async () => {
   await new Promise<void>((resolve) => {
     ext.on("message", async (raw) => {
       const msg = JSON.parse(raw.toString());
-      if (msg.type === "challenge") ext.send(JSON.stringify({ type: "hello", token: "tok", version: VERSION, browser: "Chrome" }));
+      if (msg.type === "challenge") ext.send(JSON.stringify({ type: "hello", token: "tok", version: EXTENSION_VERSION, browser: "Chrome", capabilities: { features: ["cancelSend", "sizeCheck"], maxMessageBytes: 256 * 1024 * 1024 } }));
       if (msg.type === "welcome") resolve();
       if (msg.type !== "request") return;
       calls.push({ method: msg.method, params: msg.params });
@@ -113,7 +115,7 @@ describe("MCP server end to end", () => {
 
   it("reports versions and the Teams session", async () => {
     const { data } = await call("get_version");
-    expect(data).toMatchObject({ server: VERSION, extension: VERSION, versionsMatch: true, role: "hub", teams: { teamsTabs: 1 } });
+    expect(data).toMatchObject({ server: VERSION, extension: EXTENSION_VERSION, extensionSupported: true, missingFeatures: [], role: "hub", teams: { teamsTabs: 1 } });
   });
 
   // #96: npm run build wrote dist/build.json, and the server reads its build from there.

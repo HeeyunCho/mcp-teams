@@ -32,7 +32,7 @@ export type RestartState = { restartNeeded: false } | { restartNeeded: true; onD
 /** The line added to every tool error while a restart is needed; null when none is. */
 export function restartHint(running: BuildInfo, state: RestartState): string | null {
   if (!state.restartNeeded) return null;
-  return `mcp-teams was updated on disk (running ${running.version} ${running.buildId}, on disk ${state.onDisk.version} ${state.onDisk.build}): reconnect it with /mcp, then reload the extension.`;
+  return `mcp-teams was updated on disk (running ${running.version} ${running.buildId}, on disk ${state.onDisk.version} ${state.onDisk.build}): reconnect it with /mcp. If the browser extension changed too, reload_extension loads it (a copy from the Chrome Web Store or Edge Add-ons updates from the store instead).`;
 }
 
 /** How long a read of the build on disk is reused. */

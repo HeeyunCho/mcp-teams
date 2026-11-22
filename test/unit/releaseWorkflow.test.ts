@@ -146,13 +146,87 @@ describe.skipIf(process.platform === "win32")("version.yml Bump version, then Co
     const output = join(root, "github-output");
     writeFileSync(output, "");
     runStep("Bump version", work, { BEFORE: seed, GITHUB_OUTPUT: output });
-    expect(readFileSync(output, "utf8")).toBe("version=0.2.18\n");
+    expect(readFileSync(output, "utf8")).toBe("version=0.2.18\nextension=0.2.16\n"); // the extension has no ext-v tag yet: released as it is (#219)
 
     runStep("Commit and tag", work, { VERSION: "0.2.18" });
     expect(git(origin, "log", "-1", "--format=%s", "main")).toBe("chore(release): v0.2.18");
     expect(git(origin, "rev-parse", "v0.2.18")).toBe(originMain());
     expect(JSON.parse(git(origin, "show", "main:package.json")).version).toBe("0.2.18");
     expect(git(origin, "rev-parse", "v0.2.17")).toBe(stray);
+  });
+});
+
+// #219: the extension has its own version line and tags (ext-vX.Y.Z). It moves only when extension/ changed.
+describe.skipIf(process.platform === "win32")("#219: version.yml and the extension's own line", { timeout: TIMEOUT_MS }, () => {
+  /** origin's main with the extension's current version (0.2.16, the seed's) tagged ext-v0.2.16, as after a release. */
+  function tagExtension() {
+    const work = clone("tagger");
+    git(work, "tag", "ext-v0.2.16");
+    git(work, "push", "-q", "origin", "ext-v0.2.16");
+  }
+
+  /** A commit on origin's main that writes `file` (relative to the root), and the step output of Bump version over it. */
+  function mergeAndBump(file: string, text: string, message: string) {
+    const other = clone("other");
+    mkdirSync(dirname(join(other, file)), { recursive: true });
+    writeFileSync(join(other, file), text);
+    git(other, "add", ".");
+    merge(other, message);
+    const work = clone("work");
+    const output = join(root, "github-output");
+    writeFileSync(output, "");
+    runStep("Bump version", work, { BEFORE: seed, GITHUB_OUTPUT: output });
+    return { work, output: readFileSync(output, "utf8") };
+  }
+
+  it("Commit and tag names both versions and pushes both tags with main when the extension moved", () => {
+    const work = clone("work");
+    bumpVersionFiles(work, "0.2.17");
+    runStep("Commit and tag", work, { VERSION: "0.2.17", EXTENSION: "1.0.1" });
+
+    expect(git(origin, "log", "-1", "--format=%s", "main")).toBe("chore(release): v0.2.17 (extension 1.0.1)");
+    expect(git(origin, "rev-parse", "v0.2.17")).toBe(originMain());
+    expect(git(origin, "rev-parse", "ext-v1.0.1")).toBe(originMain());
+  });
+
+  it("leaves neither tag on origin when main moved on and the push is refused", () => {
+    const work = clone("work");
+    const moved = merge(clone("other"), "fix: merged during the run");
+    bumpVersionFiles(work, "0.2.17");
+    expect(() => runStep("Commit and tag", work, { VERSION: "0.2.17", EXTENSION: "1.0.1" })).toThrow();
+
+    expect(originMain()).toBe(moved);
+    expect(originTags()).toEqual([]);
+  });
+
+  it("a release that touches only src/ leaves extension/manifest.json alone and tags the package only", () => {
+    tagExtension();
+    const { work, output } = mergeAndBump("src/index.ts", "export {};\n", "fix: server only");
+    expect(output).toBe("version=0.2.17\nextension=\n");
+    expect(git(work, "status", "--porcelain", "--", "extension")).toBe("");
+
+    runStep("Commit and tag", work, { VERSION: "0.2.17", EXTENSION: "" });
+    expect(git(origin, "log", "-1", "--format=%s", "main")).toBe("chore(release): v0.2.17");
+    expect(originTags().sort()).toEqual(["ext-v0.2.16", "v0.2.17"]);
+    expect(JSON.parse(git(origin, "show", "main:extension/manifest.json")).version).toBe("0.2.16");
+  });
+
+  it("a release that changes a file under extension/ bumps the extension by that change's commits and tags it", () => {
+    tagExtension();
+    const { work, output } = mergeAndBump("extension/popup.js", "// new\n", "fix(extension): popup");
+    expect(output).toBe("version=0.2.17\nextension=0.2.17\n");
+
+    runStep("Commit and tag", work, { VERSION: "0.2.17", EXTENSION: "0.2.17" });
+    expect(git(origin, "log", "-1", "--format=%s", "main")).toBe("chore(release): v0.2.17 (extension 0.2.17)");
+    expect(git(origin, "rev-parse", "ext-v0.2.17")).toBe(originMain());
+    expect(JSON.parse(git(origin, "show", "main:extension/manifest.json")).version).toBe("0.2.17");
+  });
+
+  it("a change to the manifest's version fields alone doesn't move the extension", () => {
+    tagExtension();
+    const manifest = JSON.stringify({ version: "0.2.16", version_name: "0.2.16-local" }, null, 2);
+    const { output } = mergeAndBump("extension/manifest.json", manifest, "chore: version name by hand");
+    expect(output).toBe("version=0.2.17\nextension=\n");
   });
 });
 
@@ -209,7 +283,7 @@ describe("bump-version CLI and git tags", { timeout: TIMEOUT_MS }, () => {
   it("moves past a tag in the repository it is in", () => {
     const work = clone("work");
     git(work, "tag", "v0.2.17");
-    expect(runCli(work)).toBe("0.2.18");
+    expect(runCli(work).split("\n")[0]).toBe("version=0.2.18");
   });
 
   it("fails without writing anything when it can't read the tags", () => {
