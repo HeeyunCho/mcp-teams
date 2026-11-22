@@ -68,8 +68,12 @@ _Avoid_: matching versions, versionsMatch
 A protocol behaviour the extension declares in its hello (`cancelSend`, `sizeCheck`) and the server checks before relying on it; an extension that declares none is taken to have those its version had.
 _Avoid_: capability flag, minimum version
 
+**Sideloaded copy**:
+The extension loaded unpacked from a folder: a clone's `extension/`, or the copy setup installs and the server keeps in sync. Its manifest is the repo's, with the `key` that fixes its id and the hosts `api_traffic` listens on.
+_Avoid_: developer build, unpacked build
+
 **Web store copy**:
-The extension installed from the Chrome Web Store or Edge Add-ons, which updates from there, not from the folder mcp-teams keeps.
+The extension installed from the Chrome Web Store or Edge Add-ons, which updates from there, not from the folder mcp-teams keeps. Its manifest is the one `scripts/package-extension.mjs` writes: no `key`, and only the five Teams and SharePoint hosts, so `api_traffic` isn't available in it.
 _Avoid_: store copy (the **Store** is the launcher's folder of versions)
 
 ### Teams accounts

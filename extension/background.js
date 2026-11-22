@@ -247,10 +247,10 @@ const TRAFFIC_ONLY_TYPES = ["websocket", "ping"];
 const trafficFilter = { urls: [...teams.TRAFFIC_URLS, ...teams.TRAFFIC_WS_URLS], types: ["xmlhttprequest", "other", "media", ...TRAFFIC_ONLY_TYPES] };
 
 /**
- * Whether the manifest requests every host the traffic log listens on (#218). The manifest as shipped
- * (and for the stores) requests only the five Teams and SharePoint hosts, so api_traffic isn't available
- * there and its listeners aren't registered; a developer's copy adds the patterns to host_permissions by
- * hand. Read from the manifest, synchronously, so the listeners are registered on load as MV3 needs.
+ * Whether the manifest requests every host the traffic log listens on (#218). The sideloaded copy's
+ * (the repo's extension/manifest.json) does (#239). The web store copy's requests only the five Teams and
+ * SharePoint hosts (scripts/package-extension.mjs), so api_traffic isn't available there and its
+ * listeners aren't registered. Read from the manifest, synchronously, so the listeners are registered on load as MV3 needs.
  */
 function holdsTrafficHosts() {
   const held = new Set(chrome.runtime.getManifest().host_permissions ?? []);
@@ -259,9 +259,9 @@ function holdsTrafficHosts() {
 
 const TRAFFIC_UNAVAILABLE =
   "api_traffic isn't available in this build of the extension: it listens on the Microsoft hosts the Teams tab calls, " +
-  "which the extension doesn't request (it requests only the Teams and SharePoint hosts it works with). " +
-  "To use it from a clone of mcp-teams, add teams.TRAFFIC_URLS and teams.TRAFFIC_WS_URLS (extension/teams.js) to " +
-  "host_permissions in the extension's manifest.json, then reload the extension.";
+  "which this copy doesn't request (it requests only the Teams and SharePoint hosts it works with). " +
+  "It works in the sideloaded copy (a clone of mcp-teams loaded unpacked, or the copy setup installs), " +
+  "whose manifest.json holds teams.TRAFFIC_URLS and teams.TRAFFIC_WS_URLS in host_permissions; the web store copy leaves them out.";
 
 function recordRequest(details) {
   if (!teams.isTeamsOrigin(details.initiator)) return;
@@ -270,18 +270,12 @@ function recordRequest(details) {
 }
 
 /**
- * The hosts the manifest requests (#218), and the request types that count as the Teams tab's calls (not
+ * The hosts the extension works with, which every copy's manifest requests (#218), and the request types that count as the Teams tab's calls (not
  * a WebSocket handshake or a beacon, #200). The last calls are taken from these, with or without the
  * api_traffic hosts, so get_version's lastTeamsCall and lastSignedInCall work in every build.
  */
 const callsFilter = {
-  urls: [
-    "https://teams.cloud.microsoft/*",
-    "https://teams.microsoft.com/*",
-    "https://*.ng.msg.teams.microsoft.com/*",
-    "https://substrate.office.com/*",
-    "https://*.sharepoint.com/*",
-  ],
+  urls: [...teams.EXTENSION_HOSTS],
   types: ["xmlhttprequest", "other", "media"],
 };
 

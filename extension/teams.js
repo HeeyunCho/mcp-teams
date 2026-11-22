@@ -836,6 +836,19 @@ export function threadIdFrom(location, json) {
 
 // ------------------------------------------------------------ traffic log (diagnostic)
 
+/**
+ * The hosts the extension works with (#218): Teams' two origins, chatsvc's regional hosts, substrate
+ * (search) and SharePoint (files, transcripts). The web store copy's manifest requests only these
+ * (scripts/package-extension.mjs); the worker takes the Teams tab's last calls from them.
+ */
+export const EXTENSION_HOSTS = Object.freeze([
+  "https://teams.cloud.microsoft/*",
+  "https://teams.microsoft.com/*",
+  "https://*.ng.msg.teams.microsoft.com/*",
+  "https://substrate.office.com/*",
+  "https://*.sharepoint.com/*",
+]);
+
 /** Hosts the Teams web app calls besides its own origin; observed for the api_traffic log only. */
 export const TRAFFIC_URLS = [
   "https://*.cloud.microsoft/*",
