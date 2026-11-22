@@ -36,6 +36,11 @@ export const EXTENSION_ORIGIN = `chrome-extension://${EXTENSION_ID}`;
 /** A trusted list of ids: the ids themselves, or a record of them like EXTENSION_IDS. */
 export type ExtensionIds = Readonly<Record<string, string>> | readonly string[];
 
+/** An origin without trailing slashes: "chrome-extension://<id>/", as Chrome passes it to a native host, becomes "chrome-extension://<id>". */
+export function normalizeOrigin(origin: string): string {
+  return origin.replace(/\/+$/, "");
+}
+
 /** The trusted origins ("chrome-extension://<id>", no trailing slash) of a list of ids. */
 export function trustedOrigins(ids: ExtensionIds = EXTENSION_IDS): string[] {
   return [...new Set(Object.values(ids))].map((id) => `chrome-extension://${id}`);
@@ -48,7 +53,7 @@ export function trustedOrigins(ids: ExtensionIds = EXTENSION_IDS): string[] {
  * bridge's "ours / another copy" rest on it.
  */
 export function isTrustedOrigin(origin: unknown, ids: ExtensionIds = EXTENSION_IDS): origin is string {
-  return typeof origin === "string" && trustedOrigins(ids).includes(origin.replace(/\/+$/, ""));
+  return typeof origin === "string" && trustedOrigins(ids).includes(normalizeOrigin(origin));
 }
 
 /**

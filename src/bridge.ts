@@ -4,7 +4,7 @@ import { createServer as createHttpServer, type IncomingMessage } from "node:htt
 import { connect } from "node:net";
 import { dirname } from "node:path";
 import { WebSocketServer, WebSocket } from "ws";
-import { EXTENSION_IDS, EXTENSION_ORIGIN as UNPACKED_EXTENSION_ORIGIN, isTrustedOrigin, type ExtensionIds } from "./extension.js";
+import { EXTENSION_IDS, EXTENSION_ORIGIN as UNPACKED_EXTENSION_ORIGIN, isTrustedOrigin, normalizeOrigin, type ExtensionIds } from "./extension.js";
 import { FairQueue } from "./fairqueue.js";
 import { errorFields, escapeRegExp, logVersion } from "./hubLog.js";
 
@@ -781,7 +781,7 @@ export class ExtensionBridge {
    */
   attachExtension(conn: BridgeSocket, origin: string = UNPACKED_EXTENSION_ORIGIN) {
     if (!this.isOurs(origin)) throw new Error("attachExtension: not a trusted extension origin");
-    this.onConnection(conn, { via: "native", origin: origin.replace(/\/+$/, "") });
+    this.onConnection(conn, { via: "native", origin: normalizeOrigin(origin) });
   }
 
   /**
@@ -1110,7 +1110,7 @@ export class ExtensionBridge {
     // this hub trusts it too. A relaying host from before #216 names none, and an origin this hub
     // doesn't trust isn't taken from it: both count as the sideloaded copy, as before.
     const onTcp = via === "tcp";
-    const relayed = isTrustedOrigin(msg.origin, this.trustedIds) ? msg.origin.replace(/\/+$/, "") : UNPACKED_EXTENSION_ORIGIN;
+    const relayed = isTrustedOrigin(msg.origin, this.trustedIds) ? normalizeOrigin(msg.origin) : UNPACKED_EXTENSION_ORIGIN;
     const origin = via === "socket" ? relayed : connOrigin;
     const transport = onTcp ? "websocket" : "native";
     const info: ExtensionInfo = {

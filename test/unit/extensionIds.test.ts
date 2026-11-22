@@ -3,7 +3,7 @@
 // it must match exactly: no prefix, substring, case or wildcard match.
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { browsersWithTwoCopies, EXTENSION_ID, EXTENSION_IDS, isTrustedOrigin, trustedOrigins } from "../../src/extension.js";
+import { browsersWithTwoCopies, EXTENSION_ID, EXTENSION_IDS, isTrustedOrigin, normalizeOrigin, trustedOrigins } from "../../src/extension.js";
 
 // Fictional ids: 32 letters a–p, as Chrome's are.
 const STORE_ID = "abcdefghijklmnopabcdefghijklmnop";
@@ -63,6 +63,13 @@ describe("#216: the trusted extension ids", () => {
     expect(browsersWithTwoCopies([sideloaded, { origin: `chrome-extension://${OTHER_ID}`, browser: "Chrome" }], IDS)).toEqual([]);
     // With today's list (no web store id yet) nothing is a second copy.
     expect(browsersWithTwoCopies([sideloaded, store])).toEqual([]);
+  });
+
+  it("#245: drops trailing slashes from an origin, as Chrome passes it to a native host", () => {
+    expect(normalizeOrigin("chrome-extension://abcdefghijklmnopabcdefghijklmnop/")).toBe("chrome-extension://abcdefghijklmnopabcdefghijklmnop");
+    expect(normalizeOrigin("chrome-extension://abcdefghijklmnopabcdefghijklmnop//")).toBe("chrome-extension://abcdefghijklmnopabcdefghijklmnop");
+    expect(normalizeOrigin("chrome-extension://abcdefghijklmnopabcdefghijklmnop")).toBe("chrome-extension://abcdefghijklmnopabcdefghijklmnop");
+    expect(normalizeOrigin("")).toBe("");
   });
 
   it("#216: has no way in from the environment: src/extension.ts reads no process.env", () => {
