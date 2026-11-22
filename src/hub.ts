@@ -29,7 +29,7 @@ import { join } from "node:path";
 import WebSocket from "ws";
 import { DEFAULT_BRIDGE_OPTIONS, ExtensionBridge, MAX_MESSAGE_BYTES, proof, socketTransport, type BridgeSocket } from "./bridge.js";
 import { CONFIG_DIR, SERVER_VERSION, loadConfig } from "./config.js";
-import { EXTENSION_ORIGIN } from "./extension.js";
+import { isTrustedOrigin } from "./extension.js";
 import { errorFields, hubLog, trafficLogger } from "./hubLog.js";
 import { FrameDecoder, NativePort, hubSocketPath, msFromEnv, socketNeedsProof } from "./native.js";
 
@@ -61,9 +61,10 @@ process.on("unhandledRejection", (err) => log("error", { what: "unhandled-reject
 process.on("uncaughtException", (err) => log("error", { what: "uncaught-exception", ...errorFields(err) }));
 
 // Chrome passes the caller's origin first ("chrome-extension://<id>/"; on Windows a
-// --parent-window argument follows). Only our extension may use this host.
+// --parent-window argument follows). Only our extension may use this host: any id in the trusted
+// list (#216: sideload, Chrome Web Store, Edge Add-ons), matched exactly (isTrustedOrigin).
 const origin = (process.argv[2] ?? "").replace(/\/+$/, "");
-if (origin !== EXTENSION_ORIGIN) {
+if (!isTrustedOrigin(origin)) {
   log("refused", { reason: "unknown caller origin" });
   process.stderr.write("mcp-teams hub: refused: only the mcp-teams extension may start this host.\n");
   process.exit(1);
@@ -166,7 +167,7 @@ async function becomeHost(replay: Buffer[]): Promise<boolean> {
   log("host", { version: SERVER_VERSION, role: "serving" });
   linger(0);
   if (!stdinClosed && port.readyState === WebSocket.OPEN) {
-    bridge.attachExtension(port);
+    bridge.attachExtension(port, origin);
     sink = (f) => port.receive(f);
     for (const f of [...replay, ...queue.splice(0)]) port.receive(f);
   }
@@ -216,9 +217,11 @@ function relay(pending: Buffer[]): Promise<number> {
     let proven = false;
     /** The nonce of the extension's hello that went to the holder: the extension checks the welcome by it. */
     let extensionNonce: unknown;
+    // The hello also names the extension's origin, which this host checked (#216), so the serving
+    // host records which trusted id it is rather than taking it for the sideloaded one.
     const prepare = (f: Buffer) =>
       isHello(f) && challenge
-        ? JSON.stringify({ ...JSON.parse(f.toString("utf8")), proof: proof(config.token, "client:socket", challenge), nonce })
+        ? JSON.stringify({ ...JSON.parse(f.toString("utf8")), origin, proof: proof(config.token, "client:socket", challenge), nonce })
         : f.toString("utf8");
     // Logged as the serving host's NativePort logs what it receives (the frame as the extension sent it, without the proof).
     const forward = (f: Buffer) => {

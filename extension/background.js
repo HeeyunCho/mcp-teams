@@ -1249,29 +1249,36 @@ async function sharepointGet(url, ctx = null) {
   return sendTo(gateKey("sharepoint", origin), await guarded(findTab(), ctx), findTab, url, "GET", {}, null, ctx, true);
 }
 
-// "<accountKey of chatsvc>\n<transcript URL>" -> parsed transcript; a finished transcript doesn't
-// change, but what one user may read isn't another's. Bounded by size: each counts the length
-// of the response text it was parsed from, least recently used out first, and one longer than
-// the cap isn't kept at all.
+// "<accountKey of chatsvc>\n<transcript URL>" -> slim transcript (teams.slimTranscript: only the
+// entries' text, speaker, offsets and language, #178); a finished transcript doesn't change, but
+// what one user may read isn't another's. Bounded by size: each counts the UTF-8 bytes of the
+// strings it keeps plus a fixed cost per entry, about what it takes on the heap; least recently
+// used out first, and one bigger than the cap isn't kept at all.
 const TRANSCRIPTS_MAX_BYTES = 8 * 1024 * 1024;
 const transcripts = new teams.ByteCache(TRANSCRIPTS_MAX_BYTES);
 
-/** A call's transcript (Stream transcript.json) from the organizer's OneDrive. */
-async function transcriptOf(info, session, ctx = null) {
-  const key = `${accountKey(await getCapture("chatsvc")) ?? ""}\n${session.transcriptUrl}`;
+const transcriptKey = async (session) => `${accountKey(await getCapture("chatsvc")) ?? ""}\n${session.transcriptUrl}`;
+
+/**
+ * A call's transcript (Stream transcript.json) from the organizer's OneDrive. `meter`
+ * ({ spent }), if given, counts the request when the transcript isn't cached.
+ */
+async function transcriptOf(info, session, ctx = null, meter = null) {
+  const key = await transcriptKey(session);
   const cached = transcripts.get(key);
   if (cached) return cached;
+  if (meter) meter.spent++;
   const url = session.transcriptUrl + (session.transcriptUrl.includes("?") ? "&" : "?") + "format=json";
   const res = await sharepointGet(url, ctx);
   if (res.status === 403 || res.status === 404) {
     throw new Error(`The transcript of "${info.title}" (${session.start}) is no longer available to you (HTTP ${res.status}): the organizer may have deleted it or not shared it.`);
   }
   if (res.status >= 400) throw new Error(`OneDrive HTTP ${res.status} while reading the transcript.`);
-  const json = JSON.parse(res.text);
+  const { transcript, bytes } = teams.slimTranscript(JSON.parse(res.text));
   // Not kept for an account that signed in while it was read.
-  if (key !== `${accountKey(await getCapture("chatsvc")) ?? ""}\n${session.transcriptUrl}`) return json;
-  transcripts.set(key, json, res.text.length);
-  return json;
+  if (key !== `${accountKey(await getCapture("chatsvc")) ?? ""}\n${session.transcriptUrl}`) return transcript;
+  transcripts.set(key, transcript, bytes);
+  return transcript;
 }
 
 /** A meeting chat by id, title or subject. */
@@ -1284,40 +1291,63 @@ async function resolveMeeting(meeting, ctx = null) {
 
 const SESSIONS_CACHE_MS = 60_000;
 const SESSIONS_CACHE_MAX = 50;
-/** "<accountKey of chatsvc>\n<meeting id>" -> { at, sessions }: one tenant's meetings never answer another's. */
+/**
+ * "<accountKey of chatsvc>\n<meeting id>" -> { at, sessions, cut, pages, maxPages }: one
+ * tenant's meetings never answer another's. `cut`: the chat has older pages that weren't read
+ * when it was read `maxPages` pages at most; `pages`: how many were read.
+ */
 const meetingSessionsCache = new Map();
 const sessionsKey = (cap, id) => (cap ? `${accountKey(cap)}\n${id}` : null);
 
 /**
- * The calls held in a meeting chat (see teams.meetingSessions). Cached for a minute, so
- * read_transcript's continueFrom pages and get_meeting don't read the whole chat again.
+ * The cached calls of a meeting chat if they answer a read of `maxPages` pages at most: a
+ * whole chat answers any read, but one cut short (search_transcripts reads fewer pages) only
+ * a read capped as short, so get_meeting and read_transcript never see a chat cut by a search.
  */
-async function sessionsOf(info, ctx = null) {
+async function cachedSessions(info, maxPages = MAX_PAGES) {
   const key = sessionsKey(await getCapture("chatsvc"), info.id);
   const hit = key && meetingSessionsCache.get(key);
-  if (hit && Date.now() - hit.at < SESSIONS_CACHE_MS) return hit.sessions;
-  const sessions = await readSessions(info, ctx);
+  if (!hit || Date.now() - hit.at >= SESSIONS_CACHE_MS) return null;
+  return hit.cut && maxPages > hit.maxPages ? null : hit;
+}
+
+/**
+ * The calls held in a meeting chat (see teams.meetingSessions), read `maxPages` pages at
+ * most: { sessions, cut, pages }. Cached for a minute, so read_transcript's continueFrom pages and
+ * get_meeting don't read the whole chat again. `meter` ({ spent }) counts the pages read.
+ */
+async function meetingSessions(info, ctx = null, { maxPages = MAX_PAGES, meter = null } = {}) {
+  const hit = await cachedSessions(info, maxPages);
+  if (hit) return hit;
+  const key = sessionsKey(await getCapture("chatsvc"), info.id);
+  const entry = { at: 0, maxPages, ...(await readSessions(info, ctx, { maxPages, meter })) };
   // Kept only when the chat was read as the account it is filed under: a session that changed
   // meanwhile (a switch, or a 401 that brought another base) may have read part of it.
   if (key && key === sessionsKey(await getCapture("chatsvc"), info.id)) {
+    entry.at = Date.now();
     meetingSessionsCache.delete(key);
     if (meetingSessionsCache.size >= SESSIONS_CACHE_MAX) meetingSessionsCache.delete(meetingSessionsCache.keys().next().value);
-    meetingSessionsCache.set(key, { at: Date.now(), sessions });
+    meetingSessionsCache.set(key, entry);
   }
-  return sessions;
+  return entry;
 }
 
-async function readSessions(info, ctx = null) {
-  let raw;
+/** The calls held in a meeting chat, read as far as get_meeting reads it. */
+async function sessionsOf(info, ctx = null) {
+  return (await meetingSessions(info, ctx)).sessions;
+}
+
+async function readSessions(info, ctx = null, { maxPages = MAX_PAGES, meter = null } = {}) {
+  let read;
   try {
-    raw = await fetchMessages(info.id, { limit: 2000, includeSystem: true, ctx });
+    read = await fetchMessagePages(info.id, { limit: 2000, includeSystem: true, ctx, maxPages, meter });
   } catch (err) {
     if (/HTTP 403/.test(err.message) && info.external) {
       throw new Error(`"${info.title}" was organized by another organization, and Teams no longer lets you read its meeting chat.`);
     }
     throw err;
   }
-  return teams.meetingSessions(raw);
+  return { sessions: teams.meetingSessions(read.raw), cut: read.next !== null, pages: read.pages };
 }
 
 const MESSAGES_VIEW = "msnp24Equivalent|supportsMessageProperties";
@@ -1331,6 +1361,13 @@ async function fetchMessages(id, opts) {
 }
 
 const MAX_PAGES = 20;
+// search_transcripts (#179): at most this many meetings, the newest pages of each meeting chat
+// (where the latest calls are), and this many Teams requests (chat pages and transcripts not
+// cached) per search across meetings. Worst case before: 50 meetings × 20 pages plus
+// transcripts, about 1,000. A search of one named meeting has no budget: all of it is read.
+const SEARCH_MAX_MEETINGS = 20;
+const SEARCH_CHAT_PAGES = 5;
+const SEARCH_REQUEST_BUDGET = 100;
 const MESSAGES_ACCOUNT_CHANGED = ACCOUNT_CHANGED_WHILE("messages were read", "reads them as that account");
 
 /** The conversation id chatsvc pages: the conversation, or one channel post's thread. */
@@ -1339,11 +1376,12 @@ const messagesTarget = (id, threadId) => (threadId ? `${id};messageid=${threadId
 /**
  * fetchMessages with where each message came from: `linkOf` (message id → the link of its
  * page), `first` (the first page's link), `next` (the backward link not followed yet, if
- * any) and `capped` (stopped after MAX_PAGES pages short of `limit`). Starts at the newest
+ * any) and `capped` (stopped after `maxPages` pages short of `limit`). Starts at the newest
  * page, or at `from` (a link from a cursor, see teams.readMessagesCursor), and takes only
  * messages older than `olderThan` ({ time, id }, see teams.compareMessageKeys) if given.
+ * `meter` ({ spent }), if given, counts each page requested.
  */
-async function fetchMessagePages(id, { limit, olderThan, includeSystem, threadId, from, ctx = null }) {
+async function fetchMessagePages(id, { limit, olderThan, includeSystem, threadId, from, ctx = null, maxPages = MAX_PAGES, meter = null }) {
   const target = messagesTarget(id, threadId);
   const first = from ?? `/v1/users/ME/conversations/${encodeURIComponent(target)}/messages?view=${encodeURIComponent(MESSAGES_VIEW)}&pageSize=${Math.min(200, Math.max(20, limit * 2))}&startTime=1`;
   let path = first;
@@ -1360,7 +1398,8 @@ async function fetchMessagePages(id, { limit, olderThan, includeSystem, threadId
     if ((cap.oid ?? null) !== readAs) throw new Error(MESSAGES_ACCOUNT_CHANGED);
   };
   while (path) {
-    if (pages === MAX_PAGES) return { raw, linkOf, first, next: path, capped: true, pages };
+    if (pages === maxPages) return { raw, linkOf, first, next: path, capped: true, pages };
+    if (meter) meter.spent++;
     const json = await api("chatsvc", path, { ctx, onCapture: sameAccount });
     if (switches !== accountSwitches) throw new Error(MESSAGES_ACCOUNT_CHANGED);
     pages++;
@@ -1554,28 +1593,58 @@ export const handlers = {
 
   async searchTranscripts({ query, meeting, limit = 30, meetings: maxMeetings = 10 }, ctx) {
     let list = meeting ? [await resolveMeeting(meeting, ctx)] : (await teamsAndChats(true, ctx)).meetings.filter((m) => m.hasTranscript);
-    list = [...list].sort((a, b) => (b.lastActivity ?? "").localeCompare(a.lastActivity ?? "")).slice(0, maxMeetings);
+    list = [...list].sort((a, b) => (b.lastActivity ?? "").localeCompare(a.lastActivity ?? "")).slice(0, Math.min(maxMeetings, SEARCH_MAX_MEETINGS));
+    // One named meeting's chat is read as far as get_meeting reads it; across meetings, only
+    // the newest pages of each, where the latest calls are.
+    const maxPages = meeting ? MAX_PAGES : SEARCH_CHAT_PAGES;
+    // The request budget limits only the search across meetings: all of one named meeting's
+    // transcripts are read.
+    const budget = meeting ? Infinity : SEARCH_REQUEST_BUDGET;
+    const meter = { spent: 0 }; // Teams requests for meeting chats and transcripts (cached ones are free)
+    const left = () => budget - meter.spent;
     const results = [];
     const skipped = [];
+    const chatsCut = [];
+    const pagesRead = new Map(); // pages read -> titles of the chats in chatsCut read that far
     let total = 0;
     let shown = 0;
     let searched = 0;
+    let stoppedBy = null;
+    let transcriptsNotSearched = 0;
     for (const info of list) {
-      if (shown >= limit) break; // enough matches; older meetings aren't read
+      if (shown >= limit) {
+        stoppedBy = "limit"; // enough matches; older meetings aren't read
+        break;
+      }
       ctx?.check(); // withdrawn: no more meetings are read
+      // A chat that isn't cached must fit in the budget with at least one transcript.
+      if (!(await cachedSessions(info, maxPages)) && left() < maxPages + 1) {
+        stoppedBy = "budget";
+        break;
+      }
       searched++;
       let sessions;
       try {
-        sessions = (await sessionsOf(info, ctx)).filter((s) => s.transcriptUrl);
+        const read = await meetingSessions(info, ctx, { maxPages, meter });
+        if (read.cut) {
+          chatsCut.push(info.title);
+          pagesRead.set(read.pages, [...(pagesRead.get(read.pages) ?? []), info.title]);
+        }
+        sessions = read.sessions.filter((s) => s.transcriptUrl);
       } catch (err) {
         ctx?.check();
         skipped.push({ meeting: info.title, reason: err.message });
         continue;
       }
-      for (const s of sessions.reverse()) {
+      for (const [i, s] of sessions.reverse().entries()) {
+        if (left() < 1 && !transcripts.get(await transcriptKey(s))) {
+          stoppedBy = "budget";
+          transcriptsNotSearched = sessions.length - i;
+          break;
+        }
         let json;
         try {
-          json = await transcriptOf(info, s, ctx);
+          json = await transcriptOf(info, s, ctx, meter);
         } catch (err) {
           ctx?.check();
           skipped.push({ meeting: info.title, session: s.start, reason: err.message });
@@ -1589,15 +1658,45 @@ export const handlers = {
           results.push({ meeting: info.title, id: info.id, session: s.start, callId: s.callId, matches });
         }
       }
+      if (stoppedBy) break;
     }
     const notSearched = list.length - searched;
+    const notes = [];
+    if (stoppedBy === "limit") notes.push(`Stopped at limit: ${notSearched} older meetings with a transcript weren't searched. Raise limit to search them.`);
+    if (stoppedBy === "budget") {
+      const parts = [
+        ...(notSearched ? [`${notSearched} older meeting${notSearched === 1 ? "" : "s"} with a transcript`] : []),
+        ...(transcriptsNotSearched ? [`${transcriptsNotSearched} older transcript${transcriptsNotSearched === 1 ? "" : "s"} of "${list[searched - 1].title}"`] : []),
+      ];
+      notes.push(
+        `Stopped at ${SEARCH_REQUEST_BUDGET} Teams requests, the most one search across meetings makes: ${parts.join(" and ")} weren't searched. To search them, search one meeting with \`meeting\` (list_meetings lists them), or search again within a minute: what this search read is cached until then, so the next one gets further.`,
+      );
+    }
+    if (chatsCut.length) {
+      // The pages actually read: a chat served from the cache may have been read further (by
+      // get_meeting), and a read stops short of maxPages at 2,000 messages.
+      const [[onlyPages]] = pagesRead;
+      const howFar =
+        pagesRead.size === 1
+          ? `the newest ${onlyPages} page${onlyPages === 1 ? "" : "s"}`
+          : `the newest pages (${[...pagesRead].map(([n, titles]) => `${n} of ${titles.map((t) => `"${t}"`).join(", ")}`).join("; ")})`;
+      notes.push(
+        meeting
+          ? `Only ${howFar} of the meeting chat were read, so calls older than those weren't searched.`
+          : `Only ${howFar} of each meeting chat in chatsCut were read, so their older calls weren't searched. Search one of them with \`meeting\` to read its chat further.`,
+      );
+    }
     return {
       query,
       meetingsSearched: searched,
       matches: total,
       results,
       ...(skipped.length ? { skipped } : {}),
-      ...(notSearched ? { notSearched, note: `Stopped at limit: ${notSearched} older meetings with a transcript weren't searched. Raise limit to search them.` } : {}),
+      ...(stoppedBy ? { stoppedBy } : {}),
+      ...(notSearched ? { notSearched } : {}),
+      ...(transcriptsNotSearched ? { transcriptsNotSearched } : {}),
+      ...(chatsCut.length ? { chatsCut } : {}),
+      ...(notes.length ? { note: notes.join(" ") } : {}),
     };
   },
 

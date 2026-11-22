@@ -17,7 +17,7 @@ import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
-import { EXTENSION_ORIGIN } from "./extension.js";
+import { EXTENSION_IDS, trustedOrigins, type ExtensionIds } from "./extension.js";
 
 export const HOST_NAME = "com.mcp_teams.hub";
 const MANIFEST_FILE = `${HOST_NAME}.json`;
@@ -166,13 +166,14 @@ function targets(home: string, platform: NodeJS.Platform, env: Record<string, st
   ]);
 }
 
-export function hostManifest(hostLauncher: string): string {
+/** The host manifest; allowed_origins lists every trusted extension id (#216), so Chrome starts the host for each. */
+export function hostManifest(hostLauncher: string, ids: ExtensionIds = EXTENSION_IDS): string {
   const manifest = {
     name: HOST_NAME,
     description: "mcp-teams hub: connects the browser extension with the mcp-teams MCP servers",
     path: hostLauncher,
     type: "stdio",
-    allowed_origins: [`${EXTENSION_ORIGIN}/`],
+    allowed_origins: trustedOrigins(ids).map((origin) => `${origin}/`),
   };
   return `${JSON.stringify(manifest, null, 2)}\n`;
 }

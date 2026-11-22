@@ -1136,6 +1136,52 @@ export function transcriptLines(json, { fromSeconds = 0 } = {}) {
   return lines.map((l) => `[${l.at}] ${l.who}: ${l.text}`);
 }
 
+/** A string's length in UTF-8 bytes (a lone surrogate counts 2, not the 3 of its U+FFFD). */
+function utf8Bytes(s) {
+  let n = s.length;
+  const first = s.search(/[^\x00-\x7f]/); // ASCII is 1 byte per unit; the native scan is fast
+  if (first < 0) return n;
+  for (let i = first; i < s.length; i++) {
+    const c = s.charCodeAt(i);
+    if (c >= 0x80) n += c >= 0x800 && (c < 0xd800 || c > 0xdfff) ? 2 : 1;
+  }
+  return n;
+}
+
+/**
+ * What a slim transcript entry costs beyond its strings' UTF-8 bytes: the object, its string
+ * headers and its slot in the array. scripts/measure-worker-cache.mjs measured 133-140 bytes on
+ * Node 24's heap (64-bit pointers), so there the count is 2-4% under the heap; Chrome's compressed
+ * pointers need less, so in the browser it should be at or above the heap (#178, #190).
+ */
+const TRANSCRIPT_ENTRY_BYTES = 128;
+
+/**
+ * What transcriptLines, transcriptSpeakers, searchTranscript and read_transcript's language read
+ * of a transcript, in the same shape: each entry's text, speaker and offsets, and the first
+ * spokenLanguageTag on its entry. Stream's other fields (ids, confidence, ...) are dropped (#178).
+ * `bytes` is its size: the UTF-8 bytes of the strings it keeps, plus TRANSCRIPT_ENTRY_BYTES per entry.
+ */
+export function slimTranscript(json) {
+  const entries = [];
+  let bytes = 0;
+  let language = false;
+  for (const e of json?.entries ?? []) {
+    const slim = {};
+    for (const field of ["text", "speakerDisplayName", "startOffset", "endOffset"]) {
+      if (e?.[field] != null) slim[field] = String(e[field]);
+    }
+    if (!language && e?.spokenLanguageTag) {
+      slim.spokenLanguageTag = String(e.spokenLanguageTag);
+      language = true;
+    }
+    bytes += TRANSCRIPT_ENTRY_BYTES;
+    for (const v of Object.values(slim)) bytes += utf8Bytes(v);
+    entries.push(slim);
+  }
+  return { transcript: { entries }, bytes };
+}
+
 /** Speakers of a transcript with how long each spoke, most first. */
 export function transcriptSpeakers(json) {
   const total = new Map();

@@ -9,6 +9,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { afterEach, describe, expect, it } from "vitest";
 import { proof, socketTransport, type BridgeSocket, type ExtensionBridge } from "../../src/bridge.js";
 import { SERVER_VERSION } from "../../src/config.js";
+import { EXTENSION_ORIGIN, trustedOrigins } from "../../src/extension.js";
 import { registerTools } from "../../src/tools.js";
 import { fakeExtension, TOKEN } from "../helpers/bridgeHarness.js";
 import { nativeHarness, REAL_HEARTBEAT } from "../helpers/nativeHost.js";
@@ -50,6 +51,32 @@ describe("#123: the native host", { timeout: 30_000 }, () => {
     expect(await ext.exited).not.toBe(0);
     expect(ext.received).toEqual([]);
     expect(h.logText()).toMatch(/ refused reason=unknown caller origin/);
+  });
+
+  it("#216: serves every trusted extension id (sideload and web store ids), and records which one connected", async () => {
+    for (const trusted of trustedOrigins()) {
+      h = await nativeHarness();
+      // As Chrome passes it on Windows: the origin with its slash, then --parent-window.
+      const ext = await h.host({ origin: `${trusted}/`, args: ["--parent-window=0"] });
+      expect(ext.welcome).toMatchObject({ type: "welcome" });
+      const server = await h.server();
+      await until(() => server.connected, 5_000, "the peer seeing the extension");
+      expect(server.extensions.map((e) => e.origin)).toEqual([trusted]);
+      await h.cleanup();
+      h = undefined;
+    }
+  });
+
+  it("#216: still refuses an id that isn't trusted, or one that only starts like a trusted one", async () => {
+    for (const origin of ["chrome-extension://ponmlkjihgfedcbaponmlkjihgfedcba/", `${EXTENSION_ORIGIN}x/`, `${EXTENSION_ORIGIN.toUpperCase()}/`]) {
+      h = await nativeHarness();
+      const ext = await h.host({ origin });
+      expect(await ext.exited).not.toBe(0);
+      expect(ext.received).toEqual([]);
+      expect(h.logText()).toMatch(/ refused reason=unknown caller origin/);
+      await h.cleanup();
+      h = undefined;
+    }
   });
 
   it("#123: with nativeHost off in config.json it does nothing and exits, so the extension stays on TCP", async () => {

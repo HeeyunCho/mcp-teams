@@ -7,7 +7,7 @@ It supports work and school (Microsoft 365) accounts. Personal Teams (teams.live
 ```
 AI app ────stdio(MCP)──► mcp-teams server ──ws://127.0.0.1:47393──► browser extension ──► Teams tab
                                               (loopback only; our      (runs Teams' own
-                                               extension's fixed id)    web API in the tab)
+                                               extension's ids)         web API in the tab)
 ```
 
 ## Tools
@@ -35,6 +35,8 @@ A conversation can be given as an id (`19:…`), as `Team/Channel`, as a chat ti
 ### Meetings and transcripts
 
 Meeting data comes from the meeting chat. Teams posts an event there for each call, saying who joined and when, and a message for each recording and transcript. Transcripts are stored in the organizer's OneDrive, so `read_transcript` reads them with your SharePoint sign-in in a SharePoint tab. If none is open, it opens your OneDrive in a pinned background tab. You can read the transcripts of meetings you were invited to, as in Teams. There is one only when someone turned on transcription in the meeting.
+
+`search_transcripts` searches up to 20 meetings (`meetings`, default 10), newest first. A search across meetings makes at most 100 Teams requests: meeting chat pages and transcripts, not counting what it already has cached. It reads only the newest 5 pages of each meeting chat, where the latest calls are; a chat longer than what was read is listed in `chatsCut`, and the note says how many pages were read. When the 100 requests run out, the result has `stoppedBy: "budget"`, says how many meetings (`notSearched`) or transcripts (`transcriptsNotSearched`) weren't searched, and returns the matches found so far. Searching again within a minute gets further, because what the first search read is cached. A search of one meeting (`meeting`) has no such budget: it reads its chat as far as `get_meeting` does, and all of its transcripts.
 
 Teams reports the call's length, not each person's time in it, so attendance lists who joined. Meeting chats of another organization's meetings (`external: true`) usually can't be read once you've left, which is how Teams works too.
 
@@ -90,7 +92,7 @@ A slow or failed read's line also says whether the server itself was stuck: `eld
 2026-11-17T07:19:14.020Z pid=42868 loop-delay v=0.3.74 role=hub eld=22 eldMax=14870 elu=31
 ```
 
-It holds metadata only: never message text, names, chat ids, tokens, regions or who is signed in. With several AI sessions, all of their servers write to the same file (each line names its `pid`). For a `[Hub health]` report, attach `server.log` (and `server.log.1`) first. A file like `server.log.1234-ab12cd34.rotating` is an older part of the log that couldn't be moved to `server.log.1` because another program (a virus scanner, a viewer) held that open; attach it too, or delete it. `server.log.lock` (and `hub.log.lock` for the native host's log) exists only while a server moves the log; one left by a server that died then is removed after 30 s.
+It holds metadata only: never message text, names, chat ids, tokens, regions or who is signed in. With several AI sessions, all of their servers write to the same file (each line names its `pid`). For a `[Hub health]` report, attach `server.log` (and `server.log.1`) first. A file like `server.log.1234-ab12cd34.rotating` is an older part of the log that couldn't be moved to `server.log.1` because another program (a virus scanner, a viewer) held that open; attach it too. Such a file is removed at a rotation once it is a day old (counted from when it was set aside or last written to), so attach it before then, or delete it. `server.log.lock` (and `hub.log.lock` for the native host's log) exists only while a server moves the log; one left by a server that died then is removed after 30 s.
 
 With the native host on, the host writes `~/.mcp-teams/hub.log` the same way (metadata only, moved to `hub.log.1` past 1 MB). Among its lines: `extension-dropped reason=no-pong transport=…` (the host dropped a browser connection, such as one relayed from another browser's host, that stopped answering its pings), `peer-left via=…` (a server left the host; with `reason=no-pong` or `reason=backlog` when the host dropped it), and, from a relaying host, `relay-closed code=…` (its connection to the serving host closed; the next line says whether it took over, relayed again or exited).
 
@@ -198,12 +200,15 @@ npm install && npm run build
 node dist/index.js setup   # registers this copy (node dist/index.js) instead of npx
 npm test                   # builds, then runs unit, integration and system tests (see docs/testing.md)
 npm run probe -- status    # calls one extension method through the bridge (see scripts/probe.mjs)
+npm run package-extension  # the zip for the Chrome Web Store and Edge Add-ons (see docs/extension-ids.md)
 ```
 
 Two development aids are off in the extension as shipped:
 
 - **`api_traffic`** listens on the hosts in `TRAFFIC_URLS` and `TRAFFIC_WS_URLS` (`extension/teams.js`), which the manifest doesn't request. To use it, add those patterns to `host_permissions` in your copy's `extension/manifest.json` (or the copy setup installed) and reload the extension; don't commit that change.
 - **`npm run probe -- probe '{…}'`** (a GET on any Teams service path or SharePoint URL) is refused until you turn it on in that browser: in `chrome://extensions`, open the mcp-teams bridge's *service worker* console and run `chrome.storage.local.set({ devProbe: true })` (`chrome.storage.local.remove("devProbe")` turns it off). Other `npm run probe` methods need nothing.
+
+The server, the native host and setup trust a fixed list of extension ids: the sideloaded copy's (from the manifest's `key`) and, once the web stores have assigned them, the Chrome Web Store's and Edge Add-ons'. Adding a web store id is one line in `src/extension.ts`, then run setup again; see [docs/extension-ids.md](docs/extension-ids.md).
 
 Versions are bumped automatically. On every push to `main` (except Markdown-only changes), the **Version bump** GitHub Action runs the tests, then bumps `package.json` and `package-lock.json`, commits `chore(release): vX.Y.Z` and tags it. It bumps the extension (`extension/manifest.json`) on its own line only when files under `extension/` changed since its last `ext-vX.Y.Z` tag, by the same rules applied to the commits that changed it; the commit then says `chore(release): vX.Y.Z (extension A.B.C)` and both tags are pushed with it. While a version is below 1.0.0, a breaking change (`type!:` or a `BREAKING CHANGE:` footer) bumps the minor version and anything else, `feat:` included, the patch. From 1.0.0 on it's standard semver: breaking → major, `feat:` → minor, anything else → patch.
 

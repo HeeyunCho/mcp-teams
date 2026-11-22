@@ -4,9 +4,9 @@ import { createServer as createHttpServer, type IncomingMessage } from "node:htt
 import { connect } from "node:net";
 import { dirname } from "node:path";
 import { WebSocketServer, WebSocket } from "ws";
-import { EXTENSION_ORIGIN as TRUSTED_EXTENSION_ORIGIN } from "./extension.js";
+import { EXTENSION_IDS, EXTENSION_ORIGIN as UNPACKED_EXTENSION_ORIGIN, isTrustedOrigin, type ExtensionIds } from "./extension.js";
 import { FairQueue } from "./fairqueue.js";
-import { errorFields, logVersion } from "./hubLog.js";
+import { errorFields, escapeRegExp, logVersion } from "./hubLog.js";
 
 /**
  * Local WebSocket bridge between MCP server processes and the browser extension.
@@ -220,6 +220,11 @@ export interface BridgeOptions extends BridgeTimings, NativeHostOptions {
   diagnose?: DiagnoseEvent;
   /** The jitter source for the role=none retry, in [0, 1) (default Math.random; tests pin it). */
   random?: () => number;
+  /**
+   * The extension ids this hub treats as ours (#216): default EXTENSION_IDS (src/extension.ts).
+   * Tests pass a list with a second, fictional id; the server never sets it.
+   */
+  trustedExtensionIds?: ExtensionIds;
 }
 
 export const DEFAULT_BRIDGE_OPTIONS: Readonly<Timings> = Object.freeze({
@@ -427,7 +432,6 @@ const utf8Bytes = (text: string, max: number) => (text.length * 3 <= max ? text.
 
 // Each LOST_CALL message as a pattern: its text, with anything in the place of a value.
 const SLOT = "\u0000";
-const escapeRegExp = (t: string) => t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 const LOST_CALL_PATTERNS = Object.values(LOST_CALL).map((m) => {
   const text = typeof m === "string" ? m : (m as (value: string) => string)(SLOT);
   return new RegExp(`^${text.split(SLOT).map(escapeRegExp).join(".*")}`, "s");
@@ -717,6 +721,8 @@ export class ExtensionBridge {
   private readonly native: NativeHostOptions;
   private readonly diagnose?: DiagnoseEvent;
   private readonly random: () => number;
+  /** The extension ids treated as ours (#216). */
+  private readonly trustedIds: ExtensionIds;
   private boundPort?: number; // the port it got when it first listened (port 0 picks a free one); kept for later takeovers
 
   /** The 4th argument is the options, or (as before) just the largest message size. */
@@ -727,8 +733,9 @@ export class ExtensionBridge {
     options: BridgeOptions | number = {},
   ) {
     const given: BridgeOptions = typeof options === "number" ? { maxMessageBytes: options } : options;
-    const { hubSocket, hostSocket, socketNeedsProof, features, onExtensionsChange, onEvent, diagnose, random, ...timings } = given;
+    const { hubSocket, hostSocket, socketNeedsProof, features, onExtensionsChange, onEvent, diagnose, random, trustedExtensionIds, ...timings } = given;
     this.diagnose = diagnose;
+    this.trustedIds = trustedExtensionIds ?? EXTENSION_IDS;
     this.random = random ?? Math.random;
     // A key given as undefined keeps its default (spreading it would overwrite the default).
     const defined = Object.fromEntries(Object.entries(timings).filter(([, v]) => v !== undefined));
@@ -751,6 +758,11 @@ export class ExtensionBridge {
     this.report("extensions", { count: this.extensions.length, transport: transports || undefined });
   }
 
+  /** Whether `origin` is one of our extension's ids (#216): an exact match against the trusted list. */
+  private isOurs(origin: string | undefined): boolean {
+    return isTrustedOrigin(origin, this.trustedIds);
+  }
+
   /** The native host (#123): the hub on its hub socket, never a peer. */
   private get isHost(): boolean {
     return !!this.native.hostSocket;
@@ -764,10 +776,12 @@ export class ExtensionBridge {
   /**
    * The native host: takes the extension's native-messaging port as an extension connection.
    * Chrome only starts the host for the extension ids in its manifest's allowed_origins, and
-   * dist/hub.js checks the origin it was given, so it is trusted as our extension (no proof).
+   * dist/hub.js checks the origin it was given (`origin`, #216: any trusted id), so it is trusted
+   * as our extension (no proof). An origin that isn't trusted is refused here as well.
    */
-  attachExtension(conn: BridgeSocket) {
-    this.onConnection(conn, { via: "native", origin: TRUSTED_EXTENSION_ORIGIN });
+  attachExtension(conn: BridgeSocket, origin: string = UNPACKED_EXTENSION_ORIGIN) {
+    if (!this.isOurs(origin)) throw new Error("attachExtension: not a trusted extension origin");
+    this.onConnection(conn, { via: "native", origin: origin.replace(/\/+$/, "") });
   }
 
   /**
@@ -1026,7 +1040,7 @@ export class ExtensionBridge {
         const trusted = via === "native" || (via === "socket" && !this.socketNeedsProof);
         if (!proven && !trusted) {
           // Our extension up to 0.2.0 says hello with neither; it is only told to reload.
-          if (via === "tcp" && msg.type === "hello" && origin === TRUSTED_EXTENSION_ORIGIN && msg.token == null && msg.proof == null) return this.reloadLegacy(ws);
+          if (via === "tcp" && msg.type === "hello" && origin === UNPACKED_EXTENSION_ORIGIN && msg.token == null && msg.proof == null) return this.reloadLegacy(ws);
           return void this.refuse(ws, 4401, "bad token");
         }
         authed = true;
@@ -1081,17 +1095,23 @@ export class ExtensionBridge {
   /**
    * Several browsers (or profiles) can be connected at once, one connection each. A
    * reconnect from the same one (same instance, or for older extensions the same origin
-   * and browser) replaces its old connection. While our extension (fixed id) is
-   * connected, copies with another id (e.g. an older one loaded from another folder) are
-   * turned away, and connecting ours replaces them.
+   * and browser) replaces its old connection. While our extension (any id in the trusted list,
+   * #216) is connected, copies with another id (e.g. an older one loaded from another folder) are
+   * turned away, and connecting ours replaces them. Two trusted copies (a web store install and a
+   * sideloaded one) are both kept: they have different instances, so they are served as two
+   * browsers, and get_version and setup say two copies are installed.
    */
-  private acceptExtension(ws: BridgeSocket, msg: any, welcome: object, via: Via, tcpOrigin?: string) {
+  private acceptExtension(ws: BridgeSocket, msg: any, welcome: object, via: Via, connOrigin?: string) {
     // Only a hub takes extensions (onConnection already checks; #230).
     if (this.role !== "hub") return void this.refuse(ws, 1012, "restarting");
-    // Not on TCP: native messaging, where Chrome checked it is ours, or a hello on the hub socket,
-    // which is another browser's host relaying its extension (that host checked it).
+    // On TCP: the Origin header. Native messaging: the origin dist/hub.js checked, as Chrome gave
+    // it (attachExtension). A hello on the hub socket is another browser's host relaying its
+    // extension (that host checked it): since #216 it names the origin, which is recorded only when
+    // this hub trusts it too. A relaying host from before #216 names none, and an origin this hub
+    // doesn't trust isn't taken from it: both count as the sideloaded copy, as before.
     const onTcp = via === "tcp";
-    const origin = onTcp ? tcpOrigin : TRUSTED_EXTENSION_ORIGIN;
+    const relayed = isTrustedOrigin(msg.origin, this.trustedIds) ? msg.origin.replace(/\/+$/, "") : UNPACKED_EXTENSION_ORIGIN;
+    const origin = via === "socket" ? relayed : connOrigin;
     const transport = onTcp ? "websocket" : "native";
     const info: ExtensionInfo = {
       version: String(msg.version ?? "unknown"),
@@ -1101,15 +1121,15 @@ export class ExtensionBridge {
       capabilities: capabilitiesOf(msg),
       transport,
     };
-    const ours = origin === TRUSTED_EXTENSION_ORIGIN;
+    const ours = this.isOurs(origin);
     const others = [...this.sockets].filter(([s]) => s !== ws);
-    if (!ours && others.some(([, i]) => i.origin === TRUSTED_EXTENSION_ORIGIN)) {
+    if (!ours && others.some(([, i]) => this.isOurs(i.origin))) {
       this.refuse(ws, 4409, "another copy of the extension is connected");
       return;
     }
     const key = (i: ExtensionInfo) => i.instance ?? `${i.origin}|${i.browser}`;
     for (const [s, i] of others) {
-      if (key(i) === key(info) || (ours && i.origin !== TRUSTED_EXTENSION_ORIGIN) || (!ours && !i.instance)) {
+      if (key(i) === key(info) || (ours && !this.isOurs(i.origin)) || (!ours && !i.instance)) {
         // Its calls fail now (below), before it sees the close: have it drop them first, so an
         // open confirmation window closes instead of posting on a click in between.
         for (const [id, p] of this.pending) {
@@ -1858,7 +1878,7 @@ export class ExtensionBridge {
     // The extensions reload 250 ms after answering; wait for the old connections to go,
     // then for every browser to be back. Copies with another id are turned away (4409)
     // once ours is back, so only ours count when ours is connected.
-    const ours = this.extensions.filter((e) => e.origin === TRUSTED_EXTENSION_ORIGIN).length;
+    const ours = this.extensions.filter((e) => this.isOurs(e.origin)).length;
     const count = Math.max(1, ours || this.extensions.length);
     const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
     await sleep(1_000);
