@@ -7,7 +7,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { afterEach, describe, expect, it } from "vitest";
-import { DEFAULT_BRIDGE_OPTIONS, proof, socketTransport, type BridgeSocket, type ExtensionBridge } from "../../src/bridge.js";
+import { proof, socketTransport, type BridgeSocket, type ExtensionBridge } from "../../src/bridge.js";
 import { SERVER_VERSION } from "../../src/config.js";
 import { registerTools } from "../../src/tools.js";
 import { fakeExtension, TOKEN } from "../helpers/bridgeHarness.js";
@@ -62,7 +62,7 @@ describe("#123: the native host", { timeout: 30_000 }, () => {
 
   it("#123: a server joins it on the hub socket and its calls are answered; it also holds a TCP port, for peers only", async () => {
     h = await nativeHarness();
-    await h.host({ handle: (req) => ({ chats: [{ id: "19:alex-doe@contoso.example" }], method: req.method }) });
+    await h.host({ env: REAL_HEARTBEAT, handle: (req) => ({ chats: [{ id: "19:alex-doe@contoso.example" }], method: req.method }) });
     const server = await h.server();
     expect(server.role).toBe("peer");
     expect(server.hubIsHost).toBe(true);
@@ -79,7 +79,7 @@ describe("#123: the native host", { timeout: 30_000 }, () => {
 
   it("#123: a call the AI client cancels is cancelled at the extension", async () => {
     h = await nativeHarness();
-    const ext = await h.host({ silentFor: ["searchMessages"] });
+    const ext = await h.host({ env: REAL_HEARTBEAT, silentFor: ["searchMessages"] });
     const server = await h.server();
     await until(() => server.connected);
     const abort = new AbortController();
@@ -93,7 +93,7 @@ describe("#123: the native host", { timeout: 30_000 }, () => {
 
   it("#123: a request over 1 MB reaches the extension in chunks of at most 512 KB, every frame under 1 MB", async () => {
     h = await nativeHarness();
-    const ext = await h.host({ handle: (req) => ({ size: req.params.text.length }) });
+    const ext = await h.host({ env: REAL_HEARTBEAT, handle: (req) => ({ size: req.params.text.length }) });
     const server = await h.server();
     await until(() => server.connected);
     const text = "Hallo Sam, 안녕하세요! ".repeat(80_000); // about 2 MB of UTF-8
@@ -147,9 +147,10 @@ describe("#123: the native host", { timeout: 30_000 }, () => {
 
   it("#123: a second host (another browser) relays its extension to the first, which serves both", async () => {
     h = await nativeHarness();
-    await h.host({ browser: "Chrome", instance: "profile-1", handle: (r) => (r.method === "status" ? { teamsTabs: 0 } : { from: "chrome" }) });
+    await h.host({ browser: "Chrome", instance: "profile-1", env: REAL_HEARTBEAT, handle: (r) => (r.method === "status" ? { teamsTabs: 0 } : { from: "chrome" }) });
     const edge = await h.host({
       browser: "Edge",
+      env: REAL_HEARTBEAT,
       instance: "profile-2",
       handle: (r) => (r.method === "status" ? { teamsTabs: 1, sessions: [{ sessionCaptured: true }] } : { from: "edge" }),
     });
@@ -165,20 +166,20 @@ describe("#123: the native host", { timeout: 30_000 }, () => {
 
   it("#123: the welcome proves the extension's own nonce, served directly and relayed (the relay keeps the extension's nonce)", async () => {
     h = await nativeHarness();
-    const chrome = await h.host({ browser: "Chrome", instance: "profile-1", nonce: "chrome-nonce" });
+    const chrome = await h.host({ browser: "Chrome", instance: "profile-1", nonce: "chrome-nonce", env: REAL_HEARTBEAT });
     expect(chrome.welcome.proof).toBe(proof(TOKEN, "server", "chrome-nonce"));
-    const edge = await h.host({ browser: "Edge", instance: "profile-2", nonce: "edge-nonce" });
+    const edge = await h.host({ browser: "Edge", instance: "profile-2", nonce: "edge-nonce", env: REAL_HEARTBEAT });
     expect(h.logText()).toMatch(new RegExp(` pid=${edge.child.pid} relay version=`));
     expect(edge.welcome.proof).toBe(proof(TOKEN, "server", "edge-nonce"));
   });
 
   it("#123: get_version on a server of the host says the extension came by native messaging, served directly and relayed", async () => {
     h = await nativeHarness();
-    await h.host({ browser: "Chrome", instance: "profile-1" });
+    await h.host({ browser: "Chrome", instance: "profile-1", env: REAL_HEARTBEAT });
     const server = await h.server();
     await until(() => server.connected);
     expect((await getVersion(server)).transport).toBe("native");
-    await h.host({ browser: "Edge", instance: "profile-2" });
+    await h.host({ browser: "Edge", instance: "profile-2", env: REAL_HEARTBEAT });
     await until(() => server.extensions.length === 2, 3_000, "both browsers");
     expect(server.extensions.map((e) => e.transport)).toEqual(["native", "native"]);
   });
@@ -256,14 +257,15 @@ describe("#123: the native host", { timeout: 30_000 }, () => {
     });
     return { got, close: () => listener.close() };
   };
-  // Short for the test; the host uses the serving host's authTimeoutMs (5 s) otherwise.
+  // Short for the test; the host uses the serving host's authTimeoutMs (5 s) otherwise. The tests
+  // that shorten it run the real heartbeat (#210): only the deadline is short.
   const AUTH_MS = 600;
 
   it("#123: a relaying host whose hub socket holder never sends a challenge exits within the auth timeout", async () => {
     h = await nativeHarness();
     const squatter = await squatOn(h.socket, () => {});
     try {
-      const ext = await h.host({ env: { TEAMS_MCP_HUB_AUTH_TIMEOUT_MS: String(AUTH_MS) } }, false);
+      const ext = await h.host({ env: { ...REAL_HEARTBEAT, TEAMS_MCP_HUB_AUTH_TIMEOUT_MS: String(AUTH_MS) } }, false);
       const started = Date.now();
       expect(await ext.exited).toBe(1);
       expect(Date.now() - started).toBeLessThan(AUTH_MS + 4_000); // the deadline, plus a node start on a busy machine
@@ -279,7 +281,7 @@ describe("#123: the native host", { timeout: 30_000 }, () => {
     h = await nativeHarness();
     const squatter = await squatOn(h.socket, (conn) => conn.send(JSON.stringify({ type: "challenge", nonce: "squat" })));
     try {
-      const ext = await h.host({ env: { TEAMS_MCP_HUB_AUTH_TIMEOUT_MS: String(AUTH_MS) } }, false);
+      const ext = await h.host({ env: { ...REAL_HEARTBEAT, TEAMS_MCP_HUB_AUTH_TIMEOUT_MS: String(AUTH_MS) } }, false);
       // The hello reached the holder (with this host's nonce): the deadline runs from then.
       await until(() => squatter.got.some((m) => m.type === "hello"), 8_000, "the relayed hello");
       const helloAt = Date.now();
@@ -301,7 +303,7 @@ describe("#123: the native host", { timeout: 30_000 }, () => {
     });
     try {
       // The extension holds its hello back: the challenge comes first, and nothing follows.
-      const ext = await h.host({ noHello: true, env: { TEAMS_MCP_HUB_AUTH_TIMEOUT_MS: String(AUTH_MS) } }, false);
+      const ext = await h.host({ noHello: true, env: { ...REAL_HEARTBEAT, TEAMS_MCP_HUB_AUTH_TIMEOUT_MS: String(AUTH_MS) } }, false);
       expect(await ext.exited).toBe(1);
       expect(challengedAt).toBeGreaterThan(0);
       // From the challenge: not sooner (the deadline starts there), and not much later.
@@ -325,7 +327,7 @@ describe("#123: the native host", { timeout: 30_000 }, () => {
       challengedAt = Date.now();
     });
     try {
-      const ext = await h.host({ noHello: true, env: { TEAMS_MCP_HUB_AUTH_TIMEOUT_MS: String(AUTH) } }, false);
+      const ext = await h.host({ noHello: true, env: { ...REAL_HEARTBEAT, TEAMS_MCP_HUB_AUTH_TIMEOUT_MS: String(AUTH) } }, false);
       await until(() => challengedAt > 0, 8_000, "the holder's challenge");
       // A third of the deadline after the challenge, the extension's hello comes.
       await sleep(AUTH / 3 - (Date.now() - challengedAt));
@@ -354,7 +356,7 @@ describe("#123: the native host", { timeout: 30_000 }, () => {
     // deadline had ended the relay (a session cut the same way fails with "hub restarted", and its
     // own watchdog with "hub stopped responding"). hub.log shows no line for such a cut. h.server()
     // still runs at FAST, but as a peer its watchdog follows the hub's declared heartbeat (20 s).
-    const env = { TEAMS_MCP_HUB_AUTH_TIMEOUT_MS: String(AUTH_MS), TEAMS_MCP_HUB_KEEPALIVE_MS: String(DEFAULT_BRIDGE_OPTIONS.keepAliveMs) };
+    const env = { ...REAL_HEARTBEAT, TEAMS_MCP_HUB_AUTH_TIMEOUT_MS: String(AUTH_MS) };
     await h.host({ env, browser: "Chrome", instance: "profile-1", handle: (r) => (r.method === "status" ? { teamsTabs: 0 } : { from: "chrome" }) });
     const edge = await h.host({ env, browser: "Edge", instance: "profile-2", handle: (r) => (r.method === "status" ? { teamsTabs: 1, sessions: [{ sessionCaptured: true }] } : { from: "edge" }) });
     expect(edge.welcome?.capabilities.features).toContain("native");
@@ -448,7 +450,7 @@ describe("#123: the native host", { timeout: 30_000 }, () => {
 
   it("#123: a frame from the extension over the size limit is skipped unread, logged by its size, and the port stays open", async () => {
     h = await nativeHarness();
-    const ext = await h.host({ handle: () => ({ fine: true }) });
+    const ext = await h.host({ env: REAL_HEARTBEAT, handle: () => ({ fine: true }) });
     const server = await h.server();
     await until(() => server.connected);
     // A 300 MB frame's header and its first bytes: the host must not wait for (or keep) the rest.
@@ -478,6 +480,7 @@ describe("#123: the native host", { timeout: 30_000 }, () => {
   it("#123 decision 6: hub.log has message types, methods, ok, sizes and times, never message text or tokens", async () => {
     h = await nativeHarness();
     await h.host({
+      env: REAL_HEARTBEAT,
       handle: (r) => {
         if (r.method === "searchMessages") throw new Error("Chat with Sam Roe not found");
         return { messages: [{ text: "Contoso merger: confidential" }] };
