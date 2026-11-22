@@ -52,6 +52,14 @@ describe("#216: packaging the extension for the web stores", () => {
     expect(manifest).not.toHaveProperty("optional_host_permissions");
   });
 
+  it("#239: refuses a repo manifest that lacks one of the five hosts, naming it, rather than ship a web store copy without it", () => {
+    const m = repoManifest();
+    m.host_permissions = m.host_permissions.filter((h: string) => h !== "https://substrate.office.com/*");
+    writeFileSync(join(src, "manifest.json"), JSON.stringify(m, null, 2));
+    expect(() => packageExtension({ from: src, out: join(dir, "store.zip") })).toThrow(/host_permissions.*https:\/\/substrate\.office\.com\/\*/);
+    expect(readdirSync(dir)).not.toContain("store.zip");
+  });
+
   it("#216: holds every file the extension runs, byte for byte, and no pairing.json or icon source", () => {
     const { file } = packageExtension({ from: src, out: join(dir, "store.zip") });
     const zip = readZip(file);

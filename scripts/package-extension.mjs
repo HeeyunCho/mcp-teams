@@ -114,13 +114,19 @@ function zip(entries) {
 
 // ------------------------------------------------------------------ package
 
-/** The web store copy's manifest made from the repo's: no "key", and host_permissions only EXTENSION_HOSTS (#216, #239). */
+/**
+ * The web store copy's manifest made from the repo's: no "key", and host_permissions only EXTENSION_HOSTS (#216, #239).
+ * Throws if the repo's host_permissions lack one of EXTENSION_HOSTS, rather than ship a copy without it.
+ */
 export function webStoreManifest(repoManifest) {
   const { key: _key, ...manifest } = repoManifest;
-  return { ...manifest, host_permissions: (manifest.host_permissions ?? []).filter((h) => EXTENSION_HOSTS.includes(h)) };
+  const hosts = manifest.host_permissions ?? [];
+  const missing = EXTENSION_HOSTS.filter((h) => !hosts.includes(h));
+  if (missing.length) throw new Error(`Missing from manifest.json host_permissions: ${missing.join(", ")}`);
+  return { ...manifest, host_permissions: hosts.filter((h) => EXTENSION_HOSTS.includes(h)) };
 }
 
-/** Writes the web store zip of `from` to `out`; returns its path and the files in it. Throws, writing nothing, on pairing.json or a file not allowed. */
+/** Writes the web store zip of `from` to `out`; returns its path and the files in it. Throws, writing nothing, on pairing.json, a file not allowed or a manifest missing one of EXTENSION_HOSTS. */
 export function packageExtension({ from = join(ROOT, "extension"), out } = {}) {
   const src = resolve(from);
   const present = filesIn(src);
