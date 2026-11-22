@@ -406,7 +406,7 @@ export function registerTools(server: McpServer, bridge: ExtensionBridge, config
       inputSchema: {
         query: z.string().trim().min(1).describe("Words that must all appear in a line (case-insensitive)"),
         meeting: meeting.optional(),
-        meetings: z.number().int().min(1).max(50).default(10).describe("How many of the most recent meetings with a transcript to search"),
+        meetings: z.number().int().min(1).max(20).default(10).describe("How many of the most recent meetings with a transcript to search"),
         limit: z.number().int().min(1).max(200).default(30).describe("Most matching lines to return"),
       },
     },
