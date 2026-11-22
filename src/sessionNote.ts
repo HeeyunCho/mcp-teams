@@ -68,7 +68,8 @@ export function sessionNote(status: TeamsStatus | null | undefined, now: number,
     return (
       `The Teams tab made a signed-in call at ${signedIn.at} (${signedIn.host}), but no chat session was captured. ` +
       "Refresh the Teams tab or reload the extension; if that doesn't help, this looks like a capture problem: " +
-      "please report it with api_traffic output (call it with record: true, use Teams for a minute, then call it again)."
+      "please report it. In the sideloaded copy, add api_traffic output (call it with record: true, use Teams for a minute, then call it again); " +
+      "the web store copy doesn't record it."
     );
   }
   return null;

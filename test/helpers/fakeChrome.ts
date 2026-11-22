@@ -8,25 +8,23 @@ import { expect, vi } from "vitest";
 import WsWebSocket from "ws";
 // @ts-expect-error plain JS extension module without types
 import { NATIVE_MAX_MESSAGE_BYTES } from "../../extension/chunks.js";
-// @ts-expect-error plain JS extension module without types
-import { TRAFFIC_URLS, TRAFFIC_WS_URLS } from "../../extension/teams.js";
+// @ts-expect-error plain JS script without types
+import { webStoreManifest } from "../../scripts/package-extension.mjs";
 
 export type Service = "chatsvc" | "csa" | "mt" | "substrate" | "sharepoint";
 export const TEAMS_SERVICES = ["chatsvc", "csa", "mt", "substrate"] as const;
 
-/** The real extension/manifest.json: the fake grants what it requests, as Chrome does. */
-const MANIFEST: { version: string; permissions: string[]; host_permissions: string[] } = JSON.parse(
-  readFileSync(new URL("../../extension/manifest.json", import.meta.url), "utf8"),
-);
+type Manifest = { version: string; permissions: string[]; host_permissions: string[] };
+/**
+ * The real extension/manifest.json, the sideloaded copy's (with the api_traffic hosts, #239), and the web
+ * store copy's that scripts/package-extension.mjs makes from it (only the five hosts). The fake grants
+ * what the one it runs requests, as Chrome does.
+ */
+const MANIFEST: Manifest = JSON.parse(readFileSync(new URL("../../extension/manifest.json", import.meta.url), "utf8"));
+const WEB_STORE_MANIFEST: Manifest = webStoreManifest(MANIFEST);
 
 /** The worker reports its manifest's version, as in the browser (on its own line since #219; sends need the cancelSend it declares). */
 export const EXTENSION_VERSION: string = MANIFEST.version;
-
-/**
- * The patterns the api_traffic log listens on (#200), which the manifest doesn't request (#218): a
- * developer's copy adds them to host_permissions by hand (`trafficHosts: true`).
- */
-export const TRAFFIC_HOST_PERMISSIONS: string[] = [...TRAFFIC_URLS, ...TRAFFIC_WS_URLS];
 
 /** What a fake service answers: a JSON body (HTTP 200) or reply(status, ...), maybe later. */
 export interface Reply {
@@ -116,8 +114,8 @@ export interface FakeChromeOptions {
    */
   nativeRefusesOver?: number;
   /**
-   * The manifest also requests the api_traffic patterns (TRAFFIC_HOST_PERMISSIONS), as a developer's
-   * copy edited by hand does (#218). Default false: the real manifest's five hosts only.
+   * Run the sideloaded copy, whose manifest (the repo's) also requests the api_traffic patterns (#239).
+   * Default false: the web store copy's manifest, with the five hosts only (#218).
    */
   trafficHosts?: boolean;
   /**
@@ -234,8 +232,9 @@ export function createFakeChrome({
   trafficHosts = false,
   permissions = MANIFEST.permissions,
 }: FakeChromeOptions = {}) {
-  const hostPermissions = trafficHosts ? [...MANIFEST.host_permissions, ...TRAFFIC_HOST_PERMISSIONS] : [...MANIFEST.host_permissions];
-  const manifest = { ...MANIFEST, permissions: [...permissions], host_permissions: hostPermissions };
+  const base = trafficHosts ? MANIFEST : WEB_STORE_MANIFEST;
+  const hostPermissions = [...base.host_permissions];
+  const manifest = { ...base, permissions: [...permissions], host_permissions: hostPermissions };
   const heldHosts = hostPermissions.map(patternToRegExp);
   /** Whether the extension holds a host permission for `url` (Chrome's match patterns, as patternToRegExp reads them). */
   const holds = (url: string | undefined) => !!url && heldHosts.some((p) => p.test(url));

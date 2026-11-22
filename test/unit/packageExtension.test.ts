@@ -22,14 +22,42 @@ afterEach(() => rmSync(dir, { recursive: true, force: true }));
 const repoManifest = () => JSON.parse(readFileSync("extension/manifest.json", "utf8"));
 
 describe("#216: packaging the extension for the web stores", () => {
-  it("#216: zips a manifest.json without key, the rest of the manifest as it is", () => {
+  it("#216 #239: zips a manifest.json without key, the rest of the manifest as it is apart from its hosts", () => {
     const { file } = packageExtension({ from: src, out: join(dir, "store.zip") });
     const zip = readZip(file);
     const manifest = JSON.parse(zip.get("manifest.json")!.toString("utf8"));
     expect(manifest).not.toHaveProperty("key");
-    const { key, ...rest } = repoManifest();
+    const { key, host_permissions: _hosts, ...rest } = repoManifest();
     expect(typeof key).toBe("string"); // the repo keeps it: it fixes the sideload id
-    expect(manifest).toEqual(rest);
+    const { host_permissions: _storeHosts, ...storeRest } = manifest;
+    expect(storeRest).toEqual(rest);
+  });
+
+  // #239 (#218 option B): the sideloaded copy's manifest holds the api_traffic patterns; the web store
+  // copy's requests only the five Teams and SharePoint hosts the extension works with.
+  it("#239: the web store manifest requests exactly the five Teams and SharePoint hosts, no api_traffic pattern and no tabs", () => {
+    const { file } = packageExtension({ from: src, out: join(dir, "store.zip") });
+    const manifest = JSON.parse(readZip(file).get("manifest.json")!.toString("utf8"));
+    expect([...manifest.host_permissions].sort()).toEqual(
+      [
+        "https://teams.cloud.microsoft/*",
+        "https://teams.microsoft.com/*",
+        "https://*.ng.msg.teams.microsoft.com/*",
+        "https://substrate.office.com/*",
+        "https://*.sharepoint.com/*",
+      ].sort(),
+    );
+    for (const p of ["https://*.microsoft.com/*", "wss://*.microsoft.com/*", "https://*.office.com/*", "wss://*.skype.com/*"]) expect(manifest.host_permissions).not.toContain(p);
+    expect(manifest.permissions).not.toContain("tabs");
+    expect(manifest).not.toHaveProperty("optional_host_permissions");
+  });
+
+  it("#239: refuses a repo manifest that lacks one of the five hosts, naming it, rather than ship a web store copy without it", () => {
+    const m = repoManifest();
+    m.host_permissions = m.host_permissions.filter((h: string) => h !== "https://substrate.office.com/*");
+    writeFileSync(join(src, "manifest.json"), JSON.stringify(m, null, 2));
+    expect(() => packageExtension({ from: src, out: join(dir, "store.zip") })).toThrow(/host_permissions.*https:\/\/substrate\.office\.com\/\*/);
+    expect(readdirSync(dir)).not.toContain("store.zip");
   });
 
   it("#216: holds every file the extension runs, byte for byte, and no pairing.json or icon source", () => {
