@@ -1,4 +1,64 @@
-# Handoff: mcp-teams after 0.3.74–0.3.81 (#182, #170, #180, #149, #193, #172, #219 and #230), updated 2026-11-18 on the Windows PC
+# Handoff: mcp-teams after 0.3.82–0.3.84 (#215, #234, #236), updated 2026-11-22 on the Mac
+
+## Resume here (session of 2026-11-21/22, Mac)
+
+Resume notes for the next agent. Repo: `HeeyunCho/mcp-teams`, checkout `~/orca/mcp-teams` (git; scn is not used here). Local `main` = `origin/main` = `b5a9892` (v0.3.84).
+
+### What happened (2026-11-21)
+
+The user reported orphaned MCP server processes slowing the Mac when several Claude Code sessions are open. Findings and fixes, all on GitHub:
+
+- **Orphan exit fix:** issue #234 → PR #235 (merged, v0.3.83). New `src/lifecycle.ts`: a hard-exit timer on SIGINT/SIGTERM/SIGHUP, a parent-PID watchdog (it also watches `npm exec`'s parent, but only under npx: `npm_command=exec`), and stdout EPIPE ends the session once as `stdout-closed`. Mirrors HeeyunCho/mcp-newoutlook#288.
+- **EPIPE loop:** #215 → PR #222 (merged, v0.3.82).
+- **Signal reason during the drain with `TEAMS_MCP_DRAIN_MS=0`:** PR #236 (merged, v0.3.84).
+- **The short-lived 0.3.74 servers** came from Orca's Antigravity usage poll (`agy -p /usage`) loading `~/.gemini/config/mcp_config.json`, which pointed at the stale repo `dist/`. That config is now managed by the user and other sessions. The global CLAUDE.md "Orphans" section records its current state. **Don't re-add graft there** until trailhq/Trail-Code#894 is fixed.
+- `~/.claude/hooks/mcp-orphan-check.sh` now skips the codebase-memory-mcp daemon and graft/trail's `sync-run.js`/`stale-count-run.js`. Backup: `~/.claude/hooks/mcp-orphan-check.sh.bak-before-cbm-daemon-exclusion-20261121222913`.
+- **Flaky test diagnosis:** `nativeHost.test.ts` "#123 … 1 MB" fails under load with "The mcp-teams hub restarted". It's a test timing issue (200 ms test heartbeat → `no-pong` drop at `src/bridge.ts:1450` → `LOST_CALL.hubRestarted` at `:1601`), not a hub bug. PR #228 (#210) already moves it, and seven other nativeHost tests, to `REAL_HEARTBEAT`. Confirmed: with `stall(600)` in the handler the 200 ms ping fails 3/3, and `REAL_HEARTBEAT` passes 3/3.
+- **Known load flakes on `main`**, which pass when run alone: `byteCache.test.ts` 3.4 (shrunk by #178), `meetings.test.ts` 2.1, `diagnose.test.ts` 299 ms. Run full suites one at a time; other sessions also run vitest on this Mac.
+
+### Open work, in priority order
+
+1. **#178: PR #237 is open** (branch `fix/178-transcript-cache-bytes`, "Fixes #178"). CI passed on test, test-windows and gitleaks. Review and merge when the user asks (`--match-head-commit`). Full `npm test` passed on Node 24 and Node 20 (80 files, 1026 passed). Summary: a new `slimTranscript` in `extension/teams.js`; `transcriptOf` caches the slim form and counts its UTF-8 size; the over-the-cap test uses 10 MB. It overlaps #227 in `transcriptOf` but merges cleanly. Its worktree `.claude/worktrees/fix-178-cache-bytes` is removed (the branch is pushed).
+2. **#226 (#177):** `origin/main` merged and pushed (`a2a5071`). Full suites passed on Node 24 and Node 20 (1028 passed). MERGEABLE. Watch CI and merge when the user asks. Remove worktree `.claude/worktrees/pr226-rotating` (clean, pushed). Review nits from the two-axis review:
+   - the PowerShell test in `test/unit` breaks the unit-layer rule (add a clause to `docs/testing.md` or move it);
+   - `docs/HANDOFF.md` still lists "clean up old .rotating files";
+   - the regex escape is duplicated from `src/bridge.ts` `escapeRegExp`.
+3. **#228 (#210):** `origin/main` merged and pushed (`3ffd394`). CI passed on test, test-windows and gitleaks. MERGEABLE. Merge when the user asks (`--match-head-commit`).
+4. **#224 (#216): half done.** Worktree `.claude/worktrees/agent-a8002e5d1f0dfcde0`, branch `feat/216-trusted-extension-ids`. The `origin/main` merge is committed locally (`33a894b`, 29 ahead of the PR, not pushed), but it hasn't been built or tested. Still to do:
+   - check that `acceptExtension` in `src/bridge.ts` keeps #230's role check first, then #224's origin logic;
+   - rename every "store copy" / "store install" / "a store" (meaning the web stores) that #224 added to "web store copy" etc. per `GLOSSARY.md` line 71–73, in comments, `docs/extension-ids.md`, README, `.gitignore`, test names and `twoCopiesNote`; don't touch the launcher's **Store** (ADR 0002);
+   - run `npm test` and the Node 20 run, then push.
+
+   Other review findings:
+   - the trailing-slash cleanup is duplicated 4×;
+   - `EXTENSION_ORIGIN` naming;
+   - "two copies" groups by browser, not by profile;
+   - the hub system test never uses a second trusted ID.
+5. **#223 (#218):** CONFLICTING. The Standards review passed with nits:
+   - says "the store(s)" instead of "web store";
+   - the five hosts are duplicated in 4 places;
+   - `scripts/probe.mjs` matches on error text.
+
+   The Spec review was stopped by the usage limit, so rerun it. It needs a merge of `origin/main`, which likely conflicts in `extension/manifest.json` (ADR 0003 version line).
+6. **#227 (#179):** MERGEABLE (33 behind, no conflicts). Standards passed with nits. Spec meets spec, with gaps: an unrequested 100-request budget also caps a search of one named meeting (stops at 99 of 120 transcripts), and a cut-short note can say "5 pages" when 20 were read. Ask the user whether to drop or scope the budget.
+7. **Cleanup: done.** The Orca worktree `~/orca/workspaces/mcp-teams/fix-149-keepalive-drop-logs` was removed through Orca (`orca worktree rm --delete-branch`) at the user's request on 2026-11-22, and branch `HeeyunCho/fix-149-keepalive-drop-logs` was deleted locally and on origin. Its work was already in `main` through #209. Other Orca worktrees stay the user's: remove one only when asked.
+
+### Working rules the user set in this session
+
+- Never force-push; bring branches up to date by merging `origin/main` (no rebase). Merge PRs with `--match-head-commit <sha>`, then report the version the release bot (`version.yml`) cuts.
+- Before pushing, run `npm test` and the Node 20 run (`npx -y -p node@20 -c 'node --version && npm test'`), one at a time. Check for orphaned MCP processes first (the global CLAUDE.md command).
+- Reviews: `/code-review` as two fresh subagents (Standards and Spec), never by the author. File-changing work bigger than a small fix goes to a subagent with `isolation: "worktree"`. Remove a worktree only after its work is pushed or merged.
+- Ask before killing any process. Never kill one whose parent is alive.
+
+### Suggested skills
+
+- `code-review` for the remaining reviews (#223 Spec; re-reviews after fixes).
+- `tdd` for any code change (e.g. the #227 budget scope, the #224 follow-ups).
+- `diagnosing-bugs` if a flake shows up that isn't in the known list above.
+- `resolving-merge-conflicts` for the `origin/main` merges into #223 and #224.
+- `domain-modeling` if #224's "sideloaded copy" needs a glossary term (the review noted none exists).
+
+## Earlier handoff: mcp-teams after 0.3.74–0.3.81 (#182, #170, #180, #149, #193, #172, #219 and #230), updated 2026-11-18 on the Windows PC
 
 Repo: GitHub `HeeyunCho/mcp-teams`. PRs 1–4 of #123 (the native-messaging host) are on `main`, all **off by default** (`nativeHost` off). Next is PR 5, which turns it on. The last release is **0.3.81** (`6be1eb8`, #232 for #230; extension still **1.0.0**). 0.3.80 (`02cefeb`) started the extension's own version line at 1.0.0 (#219); 0.3.74 to 0.3.79 are listed in "Releases 0.3.74 to 0.3.80" under Now (2026-11-18). 0.3.73 (`5e5b9d9`) has #202 for #200; 0.3.72 (`71f49e2`) has #174 and #175; 0.3.71 (`9bf7434`) has #165 and #166 (dependency bumps only), 0.3.70 (`d5cacdd`) has #163, 0.3.69 (`d35759e`) has #159, 0.3.68 (`60f005f`) has #158, 0.3.67 (`aa90cf4`) has #157, 0.3.66 (`367f198`) has #154.
 

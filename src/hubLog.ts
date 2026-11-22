@@ -8,8 +8,8 @@
  * their own so the rotation and what a line holds can be tested without a host process.
  */
 import { randomBytes } from "node:crypto";
-import { appendFileSync, closeSync, mkdirSync, openSync, renameSync, statSync, unlinkSync } from "node:fs";
-import { dirname } from "node:path";
+import { appendFileSync, closeSync, mkdirSync, openSync, readdirSync, renameSync, statSync, unlinkSync, utimesSync } from "node:fs";
+import { basename, dirname, join } from "node:path";
 
 /** hub.log moves to hub.log.1 once it is larger than this. */
 export const HUB_LOG_MAX_BYTES = 1024 * 1024;
@@ -20,20 +20,56 @@ export type Log = (event: string, fields?: LogFields) => void;
 /** A rotation lock older than this was left by a process that died while rotating. */
 const STALE_LOCK_MS = 30_000;
 
+/** `t` with every regular-expression special character escaped, to match it literally. */
+export const escapeRegExp = (t: string) => t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+/** A `.rotating` file not written to for this long is removed at the next rotation (#177). */
+const ROTATING_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * #177: removes `file`'s `.rotating` files that nothing has written to for ROTATING_MAX_AGE_MS,
+ * except `keep` (the one this rotation just made). Called only under the rotation lock, after a
+ * real move; rotate() sets a new `.rotating` file's mtime to when it was set aside. Only names rotate() makes for this log
+ * match (`<file>.<pid>-<8 hex>.rotating`), so hub.log's cleanup never touches server.log's. A
+ * younger one stays: another process may have just made it, and a late line (#152) may still be
+ * landing in it, which also keeps its mtime fresh. One that can't be removed now (on Windows, held
+ * open by a viewer or virus scanner: EBUSY or EPERM) is skipped; a later rotation tries again.
+ */
+function removeOldRotating(file: string, keep?: string) {
+  const dir = dirname(file);
+  const name = new RegExp(`^${escapeRegExp(basename(file))}\\.\\d+-[0-9a-f]{8}\\.rotating$`);
+  let names: string[];
+  try {
+    names = readdirSync(dir).filter((n) => name.test(n) && join(dir, n) !== keep);
+  } catch {
+    return;
+  }
+  for (const n of names) {
+    try {
+      const path = join(dir, n);
+      if (Date.now() - statSync(path).mtimeMs > ROTATING_MAX_AGE_MS) unlinkSync(path);
+    } catch {
+      // gone already, or held: a later rotation tries again
+    }
+  }
+}
+
 /**
  * Moves `file` to `file`.1 once it is larger than maxBytes, safely while other processes append
  * and rotate too (#143: about ten servers share server.log). Renaming straight to .1 could, when
  * two processes saw the big file at once, move the other's fresh small file over the rotated one
  * and lose it. So only the process that created `<file>.lock` (exclusively) rotates, and only when
  * the file is still big under the lock; one that finds the lock taken skips rotating for this line
- * (a later line tries again). Nothing is copied back or deleted: a line another process writes
- * late, through the log it opened before the move, lands in the moved file and is kept (#152:
- * setting a small file aside, appending it back and deleting it lost such lines).
+ * (a later line tries again). Nothing is copied back: a line another process writes late,
+ * through the log it opened before the move, lands in the moved file and is kept (#152: setting a
+ * small file aside, appending it back and deleting it lost such lines).
  *
  * When .1 can't be replaced (on Windows, another program such as a virus scanner or a viewer holds
  * it open), the big log moves aside as `<file>.<pid>-<random>.rotating` instead, and the live log
- * starts afresh. Such a file is an older part of the log, safe to read or delete. A lock left by a
- * process that died while rotating is removed once it is STALE_LOCK_MS old.
+ * starts afresh. Such a file is an older part of the log, safe to read or delete. After a real move,
+ * still under the lock, this log's `.rotating` files older than ROTATING_MAX_AGE_MS (a day) are
+ * removed (#177; removeOldRotating). A lock left by a process that died while rotating is removed
+ * once it is STALE_LOCK_MS old.
  *
  * `seenSize`: the size this process saw (tests: one seen just before another process rotated).
  */
@@ -57,11 +93,21 @@ export function rotate(file: string, maxBytes: number, seenSize?: number) {
   }
   try {
     if (statSync(file).size <= maxBytes) return; // another process rotated first
+    let aside: string | undefined;
     try {
       renameSync(file, `${file}.1`);
     } catch {
-      renameSync(file, `${file}.${process.pid}-${randomBytes(4).toString("hex")}.rotating`); // .1 is held
+      aside = `${file}.${process.pid}-${randomBytes(4).toString("hex")}.rotating`;
+      renameSync(file, aside); // .1 is held
+      try {
+        // A rename keeps the mtime: a log idle for a day before this rotation would look a day old.
+        const now = new Date();
+        utimesSync(aside, now, now);
+      } catch {
+        // still skipped below; another process's cleanup may then take it a day early
+      }
     }
+    removeOldRotating(file, aside);
   } catch {
     // can't move it now: it keeps growing until a later line can
   } finally {

@@ -107,11 +107,11 @@ describe("meeting chat read once per call", () => {
     expect(meetingChatRequests(fake)).toHaveLength(3);
   });
 
-  it("1.3: search_transcripts(limit=5) over 50 meetings stops after the meeting that gives the 5th match", async () => {
+  it("1.3: search_transcripts(limit=5) over 20 meetings stops after the meeting that gives the 5th match", async () => {
     const fake = createFakeChrome({ services: { csa: csaWith(50), chatsvc: chatsvcWith(1), sharepoint } });
     const worker = await loadWorker(fake);
     // Each meeting's transcript has 2 matching lines: meetings 1 and 2 give 4, meeting 3 the 5th.
-    const r = await worker.handlers.searchTranscripts({ query: "budget", limit: 5, meetings: 50 });
+    const r = await worker.handlers.searchTranscripts({ query: "budget", limit: 5, meetings: 20 });
     expect(r.results.map((x: { id: string }) => x.id)).toEqual([meetingId(1), meetingId(2), meetingId(3)]);
     expect(r.results.flatMap((x: { matches: unknown[] }) => x.matches)).toHaveLength(5);
     expect(meetingChatRequests(fake).map((q) => decodeURIComponent(q.path).match(/meeting_contoso-\d+/)?.[0])).toEqual([
@@ -121,9 +121,10 @@ describe("meeting chat read once per call", () => {
     ]);
     expect(fake.count("sharepoint")).toBe(3);
     expect(r.meetingsSearched).toBe(3);
-    // Stopping early is said, not silent: the AI must not read `matches` as the total of all 50.
-    expect(r.notSearched).toBe(47);
-    expect(r.note).toMatch(/47 older meetings/);
+    // Stopping early is said, not silent: the AI must not read `matches` as the total of all 20.
+    expect(r.notSearched).toBe(17);
+    expect(r.stoppedBy).toBe("limit");
+    expect(r.note).toMatch(/17 older meetings/);
   });
 
   it("2.1: a cancelled search_transcripts makes no further requests", async () => {
@@ -272,5 +273,121 @@ describe("3.4: the transcript cache is bounded by bytes", () => {
     expect(transcriptReadsOf(fake, 1)).toBe(2);
     await worker.handlers.readTranscript({ meeting: meetingId(2), maxLength: 1000 });
     expect(transcriptReadsOf(fake, 2)).toBe(1);
+  });
+});
+
+describe("#179: one search_transcripts call makes a bounded number of Teams requests", () => {
+  /** Teams requests a search made: meeting chat pages and transcripts. */
+  const teamsRequests = (fake: { sent: SentRequest[] }) => meetingChatRequests(fake).length + fake.sent.filter((r) => r.service === "sharepoint").length;
+
+  it("#179: 50 meetings, each a long chat with a transcript, take at most 100 requests, and the result says the search stopped early", async () => {
+    // Each meeting chat is 20 short pages (as Teams may send them), the call on the newest.
+    const fake = createFakeChrome({ services: { csa: csaWith(50), chatsvc: chatsvcWith(20), sharepoint } });
+    const worker = await loadWorker(fake);
+    const r = await worker.handlers.searchTranscripts({ query: "budget", meetings: 50, limit: 200 });
+    // Before #179: 1,050 (50 chats × 20 pages, and 50 transcripts).
+    expect(teamsRequests(fake)).toBeLessThanOrEqual(100);
+    // Matches found before the stop are returned, and the stop is said, not silent.
+    expect(r.results.length).toBeGreaterThan(0);
+    expect(r.notSearched).toBeGreaterThan(0);
+    expect(r.meetingsSearched + r.notSearched).toBe(20); // at most 20 meetings, even when asked for 50
+    expect(r.stoppedBy).toBe("budget");
+    expect(r.note).toMatch(/100 Teams requests/);
+  });
+
+  it("#179: a meeting chat longer than 5 pages is read to 5 pages, and the result names it as cut", async () => {
+    const fake = createFakeChrome({ services: { csa: csaWith(2), chatsvc: chatsvcWith(8), sharepoint } });
+    const worker = await loadWorker(fake);
+    const r = await worker.handlers.searchTranscripts({ query: "budget", meetings: 2 });
+    expect(chatRequestsOf(fake, 1)).toHaveLength(5);
+    expect(chatRequestsOf(fake, 2)).toHaveLength(5);
+    expect(r.results).toHaveLength(2); // the calls are on the newest page
+    expect(r.chatsCut).toEqual(["Contoso review 1", "Contoso review 2"]);
+    expect(r.note).toMatch(/newest 5 pages/);
+    expect(r.stoppedBy).toBeUndefined();
+  });
+
+  it("#179: a chat that fits in 5 pages is not reported as cut", async () => {
+    const fake = createFakeChrome({ services: { csa: csaWith(1), chatsvc: chatsvcWith(5), sharepoint } });
+    const worker = await loadWorker(fake);
+    const r = await worker.handlers.searchTranscripts({ query: "budget", meetings: 1 });
+    expect(chatRequestsOf(fake, 1)).toHaveLength(5);
+    expect(r.chatsCut).toBeUndefined();
+    expect(r.note).toBeUndefined();
+  });
+
+  /** Meeting chats of 8 pages; meeting 1's 7th page holds an older call (callId 40) with a transcript. */
+  const withOlderCall = () => {
+    const chatsvc = chatsvcWith(8);
+    return (req: SentRequest) => {
+      const res = chatsvc(req) as { messages: unknown[] } | undefined;
+      const page = Number(/syncState=(\d+)/.exec(req.path)?.[1] ?? 0);
+      if (res && page === 6 && decodeURIComponent(req.path).includes(meetingId(1))) res.messages = callMessages(40);
+      return res;
+    };
+  };
+
+  it("#179: get_meeting after a search reads the whole chat again: a chat the search cut short isn't served from the cache", async () => {
+    const fake = createFakeChrome({ services: { csa: csaWith(1), chatsvc: withOlderCall(), sharepoint } });
+    const worker = await loadWorker(fake);
+    await worker.handlers.searchTranscripts({ query: "budget", meetings: 1 });
+    expect(chatRequestsOf(fake, 1)).toHaveLength(5);
+    const m = await worker.handlers.getMeeting({ meeting: meetingId(1) });
+    expect(m.sessions.map((s: { callId: string }) => s.callId)).toEqual([callId(1), callId(40)]);
+    expect(chatRequestsOf(fake, 1)).toHaveLength(5 + 8);
+    // The whole chat now cached also answers the next search.
+    await worker.handlers.searchTranscripts({ query: "budget", meetings: 1 });
+    expect(chatRequestsOf(fake, 1)).toHaveLength(5 + 8);
+  });
+
+  it("#179: a search of one named meeting reads its whole chat, and finds the older call's transcript", async () => {
+    const fake = createFakeChrome({ services: { csa: csaWith(1), chatsvc: withOlderCall(), sharepoint } });
+    const worker = await loadWorker(fake);
+    const r = await worker.handlers.searchTranscripts({ query: "budget", meeting: meetingId(1) });
+    expect(chatRequestsOf(fake, 1)).toHaveLength(8);
+    expect(r.results.map((x: { callId: string }) => x.callId)).toEqual([callId(1), callId(40)]);
+    expect(r.chatsCut).toBeUndefined();
+  });
+
+  it("#179: a second search within a minute reads only what the first didn't: cached chats and transcripts cost no requests", async () => {
+    const fake = createFakeChrome({ services: { csa: csaWith(20), chatsvc: chatsvcWith(20), sharepoint } });
+    const worker = await loadWorker(fake);
+    const first = await worker.handlers.searchTranscripts({ query: "budget", meetings: 20, limit: 200 });
+    expect(first.stoppedBy).toBe("budget");
+    const before = meetingChatRequests(fake).length + fake.count("sharepoint");
+    const second = await worker.handlers.searchTranscripts({ query: "budget", meetings: 20, limit: 200 });
+    expect(second.meetingsSearched).toBe(20);
+    expect(second.stoppedBy).toBeUndefined();
+    expect(meetingChatRequests(fake).length + fake.count("sharepoint") - before).toBe(first.notSearched * 6);
+  });
+
+  it("#179: a search of one named meeting reads all its transcripts, even more than the budget of 100 requests", async () => {
+    // One page holding 120 calls (callIds 101-220), each with its own transcript.
+    const calls = Array.from({ length: 120 }, (_, i) => 101 + i);
+    const chatsvc = (req: SentRequest) =>
+      /\/conversations\/[^/]*meeting_contoso-001[^/]*\/messages/.test(req.path) ? { messages: calls.flatMap((n) => callMessages(n)), _metadata: {} } : undefined;
+    const fake = createFakeChrome({ services: { csa: csaWith(1), chatsvc, sharepoint } });
+    const worker = await loadWorker(fake);
+    const r = await worker.handlers.searchTranscripts({ query: "budget", meeting: meetingId(1), limit: 200 });
+    expect(meetingChatRequests(fake)).toHaveLength(1);
+    // The budget limits only the search across meetings: one named meeting is searched whole.
+    expect(fake.count("sharepoint")).toBe(120);
+    expect(r.matches).toBe(240);
+    expect(r.stoppedBy).toBeUndefined();
+    expect(r.transcriptsNotSearched).toBeUndefined();
+    expect(r.notSearched).toBeUndefined();
+    expect(r.note).toBeUndefined();
+  });
+
+  it("#179: a chat cut short says how many pages were read: 20 when get_meeting read it before the search, not 5", async () => {
+    const fake = createFakeChrome({ services: { csa: csaWith(1), chatsvc: chatsvcWith(25), sharepoint } });
+    const worker = await loadWorker(fake);
+    await worker.handlers.getMeeting({ meeting: meetingId(1) });
+    expect(chatRequestsOf(fake, 1)).toHaveLength(20);
+    const r = await worker.handlers.searchTranscripts({ query: "budget", meetings: 1 });
+    expect(chatRequestsOf(fake, 1)).toHaveLength(20); // served from the cache
+    expect(r.chatsCut).toEqual(["Contoso review 1"]);
+    expect(r.note).toMatch(/newest 20 pages/);
+    expect(r.note).not.toMatch(/newest 5 pages/);
   });
 });
