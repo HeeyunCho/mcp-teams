@@ -1,8 +1,8 @@
-# Handoff: mcp-teams after 0.3.85–0.3.88 (#228, #227, #226, #224), updated 2026-11-22 on the Mac
+# Handoff: mcp-teams after 0.3.85–0.3.90 (#228, #227, #226, #224, #237, #243), updated 2026-11-22 on the Mac
 
 ## Resume here (session of 2026-11-22, Mac)
 
-Resume notes for the next agent. Repo: `HeeyunCho/mcp-teams`, checkout `~/orca/mcp-teams` (git; scn is not used here). Local `main` = `origin/main` = `44c63b9` (0.3.88).
+Resume notes for the next agent. Repo: `HeeyunCho/mcp-teams`, checkout `~/orca/mcp-teams` (git; scn is not used here). Local `main` = `origin/main` = `06e0f98` (0.3.90, extension 1.0.2). Only `main` is checked out; no other worktrees.
 
 ### What happened (2026-11-22)
 
@@ -12,47 +12,49 @@ Resume notes for the next agent. Repo: `HeeyunCho/mcp-teams`, checkout `~/orca/m
 |---|---|---|---|---|
 | 0.3.85 | `1ec9770` | #228 (`1618bf7`) | #210 | The nativeHost system tests that serve a session or a relaying host use `REAL_HEARTBEAT`, which ends the "#123 … 1 MB" load flake |
 | 0.3.86 (extension **1.0.1**) | `50f0d2c` | #227 (`b1e2383`) | #179 | `search_transcripts`: the 100-request budget limits only the search across meetings. A search of one named meeting reads all its transcripts, and a cut-short note gives the real page count (`readSessions` and the meeting-chat cache keep it). First bump of the extension's own line (ADR 0003) |
-| 0.3.87 | `2ff79ea` | #226 (`f84d7ff`) | #177 | Old `.rotating` files (a day untouched) are removed at the next rotation. Review nits fixed: `escapeRegExp` is exported once, by `src/hubLog.ts` (`bridge.ts` imports it; the other way round would be a cycle), and `docs/testing.md`'s unit row names its two Windows-only exceptions (the real registry in `readRegDefault`'s tests, PowerShell in the held `.rotating` test) |
-| 0.3.88 (extension stays 1.0.1) | `44c63b9` | #224 (`02f0388`) | #216 | Trusted extension ids: the sideloaded copy plus each web store's, `scripts/package-extension.mjs` writes the web store zip (manifest without `"key"`). Follow-ups done before merging: the #230 role check stays first in `acceptExtension` (`src/bridge.ts:1107`, and `onConnection` at `:1028`); "store copy/install" → "web store copy/install" in 18 files (`twoCopiesNote` is the one user-visible text), the launcher's Store untouched |
+| 0.3.87 | `2ff79ea` | #226 (`f84d7ff`) | #177 | Old `.rotating` files (a day untouched) are removed at the next rotation. `escapeRegExp` is exported once, by `src/hubLog.ts` (`bridge.ts` imports it; the other way round would be a cycle), and `docs/testing.md`'s unit row names its two Windows-only exceptions |
+| 0.3.88 (extension stays 1.0.1) | `44c63b9` | #224 (`02f0388`) | #216 | Trusted extension ids: the sideloaded copy plus each web store's; `scripts/package-extension.mjs` writes the web store zip (manifest without `"key"`). The #230 role check stays first in `acceptExtension` (`src/bridge.ts:1107`, and `onConnection` at `:1028`); "store copy/install" → "web store copy/install" |
+| 0.3.89 (extension **1.0.2**) | `0811113` | #237 (`6e74613`) | #178 | The worker's transcript cache keeps slim entries and counts their real bytes. 55% less heap held (10 × 600 entries: 3.78 → 1.72 MB; 20 × 600: 7.57 → 3.38 MB, median of 5, Node 24); the count tracks the heap within 2–4%. `scripts/measure-worker-cache.mjs` (#190's heap check) and its line in `docs/testing.md`'s Memory section came with it. `TRANSCRIPT_ENTRY_BYTES` stays 128 (measured 133–140 B) |
+| 0.3.90 (extension stays 1.0.2) | `06e0f98` | #243 (`9b609be`) | #230, #216 | Test only, in `test/integration/lateHelloAfterHandover.test.ts`: an ex-hub refuses with 1012 a late hello from a trusted web store id (fictional id `abcdefghijklmnopabcdefghijklmnop`), and a serving hub with the same trusted ids accepts it. The red check showed what it pins: a trusted id gets no exemption from the role check before it is accepted. Moving the check within the origin logic still passes, since that logic accepts nothing early; moving it after the accept fails |
 
-Docs only (no release): #238, the 2026-11-21/22 resume notes.
+Docs only (no release): #238 and #240, the earlier resume notes.
 
-**#237 (#178), the transcript cache:** `scripts/measure-worker-cache.mjs` (#190's heap check) is committed in the PR, with `test/system/measureWorkerCache.test.ts` and its line in `docs/testing.md`'s Memory section. Median of 5 runs, Node 24.14.0, real-shaped Stream transcripts of 600 entries:
+**Issues opened** (all `ready-for-agent`, each linked as a sub-issue with `gh api …/sub_issues`):
+- **#239** (sub-issue of #218): option B for `api_traffic`'s hosts. Keep them in the repo manifest, drop them only in the web store zip (`scripts/package-extension.mjs`), and fix the stale `api_traffic` wording at `src/sessionNote.ts:71` and `src/tools.ts:253`. **Starts only after #223 is merged.**
+- **#241** (sub-issue of #179, also `performance`): a search of one named meeting has no request budget, so many transcripts behind 429 waits can pass the tool's 300 s timeout (`src/tools.ts:413`) and lose every match. Brief: stop by the request's `deadline` and return partial matches with a note of how many transcripts weren't searched.
+- **#242** (sub-issue of #230): #232's leftovers. Back off repeated 1012 refusals (first retry stays quick, reuse #175's backoff); `close()` should close connections still at their challenge (`src/bridge.ts:1952` vs `stopServing` at `:1296`); decide on the optional peer-side check (drop a hub that welcomed with `extension: null` and turns out to be a peer), and record why if not.
 
-| transcripts | side | heap held | count | heap / count | heap per entry beyond its strings |
-|---|---|---:|---:|---:|---:|
-| 10 × 600 | before (`main`) | 3.78 MB | 3.15 MB | 1.20 | 306 B |
-| 10 × 600 | after | 1.72 MB | 1.66 MB | 1.04 | 140 B |
-| 20 × 600 | before (`main`) | 7.57 MB | 6.31 MB | 1.20 | 307 B |
-| 20 × 600 | after | 3.38 MB | 3.32 MB | 1.02 | 133 B |
+**#223 (#218):** `origin/main` merged twice this session (no rebase); the second merge resolved #224's and #226's conflicts (README: #223's "Two development aids are off…" paragraph, then #224's trusted-ids paragraph). Head `4c7de2f`, MERGEABLE/CLEAN, all three checks green. The Spec rerun says it meets #218.
 
-55% less heap; the count tracks the heap within 2–4%. `TRANSCRIPT_ENTRY_BYTES` stays 128 (measured 133–140 B on 64-bit Node; Chrome's compressed pointers should need less, not measured). The code comment's old "110-120" is corrected. The PR description has the full table.
+**Worktrees removed** (all with their merged branches): the Orca worktree `fix-149-keepalive-drop-logs` (at the user's request, through Orca), `.claude/worktrees/fix-178-cache-bytes`, `pr226-rotating`, `agent-a8002e5d1f0dfcde0`, and #243's subagent worktree. `fix/178-transcript-cache-bytes` and `test/230-late-trusted-hello` are deleted on origin.
 
-**#223 (#218):** `origin/main` merged (`da2b54d`, no conflict in `extension/manifest.json`: `version` stays on the extension's line, the five hosts stay). The Spec rerun says it meets #218, no blocker. Its partial item is now **#239** (`ready-for-agent`, sub-issue of #218): keep `api_traffic`'s hosts in the sideloaded copy and drop them only in the web store zip (option B, via `scripts/package-extension.mjs`), plus the stale `api_traffic` wording at `src/sessionNote.ts:71` and `src/tools.ts:253`.
-
-**Worktrees:** the Orca worktree `fix-149-keepalive-drop-logs` (removed through Orca at the user's request, branch deleted locally and on origin), `.claude/worktrees/fix-178-cache-bytes`, `.claude/worktrees/pr226-rotating` and `.claude/worktrees/agent-a8002e5d1f0dfcde0` are all removed, with their merged branches. Only `main` is checked out.
-
-**Flakes seen** (none in the code under change):
+**Flakes seen** (none in the code under change; all passed alone):
 - CI on #238: `diagnose.test.ts` "expected 299 to be ≥ 300". `gh run rerun <id> --failed` passed.
-- Node 20 locally: `readMessagesCut.test.ts` 1.4, a snapshot mismatch whose "Received" is empty. It passed 3/3 alone (`npx -y -p node@20 -c 'node node_modules/vitest/vitest.mjs run <file>'`; a nested `npx vitest` fails). This is #185's Node 20 flake.
+- Node 20 locally: `readMessagesCut.test.ts` 1.4 (#185) and `byteCache.test.ts` 3.4. Unlocked solo reruns were flaky too; under the test lock both passed 3/3.
+- Node 24 locally, during #243: `setup.test.ts` "#24" (5 s timeout) and `heartbeat.test.ts` 2.3, at a load average around 300. New to the list.
 
 ### Open work, in priority order
 
-1. **#237 (#178):** MERGEABLE, CI green, heap numbers in. Ready to merge when the user asks. Standards judgement calls, none blocking: fixture GUIDs not in the `00000000-` form; the Stream fixture duplicated in the unit and integration tests; the "first `spokenLanguageTag`" rule and the kept-field list in two places (`slimTranscript` and `background.js`); `let language = false` would read better as `languageKept`.
-2. **#223 (#218):** CI was green at `da2b54d`, but it is **CONFLICTING** again since #224 landed. Merge `origin/main` into it (no rebase), resolve, run both test runs, push. The manual sign-in checks for Chrome and Edge (a–e in the PR) are the user's. Merge when the user asks.
-3. **#239:** `ready-for-agent`, after #223 (#224 is merged).
-4. **#224 leftovers** (no issue yet): the trailing-slash cleanup duplicated 4×; `EXTENSION_ORIGIN` naming; "two copies" grouped by browser, not by profile; no test of a late hello from a trusted, non-sideloaded id; identifiers `STORE_ID`/`STORE_ORIGIN` and the `store` parameter in `browsersWithTwoCopies` still say "store".
-5. **#227 leftovers** (no issue yet): with no budget, a search of one named meeting with many transcripts behind 429 waits can reach the tool's 300 s timeout (`src/tools.ts:413`); a chat cut at 2,000 messages reports its page count untested.
-6. **Older work:** the 2026-11-18 and 2026-11-17 sections below (#173 readings, #230's leftovers, the `ready-for-agent` lanes, items waiting on the user).
+1. **#223 (#218):** ready to merge once the user has done the manual Chrome and Edge sign-in checks (a–e in the PR). The merge is the user's call. If another PR lands first, recheck it for CONFLICTING.
+2. **#239:** `/tdd` in a worktree subagent, after #223 is merged. Open its PR with "Fixes #239".
+3. **#241, #242:** `ready-for-agent`, independent of #223.
+4. **#221** (outside contributor, `fix/epipe-client-gone`, last updated 2026-11-17): still open and unreviewed. #222 already fixed #215's EPIPE loop, so check whether anything in it is still needed before reviewing.
+5. **#224 leftovers** (no issue yet): the trailing-slash cleanup duplicated 4×; `EXTENSION_ORIGIN` naming; "two copies" grouped by browser, not by profile; identifiers `STORE_ID`/`STORE_ORIGIN` and the `store` parameter in `browsersWithTwoCopies` still say "store". (The late-hello test is done: #243.)
+6. **#227 leftover** (no issue yet): a chat cut at 2,000 messages reports its page count untested. (#241 leaves it out of scope on purpose.)
+7. **#237 judgement calls** (none filed): fixture GUIDs not in the `00000000-` form; the Stream fixture duplicated in the unit and integration tests; the "first `spokenLanguageTag`" rule and the kept-field list in two places (`slimTranscript` and `background.js`); `let language = false` would read better as `languageKept`.
+8. **Older work:** the 2026-11-18 and 2026-11-17 sections below (#173 readings, the `ready-for-agent` lanes, items waiting on the user).
 
 ### Rules learned in this session
 
 - `gh pr merge --match-head-commit` needs the full 40-character SHA.
 - Merge one PR at a time and wait for its `version.yml` run before the next. Two bumps at once make one fail (#174/#175).
-- After a merge, recheck the other open PRs: #226 and #224 both went CONFLICTING in `docs/testing.md` after neighbours merged. Bring them up to date by merging `origin/main`, testing both Node versions, and pushing.
-- Subagents running test suites at the same time take a shared lock: `lockf -t 7200 <scratchpad>/npm-test.lock npm test`.
+- After a merge, recheck the other open PRs: #226, #224 and #223 each went CONFLICTING after neighbours merged. Bring them up to date by merging `origin/main`, check no text was lost in the resolution, test both Node versions, and push. Right after `main` moves, `mergeable` reads `UNKNOWN` for a few seconds; recheck before acting.
+- Subagents running test suites at the same time take a shared lock: `lockf -t 7200 <scratchpad>/npm-test.lock npm test`. Run solo reruns under the lock too; unlocked ones flake under load.
+- One test file on Node 20: `npx -y -p node@20 -c 'node node_modules/vitest/vitest.mjs run <file>'` (a nested `npx vitest` fails).
 - The harness locks a subagent's worktree (`git worktree list` shows `locked`). After the subagent has finished and its work is pushed, check the lock's pid is this session, then `git worktree unlock` and `git worktree remove`.
 - An Orca worktree is removed with `orca worktree rm --worktree path:<path> --delete-branch`, so Orca's list stays right, and only when the user asks.
+- Sub-issues: gh 2.89 has no `--parent`. Use `gh api --method POST repos/HeeyunCho/mcp-teams/issues/<parent>/sub_issues -F sub_issue_id=<database id>` and start the body with "Part of #N". In zsh, `set -- $pair` doesn't word-split; pass the two numbers as separate arguments.
+- A red check in `/tdd` can show a test pins less than intended (#243). Say what it really guarantees in the PR rather than the brief's wording.
 
 ### What happened (2026-11-21), earlier in this session
 
@@ -75,10 +77,10 @@ The user reported orphaned MCP server processes slowing the Mac when several Cla
 
 ### Suggested skills
 
-- `code-review` for the remaining reviews (#223 Spec; re-reviews after fixes).
-- `tdd` for any code change (e.g. the #227 budget scope, the #224 follow-ups).
+- `code-review` for the PRs from #239, #241 and #242, and for #221.
+- `tdd` for #239, #241, #242 and the #224 follow-ups.
 - `diagnosing-bugs` if a flake shows up that isn't in the known list above.
-- `resolving-merge-conflicts` for the `origin/main` merges into #223 and #224.
+- `resolving-merge-conflicts` if #223 goes CONFLICTING again.
 - `domain-modeling` if #224's "sideloaded copy" needs a glossary term (the review noted none exists).
 
 ## Earlier handoff: mcp-teams after 0.3.74–0.3.81 (#182, #170, #180, #149, #193, #172, #219 and #230), updated 2026-11-18 on the Windows PC
