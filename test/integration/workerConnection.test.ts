@@ -1,9 +1,10 @@
 // The worker's own connection to the hub (extension/background.js connect()), against a
 // scripted hub, so the test decides exactly when each message arrives.
+import { createHmac } from "node:crypto";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { WebSocketServer, type WebSocket } from "ws";
 import { proof } from "../../src/bridge.js";
-import { connectWorker, createFakeChrome, loadWorker, NativeWebSocket, openedSockets, stopWorkers } from "../helpers/fakeChrome.js";
+import { connectWorker, createFakeChrome, loadWorker, ME_OID, NativeWebSocket, openedSockets, stopWorkers } from "../helpers/fakeChrome.js";
 
 const TOKEN = "worker-connection-token";
 
@@ -213,6 +214,29 @@ describe("worker connection", () => {
     link = await connectWorker(fake, hub.welcomed);
     const hello = hub.received.find((m) => m.type === "hello");
     expect(hello.capabilities).toEqual({ features: ["cancelSend", "sizeCheck"], maxMessageBytes: 256 * 1024 * 1024 });
+  });
+
+  it("#253: the worker's hello names its profile by the Teams account it has seen, keyed with the pairing token, never in clear", async () => {
+    const hub = await scriptedHub([]);
+    const fake = createFakeChrome({ local: { token: TOKEN, port: hub.port } });
+    const worker = await loadWorker(fake);
+    worker.registerListeners();
+    link = await connectWorker(fake, hub.welcomed);
+    const hello = hub.received.find((m) => m.type === "hello");
+    // HMAC-SHA-256 of "profile:<oid>" with the pairing token: the same for both copies in one profile.
+    expect(hello.profile).toBe(createHmac("sha256", TOKEN).update(`profile:${ME_OID}`).digest("base64url"));
+    expect(JSON.stringify(hello)).not.toContain(ME_OID);
+  });
+
+  it("#253: a worker that hasn't seen the Teams account yet sends no profile", async () => {
+    const hub = await scriptedHub([]);
+    const fake = createFakeChrome({ local: { token: TOKEN, port: hub.port }, captured: [] });
+    fake.session.delete("oid");
+    const worker = await loadWorker(fake);
+    worker.registerListeners();
+    link = await connectWorker(fake, hub.welcomed);
+    const hello = hub.received.find((m) => m.type === "hello");
+    expect(hello).not.toHaveProperty("profile");
   });
 
   it("2.1b: after a welcome without the right proof, a request that came with it is never run", async () => {

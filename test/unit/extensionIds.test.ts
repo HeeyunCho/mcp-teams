@@ -65,6 +65,23 @@ describe("#216: the trusted extension ids", () => {
     expect(browsersWithTwoCopies([sideloaded, webStore])).toEqual([]);
   });
 
+  it("#253: groups the two copies by profile when both name one, and by browser when one doesn't", () => {
+    const sideloaded = { origin: `chrome-extension://${EXTENSION_ID}`, browser: "Chrome" };
+    const webStore = { origin: `chrome-extension://${WEB_STORE_ID}`, browser: "Chrome" };
+    // Both copies in one profile: the note.
+    expect(browsersWithTwoCopies([{ ...sideloaded, profile: "p1" }, { ...webStore, profile: "p1" }], IDS)).toEqual(["Chrome"]);
+    // One copy in each of two profiles of Chrome: both are wanted, nothing to say.
+    expect(browsersWithTwoCopies([{ ...sideloaded, profile: "p1" }, { ...webStore, profile: "p2" }], IDS)).toEqual([]);
+    // One or both from an extension that doesn't send it: per browser, as before.
+    expect(browsersWithTwoCopies([{ ...sideloaded, profile: "p1" }, webStore], IDS)).toEqual(["Chrome"]);
+    expect(browsersWithTwoCopies([sideloaded, { ...webStore, profile: "p2" }], IDS)).toEqual(["Chrome"]);
+    expect(browsersWithTwoCopies([sideloaded, webStore], IDS)).toEqual(["Chrome"]);
+    // A profile value is no reason to pair copies across browsers.
+    expect(browsersWithTwoCopies([{ ...sideloaded, profile: "p1" }, { ...webStore, browser: "Edge", profile: "p1" }], IDS)).toEqual([]);
+    // Three copies: the web store copy in the sideloaded one's profile counts, another profile's doesn't hide it.
+    expect(browsersWithTwoCopies([{ ...sideloaded, profile: "p1" }, { ...webStore, profile: "p2" }, { ...webStore, profile: "p1" }], IDS)).toEqual(["Chrome"]);
+  });
+
   it("#245: drops trailing slashes from an origin, as Chrome passes it to a native host", () => {
     expect(normalizeOrigin("chrome-extension://abcdefghijklmnopabcdefghijklmnop/")).toBe("chrome-extension://abcdefghijklmnopabcdefghijklmnop");
     expect(normalizeOrigin("chrome-extension://abcdefghijklmnopabcdefghijklmnop//")).toBe("chrome-extension://abcdefghijklmnopabcdefghijklmnop");

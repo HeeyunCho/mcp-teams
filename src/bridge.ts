@@ -61,8 +61,14 @@ export interface ExtensionInfo {
   browser?: string;
   /** chrome-extension://<id> it connected from (unset for connections without an Origin). */
   origin?: string;
-  /** Stays the same for one browser profile across reconnects. */
+  /** Stays the same for one copy of the extension across reconnects (each copy keeps its own, #253). */
   instance?: string;
+  /**
+   * The same for every copy of the extension in one browser profile (#253): a keyed hash of the Teams
+   * account it has seen there, never the account itself. Only a short token (word characters and
+   * `-`) is kept. Extensions from before #253, and a copy that hasn't seen Teams yet, send none.
+   */
+  profile?: string;
   /** What it declared in hello (#115); no features for an extension from before #115. Hubs before #115 send none to peers. */
   capabilities?: Capabilities;
   /**
@@ -1119,6 +1125,7 @@ export class ExtensionBridge {
       browser: msg.browser,
       ...(origin ? { origin } : {}),
       ...(typeof msg.instance === "string" ? { instance: msg.instance } : {}),
+      ...(typeof msg.profile === "string" && /^[\w-]{1,64}$/.test(msg.profile) ? { profile: msg.profile } : {}),
       capabilities: capabilitiesOf(msg),
       transport,
     };

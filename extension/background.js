@@ -2323,6 +2323,22 @@ function nativeFirst(pairing, canNative) {
 }
 
 /**
+ * What hello names this browser profile by (#253), so the server can tell two copies of the
+ * extension in one profile (one is enough) from one copy in each of two profiles (both wanted).
+ * `instance` can't: each copy keeps its own in its own storage. Both copies in a profile see the same
+ * Teams requests, so they hold the same signed-in user: this is HMAC-SHA-256 of "profile:<oid>" with
+ * the pairing token (which both share, being paired with the same server), so the user's id never
+ * leaves in clear and can't be checked against a guess without the token. null until Teams has sent
+ * a request in this browser session (chrome.storage.session), or without a token: the server then
+ * groups by browser, as for an extension from before #253. A hello sent before an account switch
+ * keeps the old value until the next connect.
+ */
+async function profileOf(secret) {
+  const oid = await signedInOid();
+  return secret && oid ? teams.pairingProof(secret, "profile", oid) : null;
+}
+
+/**
  * Connects to the local MCP server. Both sides prove they know the pairing token without
  * sending it (see src/bridge.ts): the extension answers the server's challenge, and acts
  * on requests only after the server answered its own nonce. Any other program that holds
@@ -2338,16 +2354,17 @@ async function connect() {
   clearTimeout(retryTimer);
   retryTimer = null;
   starting = true;
-  let token, port, instance, pairing;
+  let token, port, instance, pairing, profile;
   try {
     ({ token, port, instance } = await chrome.storage.local.get(["token", "port", "instance"]));
     pairing = await pairingFile();
-    // Identifies this browser profile to the server across reconnects (Chrome and Edge,
+    // Identifies this copy of the extension to the server across reconnects (Chrome and Edge,
     // or two profiles, can be connected at the same time).
     if (!instance) {
       instance = crypto.randomUUID();
       await chrome.storage.local.set({ instance });
     }
+    profile = await profileOf(token || pairing?.token || null);
   } finally {
     starting = false;
   }
@@ -2408,7 +2425,7 @@ async function connect() {
         if (!secret) return refuse(noPairing);
         const proof = await teams.pairingProof(secret, "client", msg.nonce);
         if (ws !== socket || socket.readyState !== WebSocket.OPEN) return; // closed or replaced meanwhile: nobody to say hello to
-        socket.send(JSON.stringify({ type: "hello", proof, nonce, version: VERSION, browser: browserName(), instance, capabilities: CAPABILITIES }));
+        socket.send(JSON.stringify({ type: "hello", proof, nonce, version: VERSION, browser: browserName(), instance, ...(profile ? { profile } : {}), capabilities: CAPABILITIES }));
       } else if (msg.type === "welcome" && !checking) {
         const who = native ? "The native host" : `The program on port ${port || DEFAULT_PORT}`;
         const notProven = () => refuse(`${who} could not prove it is your mcp-teams server, so the extension doesn't answer it.`);
@@ -2489,7 +2506,7 @@ async function connect() {
     // without waiting for (or answering) a challenge. A relaying host adds its own proof.
     challenged = true;
     if (!secret) refuse(noPairing);
-    else socket.send(JSON.stringify({ type: "hello", nonce, version: VERSION, browser: browserName(), instance, capabilities: CAPABILITIES }));
+    else socket.send(JSON.stringify({ type: "hello", nonce, version: VERSION, browser: browserName(), instance, ...(profile ? { profile } : {}), capabilities: CAPABILITIES }));
   }
 }
 
