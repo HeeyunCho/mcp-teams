@@ -56,7 +56,7 @@ The PC's live install is `C:\Orca_Project\mcp-teams` (see "This Windows PC" belo
 
 Mac-only notes in this section that don't carry over:
 - `lockf` (the shared test lock) is macOS-only. On Windows, run full suites one at a time instead.
-- The Node 20 run: `npx -y -p node@20 -c 'node --version && npm test'` should work in Git Bash. If it doesn't, use an unpacked Node 20 zip checked against `SHASUMS256.txt` (see "This Windows PC").
+- The Node 20 run: `npx -y -p node@20 -c 'node --version && npm test'` does **not** work on the Windows PC. On 2026-11-23 it printed `v26.3.0` and silently ran the suite on Node 26. Use an unpacked Node 20 binary first on `PATH`, checked against `SHASUMS256.txt` and verified with `node --version` (steps under "Node versions" in "This Windows PC").
 - jq on Git Bash rejects `\[` inside `test()`; pipe to `grep`.
 
 ### What happened (2026-11-22)
@@ -118,7 +118,7 @@ Docs only (no release): #238, #240, #244, #247, #254 and #255, the earlier resum
 - Merge one PR at a time and wait for its `version.yml` run before the next. Two bumps at once make one fail (#174/#175).
 - After a merge, recheck the other open PRs: #226, #224 and #223 each went CONFLICTING after neighbours merged. Bring them up to date by merging `origin/main`, check no text was lost in the resolution, test both Node versions, and push. Right after `main` moves, `mergeable` reads `UNKNOWN` for a few seconds; recheck before acting.
 - Subagents running test suites at the same time take a shared lock: `lockf -t 7200 <scratchpad>/npm-test.lock npm test`. Run solo reruns under the lock too; unlocked ones flake under load.
-- One test file on Node 20: `npx -y -p node@20 -c 'node node_modules/vitest/vitest.mjs run <file>'` (a nested `npx vitest` fails).
+- One test file on Node 20 (Mac): `npx -y -p node@20 -c 'node node_modules/vitest/vitest.mjs run <file>'` (a nested `npx vitest` fails). On the Windows PC this silently runs Node 26; use the unpacked binary ("Node versions" in "This Windows PC").
 - The harness locks a subagent's worktree (`git worktree list` shows `locked`). After the subagent has finished and its work is pushed, check the lock's pid is this session, then `git worktree unlock` and `git worktree remove`.
 - An Orca worktree is removed with `orca worktree rm --worktree path:<path> --delete-branch`, so Orca's list stays right, and only when the user asks.
 - Sub-issues: gh 2.89 has no `--parent`. Use `gh api --method POST repos/HeeyunCho/mcp-teams/issues/<parent>/sub_issues -F sub_issue_id=<database id>` and start the body with "Part of #N". In zsh, `set -- $pair` doesn't word-split; pass the two numbers as separate arguments.
@@ -141,7 +141,7 @@ The user reported orphaned MCP server processes slowing the Mac when several Cla
 ### Working rules the user set in this session
 
 - Never force-push; bring branches up to date by merging `origin/main` (no rebase). Merge PRs with `--match-head-commit <sha>`, then report the version the release bot (`version.yml`) cuts.
-- Before pushing, run `npm test` and the Node 20 run (`npx -y -p node@20 -c 'node --version && npm test'`), one at a time. Check for orphaned MCP processes first (the global CLAUDE.md command).
+- Before pushing, run `npm test` and the Node 20 run, one at a time. On the Mac the Node 20 run is `npx -y -p node@20 -c 'node --version && npm test'`. On the Windows PC that silently runs Node 26, so use the unpacked binary instead ("Node versions" in "This Windows PC"). Check for orphaned MCP processes first (the global CLAUDE.md command).
 - Reviews: `/code-review` as two fresh subagents (Standards and Spec), never by the author. File-changing work bigger than a small fix goes to a subagent with `isolation: "worktree"`. Remove a worktree only after its work is pushed or merged.
 - Ask before killing any process. Never kill one whose parent is alive.
 
@@ -666,9 +666,14 @@ Run `gh issue list` for the full backlog. #21 and #96 are the umbrella issues th
 - **`npx tsc` can return exit code 0 on type errors here** (a wrapper prints `npm notice run … npx`). Gate on `node node_modules/typescript/bin/tsc --noEmit` and `node node_modules/typescript/bin/tsc -p tsconfig.test.json --noEmit` instead.
 - **Stray branches:** none since 2026-11-17. The five merged `worktree-agent-*` branches and the `wt-diag` scratchpad worktree were removed, and the main checkout is the only worktree.
 - **Worktrees:** an Agent-tool worktree starts with an empty `node_modules`. Run `npm ci` in it before testing; otherwise vitest resolves from the main checkout.
-- **Node versions:** default `node` is v26. `npx -y node@20` doesn't give Node 20 here (`npx -y node@20 -v` prints `v26.3.0`).
-  - **For a real Node 20 run:** an unpacked v20.20.2 is at `C:\Users\조희연\AppData\Local\Temp\claude\4b73b95594a054db\17972b37-7e83-4ce8-8b9d-3b36d890ee62\scratchpad\node20\node-v20.20.2-win-x64\node.exe`. It's in a session scratchpad and may disappear; if so, get the official zip from nodejs.org, check it against `SHASUMS256.txt` and unpack it outside the repo.
-  - Run `<node.exe> node_modules/vitest/vitest.mjs run --fileParallelism=false`, after checking that `node.exe -v` prints v20.
+- **Node versions:** default `node` is v26. **No `npx` form gives Node 20 here, and it fails silently.** `npx -y node@20 -v` prints `v26.3.0`. On 2026-11-23 (#256), `npx -y -p node@20 -c 'node --version && npm test'` also printed `v26.3.0` and ran the whole suite on Node 26, with no error. npm 12.0.2's cached `node@20` package has only its installer script and no binary, so npx falls back to the system Node. Don't count an `npx` run as the Node 20 run.
+  - **The Node 20 run on this PC:** an unpacked Node 20 binary first on `PATH`. In Git Bash:
+    1. In a new empty folder outside the repo (e.g. the scratchpad), download `node-v20.20.2-win-x64.zip` and `SHASUMS256.txt` from `https://nodejs.org/dist/v20.20.2/`.
+    2. Check it: `sha256sum node-v20.20.2-win-x64.zip` must equal the `node-v20.20.2-win-x64.zip` line of `grep win-x64.zip SHASUMS256.txt`. If not, delete it and stop.
+    3. `unzip -q node-v20.20.2-win-x64.zip`, then, in the checkout or worktree: `export PATH="<folder>/node-v20.20.2-win-x64:$PATH"`.
+    4. Verify: `node --version` and `npm exec -c 'node --version'` must both print `v20.20.2`. The second checks what npm's child processes get. If either prints v26, the `PATH` is wrong; don't run the tests. Use `-c` here: `npm exec -- node --version` fetches the npm package `node` and printed `v27.0.0-alpha.0.1.1` on 2026-11-23.
+    5. `npm test` in the same shell. For one file: `node node_modules/vitest/vitest.mjs run --fileParallelism=false <file>`.
+  - An unpacked v20.20.2 from the official zip is at `C:\Users\조희연\AppData\Local\Temp\claude\4b73b95594a054db\17972b37-7e83-4ce8-8b9d-3b36d890ee62\scratchpad\node20\node-v20.20.2-win-x64\` (on 2026-11-23 it was there, its zip matched `SHASUMS256.txt`, and both checks in step 4 printed `v20.20.2`). It's in a session scratchpad and may disappear; if so, repeat steps 1–3. Still do step 4 each time.
 - System tests run the built `dist/hub.js`, so **run `npm run build` first**; a stale `dist/` fails the welcome test with the old `serverVersion`.
 
 ## Earlier
