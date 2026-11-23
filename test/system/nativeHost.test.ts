@@ -45,9 +45,12 @@ describe("#123: the native host", { timeout: 30_000 }, () => {
     await until(() => ext.received.some((m) => m.type === "ping"), 3_000, "a ping");
   });
 
+  // #210: a refused host never sends a welcome, so no wait for one (host()'s 8 s wait gives up
+  // when a loaded Mac takes that long to start the host's node process, as in #250).
+  // ext.exited is bounded by the test's timeout. The same goes for the nativeHost-off test below.
   it("#123: refuses a caller other than our extension, before reading anything", async () => {
     h = await nativeHarness();
-    const ext = await h.host({ origin: "chrome-extension://abcdefghijklmnopabcdefghijklmnop/" });
+    const ext = await h.host({ origin: "chrome-extension://abcdefghijklmnopabcdefghijklmnop/" }, false);
     expect(await ext.exited).not.toBe(0);
     expect(ext.received).toEqual([]);
     expect(h.logText()).toMatch(/ refused reason=unknown caller origin/);
@@ -84,7 +87,7 @@ describe("#123: the native host", { timeout: 30_000 }, () => {
 
   it("#123: with nativeHost off in config.json it does nothing and exits, so the extension stays on TCP", async () => {
     h = await nativeHarness(undefined, { nativeHost: false });
-    const ext = await h.host();
+    const ext = await h.host({}, false);
     expect(await ext.exited).not.toBe(0);
     expect(ext.received).toEqual([]);
     expect(h.logText()).toMatch(/ disabled reason=nativeHost is off/);
