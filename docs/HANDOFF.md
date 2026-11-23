@@ -1,8 +1,12 @@
-# Handoff: mcp-teams after 0.3.85–0.3.96 (#228, #227, #226, #224, #237, #243, #223, #248, #251, #249, #252, #257), updated 2026-11-23 on the Windows PC
+# Handoff: mcp-teams after 0.3.85–0.3.98 (#228, #227, #226, #224, #237, #243, #223, #248, #251, #249, #252, #257, #260, #262), updated 2026-11-23 on the Windows PC
 
 ## Resume here (session of 2026-11-23, Windows PC)
 
-Repo: `HeeyunCho/mcp-teams`, checkout `C:\Orca_Project\mcp-teams`. It is the live install: every session's `teams` server runs its `dist/index.js`. `main` = `origin/main` = `0d52bda` (merge of #258; last release 0.3.96 `4d314d7`, extension 1.1.1). The only worktree is the main checkout, and no PR from this session is open. No code changed in this session. Steps 1–3 of "Starting on the Windows PC" below are done. Step 4, the extension 1.1.1 live check, is done for Chrome; Edge is left.
+Repo: `HeeyunCho/mcp-teams`, checkout `C:\Orca_Project\mcp-teams`. It is the live install: every session's `teams` server runs its `dist/index.js`. `main` = `origin/main` = `9c7f1e2` (**0.3.98, extension 1.2.0**). The only worktree is the main checkout, and the only local branch is `main`. No PR from this session is open apart from this handoff's.
+
+**The live install is built at 0.3.97, not 0.3.98.** It was built at `d80cb19`, and `npm run build` wasn't run after #262. All running servers were still 0.3.96 at the last check (12:02Z). See "Next" for the steps.
+
+Steps 1–3 of "Starting on the Windows PC" below are done. Step 4, the extension live check, is done for Chrome only; Edge is left.
 
 ### The 0.3.81 → 0.3.96 update on this PC
 
@@ -23,22 +27,77 @@ Repo: `HeeyunCho/mcp-teams`, checkout `C:\Orca_Project\mcp-teams`. It is the liv
 - **Live check at 07:22Z:** hub pid 119256, eight servers, all 0.3.96. The hub's status reads took ms=185 and ms=84, with no timeout. Two peer `loop-delay` lines showed stalls of about 1.3 s and 1.5 s on an idle loop, the same pattern #173 has recorded since 2026-11-18. No new #173 comment.
 - **Not explained:** another session's server (pid 48756) logged 5 `read_messages` failures with `ok=no kind=other` at 07:12:16–22Z, just before the services were captured again at 07:12Z. That session then ended. `server.log` doesn't give the cause. Reads from this session worked afterwards. Watch for it again; it isn't #173 material.
 
+### Later on 2026-11-23 (about 07:30–13:00Z)
+
+**Merged and released.** Each PR was merged with a merge commit, `--match-head-commit` and CI green, one at a time:
+
+| PR | Merge | Release | What |
+|---|---|---|---|
+| #259 | `f2cd86c` | none (docs) | The "After #258" notes above |
+| #260 | `efa5e1a` | **0.3.97** (`f1d7b4f`, extension stays 1.1.1) | For #256: the `Missing from manifest.json host_permissions` error in `scripts/package-extension.mjs` now says how to fix it, and README's Security notes say "the five hosts' permissions" and that the sideloaded copy keeps their `api_traffic` entries while recording. One fresh-subagent review: ready, three nits not applied |
+| #261 | `d80cb19` | none (docs) | The Node 20 run on this PC (see "Node versions" in "This Windows PC") |
+| #262 | `181be25` | **0.3.98, extension 1.2.0** (`9c7f1e2`, tags `v0.3.98`, `ext-v1.2.0`) | For #253; see below |
+
+**#262 (#253):**
+- Each extension copy names its profile with `profile` = HMAC-SHA-256 of `profile:<oid>`, keyed with the pairing token (base64url, 43 characters). `oid` is the Teams user's object id that `captureSession` already records.
+- It goes in the hello when known. When the copy first sees the account, or it changes, it also sends `{type:"profile"}`, but only to a hub that proved itself in its welcome.
+- The hub keeps only `^[\w-]{43}$` values and passes them to peers through `ext-state`. The native relay replays the last profile frame after a hub handover.
+- `browsersWithTwoCopies` pairs copies that name the same profile or where either names none. Older extensions fall back to per-browser grouping.
+- The rule and its limits are in `docs/extension-ids.md`. GLOSSARY.md has a new "Profile" entry.
+- It took two fresh-subagent reviews:
+  - The first found that the profile was read only at connect, before Teams signs in. That's fixed by the `{type:"profile"}` message.
+  - The second found a `contoso.com` fixture and an untested welcome-time send; both are fixed.
+- Tests: `npm test` on Node 26, 1,086 passed. On Node 20.20.2, 5 failures in untouched files (`EPIPE`/`ENOTEMPTY` file locks, a 1,002 ms reading against 1,000 ms, and line-endings 5 s timeouts); the 4 files passed 3/3 alone.
+
+**Issues done:** #260 closed issue 256, and #262 closed issue 253.
+
+**#221** (outside PR, `fix/epipe-client-gone`): [commented](https://github.com/HeeyunCho/mcp-teams/pull/221#issuecomment-7105132889) with a per-hunk table.
+- All 10 hunks are covered on `main` by #222 and #235, more strictly.
+- The one behaviour `main` lacks, ending on a stderr failure (`stderr-closed`), is left out on purpose: stderr isn't the MCP channel.
+- The PR is `CONFLICTING`. It is still open, for the user to close as superseded.
+
+**#173:** [commented](https://github.com/HeeyunCho/mcp-teams/issues/173#issuecomment-7100430225) that the status-read timeouts are back on 0.3.96 hubs, the first reading on 0.3.96:
+- pid 119256 (hub until 11:02Z): 2 timeouts at ms=15016–15023, 5 slow reads at ms=3318–12426.
+- pid 271652 (hub from 11:02:26Z): 5 timeouts at ms=15023–15173, 4 slow reads at ms=3448–11160.
+- There were no `loop-delay` lines.
+- **Caveat:** from about 11:12Z the Chrome Teams tab was stuck at sign-in, and `get_version` showed no signed-in call after 11:43:54Z. So some of 271652's timeouts may only be a tab with no session.
+
+**Live state at about 12:02Z:**
+- The hub is pid 271652.
+- There are 9 servers, all 0.3.96, each with `restart-needed onDisk=0.3.97`. Two of them (295080 and 289300) run under one `claude.exe` (pid 26756); neither was killed.
+- The Chrome Teams tab needs signing in again.
+
+**Edge (open-work item 2): still left.** Edge's Default profile has the sideloaded copy installed (id `iolllncadcdlmihknnomfhcadbnnignl`, path `~/.mcp-teams/extension`), but it is **disabled** in `edge://extensions` (`disable_reasons: [1]` in `Secure Preferences`). Only Chrome's copy connects. The browser tools here drive Chrome only, so the user has to switch it on and sign in to Teams in Edge.
+
 ### Next
 
-1. **Edge** (rest of open-work item 2): load the sideloaded copy from `~/.mcp-teams/extension` in Edge, then check sign-in, one read and `api_traffic` there. The web store copy can only be tried after a web store upload.
-2. Then open-work item 3 onwards below: #241, #242, #253, #256 (`ready-for-agent`), and #221 (outside PR, check whether #222 already covers it).
+1. **Put 0.3.98 into use:**
+   - `npm ci` and `npm run build` in the checkout.
+   - Restart one session first, so a new server copies extension 1.2.0 into `~/.mcp-teams/extension`, then reload the extension. 1.2.0 adds no permission.
+   - Restart the other sessions, the hub's last. Sign in again in the Chrome Teams tab.
+2. **Edge:** once the user has switched the copy on and signed in to Teams there, check that `get_version` reports Edge. Then run `list_chats` and `read_messages` on one chat, check `api_traffic` records them, and turn recording off and clear it. With both copies on 1.2.0, also check the "two copies" note: no note for two copies in different profiles.
+3. **#241** (`ready-for-agent`): a search of one named meeting has no request budget, so many transcripts behind 429 waits can pass the tool's 300 s timeout and lose every match. The brief is in the issue: stop by the request's `deadline` and return partial matches, with a note of how many transcripts weren't searched.
+4. **#242** (`ready-for-agent`), #232's leftovers:
+   - back off repeated 1012 refusals;
+   - `close()` should close connections still at their challenge;
+   - decide on the optional peer-side check, or record why not.
+5. **#173:** after the rebuild and once Teams is signed in, check whether the hub's status reads still time out.
 
 ### Rules learned in this session
 
 - After an update that changes the extension, `reload_extension` loads whatever is in `~/.mcp-teams/extension`. Only a new server copies the new extension there when it starts. So restart one session on the new build first, then reload.
 - Before reusing a branch name for a handoff PR, check `gh pr list --head <branch>`. The Mac session had already opened #258 on `docs/handoff-2026-11-23`. Add a commit to that PR, don't force-push it.
 - `npm test` (about 13 min) can run in this checkout while the live servers are up. It didn't disturb them.
+- **The Node 20 run on this PC** is the unpacked binary first on `PATH`, not `npx` ("Node versions" in "This Windows PC"). Under load it sees timing and Windows file-lock flakes in files the change doesn't touch: `setup` #138 `EPERM`, `drain` #112, `sessionGone` #234 `ENOTEMPTY`, `lineEndings` timeouts. Rerun those files alone.
+- **Memory:** one full `npm test` was stopped by Claude Code for low memory while a reviewer's suite also ran. Run one full suite at a time across the session and its subagents, and check free memory first (about 3.6 GB free was enough).
+- **A review round that only fixes what the reviewer listed** can go to the PR without a third review, after reading the diff yourself and rerunning both suites.
+- **A harness-locked subagent worktree:** check the lock's pid is this session's `claude.exe` (walk the parent chain), then `git worktree unlock` and `remove`. The harness branch `worktree-agent-<id>` is local only; delete it too.
 
 ### Suggested skills
 
-- `diagnosing-bugs`: if the `read_messages` `kind=other` failures come back.
-- `tdd`: for #241, #242, #253 and #256.
-- `code-review`: for #221 and for the PRs from those issues (a fresh reviewer, not the author).
+- `diagnosing-bugs`: if the `read_messages` `kind=other` failures come back, or for #173 after the rebuild.
+- `tdd`: for #241 and #242.
+- `code-review`: for the PRs from those issues (a fresh reviewer, not the author).
 - `resolving-merge-conflicts`: if an open PR goes CONFLICTING after a neighbour merges.
 
 ## Session of 2026-11-22/23 (Mac; written for the Windows PC)
@@ -105,9 +164,9 @@ Docs only (no release): #238, #240, #244, #247, #254 and #255, the earlier resum
 ### Open work, in priority order
 
 1. **Windows PC catch-up:** done on 2026-11-23 (see "Resume here" at the top).
-2. **Extension 1.1.1 live check (the user's):** reload the sideloaded copy in Chrome and Edge, then check sign-in, a read, and that `api_traffic` records. Build the web store zip (`node scripts/package-extension.mjs`) and check its manifest has the five hosts and no `key`.
-3. **#241, #242, #253, #256:** `ready-for-agent`. #256 is small (docs plus one error message and its test). #253 may end as a reworded note if no per-profile value exists.
-4. **#221** (outside contributor, `fix/epipe-client-gone`, last updated 2026-11-17): still open and unreviewed. #222 already fixed #215's EPIPE loop, so check whether anything in it is still needed before reviewing.
+2. **Extension live check (the user's; done for Chrome on 1.1.1, Edge left, see "Resume here"):** reload the sideloaded copy in Chrome and Edge, then check sign-in, a read, and that `api_traffic` records. Build the web store zip (`node scripts/package-extension.mjs`) and check its manifest has the five hosts and no `key`.
+3. **#241, #242:** `ready-for-agent`. (#256 was done by #260 and #253 by #262 on 2026-11-23; see "Resume here".)
+4. **#221** (outside contributor, `fix/epipe-client-gone`): commented on 2026-11-23 that `main` already covers it. It is left open for the user to close as superseded.
 5. **#249 nits not filed** (judgement calls): the `SHIPPED_HOSTS`/`trafficHosts` names; `TEAMS_URLS`/`TAB_URLS` in `background.js` are hand-written subsets of `EXTENSION_HOSTS`. (The three that could mislead are #256; #251's two welcome-wait tests are done by #257.)
 6. **#237 judgement calls** (none filed): fixture GUIDs not in the `00000000-` form; the Stream fixture duplicated in the unit and integration tests; the "first `spokenLanguageTag`" rule and the kept-field list in two places (`slimTranscript` and `background.js`); `let language = false` would read better as `languageKept`.
 7. **Older work:** the 2026-11-18 and 2026-11-17 sections below (#173 readings, the `ready-for-agent` lanes, items waiting on the user, #25's roadmap, which doesn't record 0.3.81 onwards).
