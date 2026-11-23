@@ -173,7 +173,7 @@ describe("two copies of the extension", () => {
     expect(hashed).toMatch(/^[\w-]{43}$/);
     const sideloaded = extension(SIDELOADED_ORIGIN, "secret", { instance: "profile-a", profile: hashed });
     await sideloaded.welcome;
-    const webStore = extension(WEB_STORE_ORIGIN, "secret", { instance: "profile-b", profile: "someone@contoso.com" });
+    const webStore = extension(WEB_STORE_ORIGIN, "secret", { instance: "profile-b", profile: "someone@contoso.example" });
     await webStore.welcome;
     // An oid in clear (a GUID) is no keyed hash: left out.
     const clear = extension(WEB_STORE_ORIGIN, "secret", { instance: "profile-d", browser: "Edge", profile: "00000000-0000-4000-8000-000000000001" });

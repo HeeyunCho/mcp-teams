@@ -76,6 +76,10 @@ _Avoid_: developer build, unpacked build
 The extension installed from the Chrome Web Store or Edge Add-ons, which updates from there, not from the folder mcp-teams keeps. Its manifest is the one `scripts/package-extension.mjs` writes: no `key`, and only the five Teams and SharePoint hosts, so `api_traffic` isn't available in it.
 _Avoid_: store copy (the **Store** is the launcher's folder of versions)
 
+**Profile**:
+The value a copy of the extension names its browser profile by: a hash of the Teams user it has seen there, keyed with the pairing token, so both copies in one browser profile name the same one. It stands for the browser profile only as far as its Teams account goes; it isn't the browser's own profile id. Not the per-copy `instance`, which differs between two copies in one browser profile.
+_Avoid_: profile id, account hash
+
 ### Teams accounts
 
 **Unsure account**:

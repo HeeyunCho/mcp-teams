@@ -2,7 +2,8 @@
 // browser start, or a reload) names it then with {type:"profile"}. The hub records it, and its
 // peers see it through ext-state, so get_version and setup group two copies by profile.
 import { afterEach, describe, expect, it } from "vitest";
-import { bridgeHarness, type BridgeHarness } from "../helpers/bridgeHarness.js";
+import { bridgeHarness, TOKEN, type BridgeHarness } from "../helpers/bridgeHarness.js";
+import { keyedProfile } from "../helpers/profile.js";
 import { until } from "../helpers/timing.js";
 
 let h: BridgeHarness | undefined;
@@ -11,9 +12,9 @@ afterEach(async () => {
   h = undefined;
 });
 
-// The shape of a keyed hash (HMAC-SHA-256, base64url without padding): 43 characters.
-const HASHED = "d3bpCTo-MFSiO1gd5VS0Si5nZHM9ATdgkJ0_nQ0oV1A";
-const OTHER = "a59xwGDMM1MVJFuMGODJmitd-YjvIHjmSMfWkK2lE_c";
+// Two accounts' values, as the extension works them out.
+const HASHED = keyedProfile(TOKEN, "00000000-0000-4000-8000-000000000001");
+const OTHER = keyedProfile(TOKEN, "00000000-0000-4000-8000-000000000002");
 
 describe("#253: the profile named after the welcome", () => {
   it("#253: the hub records a profile sent after the welcome, a later one replaces it, and a peer sees it", async () => {
@@ -38,7 +39,7 @@ describe("#253: the profile named after the welcome", () => {
     await until(() => hub.extensions.length === 1, 3_000, "the extension");
     ext.ws.send(JSON.stringify({ type: "profile", profile: HASHED }));
     await until(() => hub.extensions[0]?.profile === HASHED, 2_000, "the profile");
-    for (const bad of ["00000000-0000-4000-8000-000000000001", "someone@contoso.com", 42, null]) ext.ws.send(JSON.stringify({ type: "profile", profile: bad }));
+    for (const bad of ["00000000-0000-4000-8000-000000000001", "someone@contoso.example", 42, null]) ext.ws.send(JSON.stringify({ type: "profile", profile: bad }));
     // A request after them is answered: they were read (in order) and changed nothing.
     await expect(hub.call("status", {}, 2_000)).resolves.toEqual({ ok: true });
     expect(hub.extensions[0].profile).toBe(HASHED);

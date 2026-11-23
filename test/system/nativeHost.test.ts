@@ -13,6 +13,7 @@ import { SIDELOADED_ORIGIN, trustedOrigins } from "../../src/extension.js";
 import { registerTools } from "../../src/tools.js";
 import { fakeExtension, TOKEN } from "../helpers/bridgeHarness.js";
 import { nativeHarness, REAL_HEARTBEAT } from "../helpers/nativeHost.js";
+import { keyedProfile } from "../helpers/profile.js";
 import { stall, until } from "../helpers/timing.js";
 
 let h: Awaited<ReturnType<typeof nativeHarness>> | undefined;
@@ -236,7 +237,7 @@ describe("#123: the native host", { timeout: 30_000 }, () => {
 
   it("#253: a relaying host passes its extension's profile on, and names it again to the hub it moves to", async () => {
     h = await nativeHarness();
-    const PROFILE = "d3bpCTo-MFSiO1gd5VS0Si5nZHM9ATdgkJ0_nQ0oV1A";
+    const PROFILE = keyedProfile(TOKEN, "00000000-0000-4000-8000-000000000001");
     const chrome = await h.host({ browser: "Chrome", instance: "profile-1", env: REAL_HEARTBEAT });
     const edge = await h.host({ browser: "Edge", instance: "profile-2", env: REAL_HEARTBEAT });
     const server = await h.server();

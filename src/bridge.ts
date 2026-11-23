@@ -64,11 +64,8 @@ export interface ExtensionInfo {
   /** Stays the same for one copy of the extension across reconnects (each copy keeps its own, #253). */
   instance?: string;
   /**
-   * The same for every copy of the extension in one browser profile (#253): a keyed hash of the Teams
-   * account it has seen there, never the account itself. Named in hello, or later by
-   * {type:"profile"} once the copy sees the account (or another one) after its welcome; only a value
-   * of a keyed hash's shape is kept (isProfile). Extensions from before #253, and a copy that hasn't
-   * seen Teams yet, name none.
+   * The copy's profile value (#253, see docs/extension-ids.md): from hello or a later
+   * {type:"profile"}, kept only in a keyed hash's shape (isProfile). None from extensions before #253.
    */
   profile?: string;
   /** What it declared in hello (#115); no features for an extension from before #115. Hubs before #115 send none to peers. */

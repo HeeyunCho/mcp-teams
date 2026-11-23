@@ -59,28 +59,18 @@ export function isTrustedOrigin(origin: unknown, ids: ExtensionIds = EXTENSION_I
 
 /**
  * The browsers where the sideloaded copy and a web store copy (another trusted id) are both connected
- * in one profile (#216). Both are served (they have different instances, so they look like two
- * browsers), but one profile needs only one: get_version and setup suggest removing the sideloaded
- * one. Copies in different browsers, or in two profiles of the same browser with the same id, aren't
- * counted.
- *
- * `instance` can't tell profiles apart: each copy keeps it in its own chrome.storage.local, so two
- * copies in one profile already differ in it, as two profiles do. `profile` (#253) can: a copy names
- * it (in hello, or with {type:"profile"} once it sees the profile's Teams account), keyed with the
- * pairing token, so both copies in one profile name the same value. When both copies of a pair name
- * one, they count only if it is the same. A copy that doesn't (an extension from before #253, or one
- * that hasn't seen a signed-in Teams request since the browser started or it was reloaded or
- * updated) is grouped by browser, as before: then two profiles of one
- * browser, each with one of the two copies, are counted too. Two profiles signed into the same
- * Teams account also look like one.
+ * in one profile (#216): one profile needs only one, so get_version and setup suggest removing the
+ * sideloaded one. Copies in different browsers aren't counted. Grouped by `profile` when both copies
+ * of a pair name one, else by browser (#253; the rule and its limits: docs/extension-ids.md, "Two
+ * copies in one browser").
  */
 export function browsersWithTwoCopies(extensions: readonly { origin?: string; browser?: string; profile?: string }[], ids: ExtensionIds = EXTENSION_IDS): string[] {
   const ours = extensions.filter((e) => isTrustedOrigin(e.origin, ids));
   const sideloaded = ours.filter((e) => e.origin === SIDELOADED_ORIGIN);
   const webStore = ours.filter((e) => e.origin !== SIDELOADED_ORIGIN);
-  const together = (a: { profile?: string }, b: { profile?: string }) => !a.profile || !b.profile || a.profile === b.profile;
+  const mayShareProfile = (a: { profile?: string }, b: { profile?: string }) => !a.profile || !b.profile || a.profile === b.profile;
   const browsers = new Set(extensions.map((e) => e.browser).filter((b): b is string => !!b));
-  return [...browsers].filter((b) => sideloaded.some((s) => s.browser === b && webStore.some((w) => w.browser === b && together(s, w))));
+  return [...browsers].filter((b) => sideloaded.some((s) => s.browser === b && webStore.some((w) => w.browser === b && mayShareProfile(s, w))));
 }
 
 /** What get_version and setup say about browsersWithTwoCopies (#216); null when there are none. */

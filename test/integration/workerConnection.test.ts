@@ -1,11 +1,11 @@
 // The worker's own connection to the hub (extension/background.js connect()), against a
 // scripted hub, so the test decides exactly when each message arrives.
-import { createHmac } from "node:crypto";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { WebSocketServer, type WebSocket } from "ws";
 import { proof } from "../../src/bridge.js";
 import { BASES, connectWorker, createFakeChrome, loadWorker, ME_OID, NativeWebSocket, openedSockets, stopWorkers, TEAMS_ORIGIN } from "../helpers/fakeChrome.js";
 import { fakeJwt } from "../helpers/jwt.js";
+import { keyedProfile } from "../helpers/profile.js";
 
 const TOKEN = "worker-connection-token";
 
@@ -33,11 +33,14 @@ async function teardown() {
  * A hub that answers hello with a welcome (proving itself like the real one, unless `forged`)
  * and sends `afterWelcome` right behind it, before the worker can have checked the proof;
  * with `dropAfter` it then drops the connection. `token`: the one it proves (asked per welcome).
+ * `holdWelcome`: the welcome waits for releaseWelcome(), so a test can act between hello and welcome.
  */
-async function scriptedHub(afterWelcome: object[], { forged = false, dropAfter = false, token = (): string => TOKEN } = {}) {
+async function scriptedHub(afterWelcome: object[], { forged = false, dropAfter = false, token = (): string => TOKEN, holdWelcome = false } = {}) {
   const received: any[] = [];
   let welcomed = false;
   let closed = false;
+  let held: (() => void) | undefined;
+  let released = !holdWelcome;
   // Port 0: the system picks a free port and this server keeps it.
   const server = new WebSocketServer({ host: "127.0.0.1", port: 0 });
   wss = server;
@@ -48,16 +51,31 @@ async function scriptedHub(afterWelcome: object[], { forged = false, dropAfter =
       const msg = JSON.parse(raw.toString());
       received.push(msg);
       if (msg.type !== "hello") return;
-      ws.send(JSON.stringify({ type: "welcome", serverVersion: "0.0.0", proof: proof(forged ? "not-the-token" : token(), "server", msg.nonce) }));
-      for (const m of afterWelcome) ws.send(JSON.stringify(m));
-      welcomed = true;
-      // The connection goes away before the worker can have checked the welcome.
-      if (dropAfter) ws.terminate();
+      const welcome = () => {
+        ws.send(JSON.stringify({ type: "welcome", serverVersion: "0.0.0", proof: proof(forged ? "not-the-token" : token(), "server", msg.nonce) }));
+        for (const m of afterWelcome) ws.send(JSON.stringify(m));
+        welcomed = true;
+        // The connection goes away before the worker can have checked the welcome.
+        if (dropAfter) ws.terminate();
+      };
+      if (released) welcome();
+      else held = welcome;
     });
   });
   await new Promise<void>((r) => server.once("listening", () => r()));
   const { port } = server.address() as { port: number };
-  return { port, received, welcomed: () => welcomed, closed: () => closed };
+  return {
+    port,
+    received,
+    welcomed: () => welcomed,
+    closed: () => closed,
+    /** Sends the held welcome (holdWelcome), now or as soon as the hello comes. */
+    releaseWelcome() {
+      released = true;
+      held?.();
+      held = undefined;
+    },
+  };
 }
 
 describe("worker connection", () => {
@@ -217,6 +235,22 @@ describe("worker connection", () => {
     expect(hello.capabilities).toEqual({ features: ["cancelSend", "sizeCheck"], maxMessageBytes: 256 * 1024 * 1024 });
   });
 
+  const keyed = (oid: string) => keyedProfile(TOKEN, oid);
+  const OTHER_OID = "00000000-0000-4000-8000-000000000002";
+  /** Teams in the tab calls csa as the user `oid`, which the worker captures. */
+  const teamsRequestAs = (fake: ReturnType<typeof createFakeChrome>, oid: string) =>
+    fake.fire("beforeSendHeaders", {
+      url: `${BASES.csa}/api/v1/teams/users/me?isPrefetch=false`,
+      initiator: TEAMS_ORIGIN,
+      requestHeaders: [{ name: "Authorization", value: `Bearer ${fakeJwt({ tid: "tenant-1", oid, iat: 1_790_000_000 })}` }],
+    });
+  /** The worker starts (as the browser does) and says hello to `hub`, whose welcome is held. */
+  const helloHeld = async (fake: ReturnType<typeof createFakeChrome>, hub: { received: any[] }) => {
+    vi.stubGlobal("WebSocket", NativeWebSocket);
+    for (const l of fake.chrome.runtime.onStartup.listeners) l();
+    await vi.waitFor(() => expect(hub.received.some((m) => m.type === "hello")).toBe(true), { timeout: 3_000 });
+  };
+
   it("#253: the worker's hello names its profile by the Teams account it has seen, keyed with the pairing token, never in clear", async () => {
     const hub = await scriptedHub([]);
     const fake = createFakeChrome({ local: { token: TOKEN, port: hub.port } });
@@ -225,7 +259,7 @@ describe("worker connection", () => {
     link = await connectWorker(fake, hub.welcomed);
     const hello = hub.received.find((m) => m.type === "hello");
     // HMAC-SHA-256 of "profile:<oid>" with the pairing token: the same for both copies in one profile.
-    expect(hello.profile).toBe(createHmac("sha256", TOKEN).update(`profile:${ME_OID}`).digest("base64url"));
+    expect(hello.profile).toBe(keyed(ME_OID));
     expect(JSON.stringify(hello)).not.toContain(ME_OID);
   });
 
@@ -239,16 +273,6 @@ describe("worker connection", () => {
     const hello = hub.received.find((m) => m.type === "hello");
     expect(hello).not.toHaveProperty("profile");
   });
-
-  /** Teams in the tab calls csa as the user `oid`, which the worker captures. */
-  const teamsRequestAs = (fake: ReturnType<typeof createFakeChrome>, oid: string) =>
-    fake.fire("beforeSendHeaders", {
-      url: `${BASES.csa}/api/v1/teams/users/me?isPrefetch=false`,
-      initiator: TEAMS_ORIGIN,
-      requestHeaders: [{ name: "Authorization", value: `Bearer ${fakeJwt({ tid: "tenant-1", oid, iat: 1_790_000_000 })}` }],
-    });
-  const keyed = (oid: string) => createHmac("sha256", TOKEN).update(`profile:${oid}`).digest("base64url");
-  const OTHER_OID = "00000000-0000-4000-8000-000000000002";
 
   it("#253: a worker that sees the Teams account after its welcome names its profile then, and again after a switch", async () => {
     const hub = await scriptedHub([]);
@@ -268,16 +292,32 @@ describe("worker connection", () => {
     expect(JSON.stringify(hub.received)).not.toContain(ME_OID);
   });
 
-  it("#253: a hub that hasn't proved itself in its welcome is never told the profile", async () => {
-    const hub = await scriptedHub([], { forged: true });
+  it("#253: an account seen between the hello and the welcome is named once the welcome is proven", async () => {
+    const hub = await scriptedHub([], { holdWelcome: true });
     const fake = createFakeChrome({ local: { token: TOKEN, port: hub.port }, captured: [] });
     fake.session.delete("oid");
     const worker = await loadWorker(fake);
     worker.registerListeners();
-    vi.stubGlobal("WebSocket", NativeWebSocket);
-    for (const l of fake.chrome.runtime.onStartup.listeners) l();
-    await vi.waitFor(async () => expect(await fake.pageMessage("popup.html", { type: "popup:status" })).toMatchObject({ state: "unauthorized" }), { timeout: 3_000 });
+    await helloHeld(fake, hub);
     await teamsRequestAs(fake, ME_OID);
+    await vi.waitFor(() => expect(fake.session.get("oid")).toBe(ME_OID));
+    hub.releaseWelcome();
+    link = await connectWorker(fake, hub.welcomed);
+    await vi.waitFor(() => expect(hub.received.filter((m) => m.type === "profile")).toEqual([{ type: "profile", profile: keyed(ME_OID) }]), { timeout: 2_000 });
+    expect(hub.received.find((m) => m.type === "hello")).not.toHaveProperty("profile");
+  });
+
+  it("#253: a hub whose welcome doesn't prove itself is never told the profile, though the account was seen while its socket was open", async () => {
+    const hub = await scriptedHub([], { forged: true, holdWelcome: true });
+    const fake = createFakeChrome({ local: { token: TOKEN, port: hub.port }, captured: [] });
+    fake.session.delete("oid");
+    const worker = await loadWorker(fake);
+    worker.registerListeners();
+    await helloHeld(fake, hub);
+    await teamsRequestAs(fake, ME_OID);
+    await vi.waitFor(() => expect(fake.session.get("oid")).toBe(ME_OID));
+    hub.releaseWelcome();
+    await vi.waitFor(async () => expect(await fake.pageMessage("popup.html", { type: "popup:status" })).toMatchObject({ state: "unauthorized" }), { timeout: 3_000 });
     await new Promise((r) => setTimeout(r, 200));
     expect(hub.received.filter((m) => m.type === "profile")).toEqual([]);
   });
