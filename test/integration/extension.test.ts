@@ -165,18 +165,24 @@ describe("two copies of the extension", () => {
     for (const e of [sideloaded, webStore, again]) e.ws.close();
   });
 
-  it("#253: records the profile a hello names, so two copies are grouped by it; a value that isn't a short token is left out", async () => {
+  it("#253: records the profile a hello names, so two copies are grouped by it; only a keyed hash's shape is kept", async () => {
     bridge = new TestBridge("secret", "0.15.0", { trustedExtensionIds });
     await bridge.start();
-    const sideloaded = extension(SIDELOADED_ORIGIN, "secret", { instance: "profile-a", profile: "Hx3_k-9" });
+    // pairingProof's shape: HMAC-SHA-256, base64url without padding (43 characters).
+    const hashed = await pairingProof("secret", "profile", "00000000-0000-4000-8000-000000000001");
+    expect(hashed).toMatch(/^[\w-]{43}$/);
+    const sideloaded = extension(SIDELOADED_ORIGIN, "secret", { instance: "profile-a", profile: hashed });
     await sideloaded.welcome;
     const webStore = extension(WEB_STORE_ORIGIN, "secret", { instance: "profile-b", profile: "someone@contoso.com" });
     await webStore.welcome;
+    // An oid in clear (a GUID) is no keyed hash: left out.
+    const clear = extension(WEB_STORE_ORIGIN, "secret", { instance: "profile-d", browser: "Edge", profile: "00000000-0000-4000-8000-000000000001" });
+    await clear.welcome;
     const old = extension(WEB_STORE_ORIGIN, "secret", { instance: "profile-c", browser: "Edge" });
     await old.welcome;
-    await until(() => bridge!.extensions.length === 3, 2_000, "all three listed");
-    expect(Object.fromEntries(bridge.extensions.map((e) => [e.instance, e.profile ?? null]))).toEqual({ "profile-a": "Hx3_k-9", "profile-b": null, "profile-c": null });
-    for (const e of [sideloaded, webStore, old]) e.ws.close();
+    await until(() => bridge!.extensions.length === 4, 2_000, "all four listed");
+    expect(Object.fromEntries(bridge.extensions.map((e) => [e.instance, e.profile ?? null]))).toEqual({ "profile-a": hashed, "profile-b": null, "profile-c": null, "profile-d": null });
+    for (const e of [sideloaded, webStore, clear, old]) e.ws.close();
   });
 
   it("#216: still turns away an id that isn't trusted while a trusted copy is connected (4409)", async () => {

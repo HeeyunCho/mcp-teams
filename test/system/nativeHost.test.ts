@@ -234,6 +234,22 @@ describe("#123: the native host", { timeout: 30_000 }, () => {
     expect(h.logText()).toMatch(new RegExp(` pid=${edge.child.pid} relay-closed code=\\d+\n(.*\n)*.* pid=${edge.child.pid} host version=`));
   });
 
+  it("#253: a relaying host passes its extension's profile on, and names it again to the hub it moves to", async () => {
+    h = await nativeHarness();
+    const PROFILE = "d3bpCTo-MFSiO1gd5VS0Si5nZHM9ATdgkJ0_nQ0oV1A";
+    const chrome = await h.host({ browser: "Chrome", instance: "profile-1", env: REAL_HEARTBEAT });
+    const edge = await h.host({ browser: "Edge", instance: "profile-2", env: REAL_HEARTBEAT });
+    const server = await h.server();
+    await until(() => server.extensions.length === 2, 3_000, "both browsers");
+    // Edge's copy saw its Teams account after its welcome.
+    edge.send({ type: "profile", profile: PROFILE });
+    await until(() => server.extensions.find((e) => e.browser === "Edge")?.profile === PROFILE, 3_000, "Edge's profile, relayed");
+    await chrome.kill();
+    await until(() => server.connected && server.extensions.length === 1 && server.extension?.browser === "Edge", 8_000, "the server on the new host");
+    // The new hub got the hello again (sent before the profile was known) and the profile after it.
+    await until(() => server.extension?.profile === PROFILE, 3_000, "Edge's profile on the new hub");
+  });
+
   // Another local user can create the Windows pipe while no host runs; the next host then relays to it.
   const squatters: Record<string, (hello: any) => object[]> = {
     "sends a request at once, with no welcome": () => [{ type: "request", id: "r1", method: "requestSend", params: { chatId: "19:x", text: "posted by a squatter" } }],

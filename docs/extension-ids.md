@@ -27,12 +27,17 @@ Every check is an exact match against the list (`isTrustedOrigin`): no prefix, s
 
 A web store copy and a sideloaded copy have different ids and different instances, so both stay connected and are served as two browsers. When both are connected in the same browser profile, `get_version` (`twoCopies`) and setup suggest removing the sideloaded one.
 
-The hello names the profile (#253). `instance` can't: each copy keeps its own in its own `chrome.storage.local`, so two copies in one profile differ in it as two profiles do. The optional `profile` field is HMAC-SHA-256 of `profile:<oid>` with the pairing token, where `oid` is the Teams user the copy has seen in that profile (both copies see the same Teams requests). The user's id never leaves in clear, and the value isn't logged or shown by any tool. The hub keeps it only as a short token (`[\w-]{1,64}`).
+Each copy names its profile (#253). `instance` can't: each copy keeps its own in its own `chrome.storage.local`, so two copies in one profile differ in it as two profiles do. The `profile` value is HMAC-SHA-256 of `profile:<oid>` with the pairing token (base64url, 43 characters), where `oid` is the Teams user the copy has seen in that profile (both copies see the same Teams requests). The user's id never leaves in clear, and the value isn't logged or shown by any tool. The hub keeps only a value of that shape.
+
+- **When it is sent:** in the hello when the copy already knows the oid, and otherwise as `{"type":"profile","profile":…}` as soon as it sees it, only to a hub that has proved itself in its welcome. The oid is in `chrome.storage.session`, so it is missing only until Teams' first signed-in request after the browser started or the copy was reloaded or updated. A switch to another account sends the new value.
+- **Native host:** a relaying host passes the message on unchanged, and sends it again behind the hello when it moves to another hub.
+- **Older servers:** a server from before #253 ignores the message (it has no `id`).
+
+How the note counts:
 
 - Both copies name a profile: counted only when it is the same.
-- One or both name none (an extension from before #253, or one that hasn't seen a Teams request since the browser started, since `oid` is in `chrome.storage.session`): counted per browser, as before, so two profiles of one browser that each hold one copy get the note too.
+- One or both name none (an extension from before #253, or one that hasn't seen a signed-in Teams request yet): counted per browser, as before, so two profiles of one browser that each hold one copy get the note too.
 - Two profiles signed into the same Teams account look like one profile.
-- A hello keeps the value it was sent with: after an account switch, the copies agree again from their next connect.
 
 ## The web store zip
 

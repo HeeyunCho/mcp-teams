@@ -65,11 +65,12 @@ export function isTrustedOrigin(origin: unknown, ids: ExtensionIds = EXTENSION_I
  * counted.
  *
  * `instance` can't tell profiles apart: each copy keeps it in its own chrome.storage.local, so two
- * copies in one profile already differ in it, as two profiles do. `profile` (#253) can: a copy sends
- * it in hello once it has seen the profile's Teams account, keyed with the pairing token, so both
- * copies in one profile send the same value. When both copies of a pair name one, they count only
- * if it is the same. A copy that doesn't (an extension from before #253, or one that hasn't seen
- * Teams since the browser started) is grouped by browser, as before: then two profiles of one
+ * copies in one profile already differ in it, as two profiles do. `profile` (#253) can: a copy names
+ * it (in hello, or with {type:"profile"} once it sees the profile's Teams account), keyed with the
+ * pairing token, so both copies in one profile name the same value. When both copies of a pair name
+ * one, they count only if it is the same. A copy that doesn't (an extension from before #253, or one
+ * that hasn't seen a signed-in Teams request since the browser started or it was reloaded or
+ * updated) is grouped by browser, as before: then two profiles of one
  * browser, each with one of the two copies, are counted too. Two profiles signed into the same
  * Teams account also look like one.
  */

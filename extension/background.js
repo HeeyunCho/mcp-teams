@@ -99,6 +99,11 @@ async function storeCapture(service, capture) {
     update.oid = capture.oid;
   }
   await chrome.storage.session.set(update);
+  if (update.oid) {
+    // #253: the hub learns this profile's account as soon as it is seen (or another one).
+    seenOid = update.oid;
+    void tellProfile();
+  }
 }
 
 /**
@@ -2323,19 +2328,40 @@ function nativeFirst(pairing, canNative) {
 }
 
 /**
- * What hello names this browser profile by (#253), so the server can tell two copies of the
+ * What this copy names its browser profile by (#253), so the server can tell two copies of the
  * extension in one profile (one is enough) from one copy in each of two profiles (both wanted).
  * `instance` can't: each copy keeps its own in its own storage. Both copies in a profile see the same
  * Teams requests, so they hold the same signed-in user: this is HMAC-SHA-256 of "profile:<oid>" with
  * the pairing token (which both share, being paired with the same server), so the user's id never
- * leaves in clear and can't be checked against a guess without the token. null until Teams has sent
- * a request in this browser session (chrome.storage.session), or without a token: the server then
- * groups by browser, as for an extension from before #253. A hello sent before an account switch
- * keeps the old value until the next connect.
+ * leaves in clear and can't be checked against a guess without the token. null without an oid or a
+ * token.
+ *
+ * The oid is in chrome.storage.session, so it is gone after a browser start and after the extension
+ * is reloaded or updated, until Teams' first signed-in request: the hello, sent at the worker's start,
+ * usually has none. The copy then names it with {type:"profile"} once it sees it, and again after a
+ * switch to another account (tellProfile), only to a hub that has proved itself in its welcome. Until
+ * then (and from a server before #253, which ignores the message) the server groups by browser.
  */
-async function profileOf(secret) {
-  const oid = await signedInOid();
-  return secret && oid ? teams.pairingProof(secret, "profile", oid) : null;
+const profileOf = async (secret, oid) => (secret && oid ? teams.pairingProof(secret, "profile", oid) : null);
+
+/** The signed-in user's oid as this worker last read (connect) or stored it (storeCapture), for tellProfile. */
+let seenOid = null;
+/** While connected to a hub that proved itself: { socket, secret, sent (the last profile it was told) }. */
+let profileLink = null;
+
+/**
+ * Tells the hub the profile of seenOid with {type:"profile"} when it differs from what the hub was
+ * last told (#253). Touches no chrome API (the socket's handlers call it, see connect).
+ */
+async function tellProfile() {
+  const link = profileLink;
+  const oid = seenOid;
+  if (!link) return;
+  const profile = await profileOf(link.secret, oid);
+  // A newer connection or oid meanwhile: its own call tells it.
+  if (!profile || profileLink !== link || seenOid !== oid || profile === link.sent || link.socket.readyState !== WebSocket.OPEN) return;
+  link.sent = profile;
+  link.socket.send(JSON.stringify({ type: "profile", profile }));
 }
 
 /**
@@ -2354,7 +2380,7 @@ async function connect() {
   clearTimeout(retryTimer);
   retryTimer = null;
   starting = true;
-  let token, port, instance, pairing, profile;
+  let token, port, instance, pairing, secret, profile;
   try {
     ({ token, port, instance } = await chrome.storage.local.get(["token", "port", "instance"]));
     pairing = await pairingFile();
@@ -2364,7 +2390,10 @@ async function connect() {
       instance = crypto.randomUUID();
       await chrome.storage.local.set({ instance });
     }
-    profile = await profileOf(token || pairing?.token || null);
+    // One secret for both the proofs and the profile's hash.
+    secret = token || pairing?.token || null;
+    seenOid = (await signedInOid()) ?? null;
+    profile = await profileOf(secret, seenOid);
   } finally {
     starting = false;
   }
@@ -2386,7 +2415,6 @@ async function connect() {
   socket ??= new WebSocket(`ws://127.0.0.1:${port || DEFAULT_PORT}`);
   ws = socket;
   const nonce = crypto.randomUUID();
-  const secret = token || pairing?.token || null;
   const noPairing = "This copy of the extension has no pairing file. Run `npx mcp-teams setup` and load the extension from the folder it shows.";
   let challenged = false;
   let authed = false;
@@ -2433,6 +2461,9 @@ async function connect() {
           if (!secret || msg.proof !== (await teams.pairingProof(secret, "server", nonce))) return notProven();
           if (ws !== socket || socket.readyState !== WebSocket.OPEN) return; // a newer connection's state stays
           authed = true;
+          // #253: an oid seen since the hello was sent goes now; later ones as they come.
+          profileLink = { socket, secret, sent: profile };
+          void tellProfile();
           state = "connected";
           lastError = null;
           retryMs = RETRY_MIN_MS;
@@ -2458,6 +2489,7 @@ async function connect() {
     await dispatch(msg, (reply) => socket.readyState === WebSocket.OPEN && sendToHub(JSON.stringify(reply), reply), socket);
   };
   socket.onclose = (ev) => {
+    if (profileLink?.socket === socket) profileLink = null;
     // Nobody can be told the outcome of what came on this connection: withdraw it
     // (an open confirmation window closes; nothing is sent).
     withdrawAll(socket);
