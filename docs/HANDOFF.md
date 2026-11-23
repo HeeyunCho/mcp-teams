@@ -1,8 +1,39 @@
-# Handoff: mcp-teams after 0.3.85–0.3.95 (#228, #227, #226, #224, #237, #243, #223, #248, #251, #249, #252), updated 2026-11-22 on the Mac
+# Handoff: mcp-teams after 0.3.85–0.3.96 (#228, #227, #226, #224, #237, #243, #223, #248, #251, #249, #252, #257), updated 2026-11-23 on the Windows PC
 
-## Resume here (session of 2026-11-22, Mac)
+## Resume here (session of 2026-11-23, Windows PC)
 
-Resume notes for the next agent. Repo: `HeeyunCho/mcp-teams`, checkout `~/orca/mcp-teams` (git; scn is not used here). Local `main` = `origin/main` = `1d131ac` (0.3.95, extension 1.1.1). Only `main` is checked out; no other worktrees.
+Repo: `HeeyunCho/mcp-teams`, checkout `C:\Orca_Project\mcp-teams`. It is the live install: every session's `teams` server runs its `dist/index.js`. That checkout's `main` = `4d314d7` (0.3.96, extension 1.1.1). No code changed in this session. Steps 1–3 of "Starting on the Windows PC" below are done. Step 4, the extension 1.1.1 live check, is done only for Chrome sign-in.
+
+### The 0.3.81 → 0.3.96 update on this PC
+
+- `git pull --ff-only` (92 commits), `npm install` (0 vulnerabilities), `npm run build`: `dist/build.json` 0.3.96 `cbe2a5764d66`.
+- **`reload_extension` alone left the extension at 1.0.0.** Chrome loads the installed copy `~/.mcp-teams/extension`, not the repo's `extension/` (1.1.1 on disk). Only a 0.3.96 server copies the new extension there at start (`syncExtension`, `src/index.ts:83` and `:109`). All servers still ran 0.3.80, so the reload reloaded 1.0.0. Once the first restarted session started a 0.3.96 server, the copy was synced and the extension came up as 1.1.1. So step 2 below only works after one session runs the new build. After an update that changes the extension: restart one session first, then reload the extension (or let the new hub's reconnect do it).
+- **Hand-over to the 0.3.96 hub:** the 0.3.80 hub (pid 100724) logged `handover v=0.3.80 role=hub to=0.3.96` at 06:45:13Z. The 0.3.96 server (pid 272828) got `hub-closed code=1012`, took the port about 0.14 s later and logged `extension-connected ext=1.1.1`. 100724 joined it as a peer. Later, as sessions were restarted, two 0.3.96 hubs ended with their sessions (`stdin-closed`, peers saw `hub-closed code=1005`). Each time a peer took over within about 0.2 s, and every peer reconnected within about 0.5 s. No peer was left on an ex-hub (netstat matched the `role` lines). The hub at the end was pid 119256, with seven 0.3.96 peers. No server older than 0.3.96 was left.
+- `get_version` on this session: server 0.3.96, `restartNeeded: false`, extension 1.1.1, `extensionSupported: true`, no `missingFeatures`, all four services captured.
+- **`npm test` on `main` at 0.3.96 passed:** 86/86 files, 1,076 tests passed, 22 skipped, about 783 s (Node v26.3.0, `--fileParallelism=false`). It ran while the live servers were up, and it didn't disturb them.
+- **#173:** no comment. Since the update, the only unreadable status line was the 0.3.80 hub's `kind=closed` while the extension reloaded at the hand-over, not a timeout. The reads after it took 17–87 ms.
+
+### Next
+
+Item 2 of "Open work" below is left: Edge, a read, `api_traffic` recording, and the web store zip. Then item 3 onwards.
+
+## Session of 2026-11-22/23 (Mac; written for the Windows PC)
+
+Resume notes for the next agent. Repo: `HeeyunCho/mcp-teams`. On the Mac the checkout is `~/orca/mcp-teams` (git; scn is not used here). `origin/main` = `4d314d7` (0.3.96, extension 1.1.1) plus this docs PR. On the Mac only `main` is checked out; no other worktrees, and no open PR from this session.
+
+### Starting on the Windows PC (office)
+
+The PC's live install is `C:\Orca_Project\mcp-teams` (see "This Windows PC" below). It was last rebuilt on 0.3.80 (2026-11-18), so it is 16 releases behind and its extension is 1.0.0.
+
+1. `git pull` in `C:\Orca_Project\mcp-teams` (expect `main` at this docs PR's merge or later), then `npm ci` and `npm run build`.
+2. `node dist/index.js reload-extension`, then check `get_version`: server 0.3.96, extension **1.1.1**. Extension 1.1.0 (#223) dropped the `tabs` permission and narrowed the host permissions, so Chrome or Edge may ask the user to approve the change. If reads fail after the reload, open a Teams tab and sign in again.
+3. Running servers keep their old build until each session fully restarts (`/mcp` → Reconnect didn't replace a process on 2026-11-12). Restart the hub's session last.
+4. Then do item 2 of "Open work" (the extension 1.1.1 live check) here, in Chrome and Edge.
+
+Mac-only notes in this section that don't carry over:
+- `lockf` (the shared test lock) is macOS-only. On Windows, run full suites one at a time instead.
+- The Node 20 run: `npx -y -p node@20 -c 'node --version && npm test'` should work in Git Bash. If it doesn't, use an unpacked Node 20 zip checked against `SHASUMS256.txt` (see "This Windows PC").
+- jq on Git Bash rejects `\[` inside `test()`; pipe to `grep`.
 
 ### What happened (2026-11-22)
 
@@ -20,24 +51,26 @@ Resume notes for the next agent. Repo: `HeeyunCho/mcp-teams`, checkout `~/orca/m
 | 0.3.92 (extension stays 1.1.0) | `93c2734` | #248 (`afcb3fe`) | #246 | Test only: a meeting chat that reaches 2,000 messages on page 8 of a 20-page read gets "newest 8 pages" in the cut-short note. The code was already right; reporting `maxPages` instead of `read.pages` makes it fail |
 | 0.3.93 (extension stays 1.1.0) | `c04344d` | #251 (`c30c39f`) | #250 | Test only: nativeHost's "#216: still refuses an id that isn't trusted…" is an `it.each` over the three origins, each waiting for the host's exit, not a welcome. The wait that gave up was `host()`'s 8 s welcome wait (`test/helpers/nativeHost.ts:230`, "timed out waiting for welcome from the host"): a refused host only exits, and under load its start took about 8 s. Reproduced with a preload that slows only the host's start |
 | 0.3.94 (extension **1.1.1**) | `c2e67a1` | #249 (`bd7df06`) | #239 | Option B: the repo manifest (the sideloaded copy, which `setup` installs) keeps `api_traffic`'s 13 host patterns; `webStoreManifest()` in `scripts/package-extension.mjs` writes the web store zip with only the five `EXTENSION_HOSTS` (now in `extension/teams.js`) and no `key`, and throws `Missing from manifest.json host_permissions: …` if one of the five is missing. The `api_traffic` wording (`src/sessionNote.ts`, `src/tools.ts`, the tool snapshot) and README's Security notes say which copy records. New GLOSSARY entry "Sideloaded copy". Two fresh-subagent reviews: the first found README's "five hosts only" wrong for setup's copy, fixed in `6654991`; the second said ready |
-| 0.3.95 (extension stays 1.1.1) | `1d131ac` | #252 (`819760f`) | #245 (items 1, 2, 4) | No behaviour change: `normalizeOrigin` (`src/extension.ts`) replaces the four trailing-slash copies; the sideloaded origin string is `SIDELOADED_ORIGIN` (no `UNPACKED_EXTENSION_ORIGIN` alias) and the bridge's regex `ANY_EXTENSION_ORIGIN`; `store` → `webStore`, and the tests' `WEB_STORE_ID`/`WEB_STORE_ORIGIN`. It says "Part of #245", so #245 stays open (item 3 is #253) |
+| 0.3.95 (extension stays 1.1.1) | `1d131ac` | #252 (`819760f`) | #245 (items 1, 2, 4) | No behaviour change: `normalizeOrigin` (`src/extension.ts`) replaces the four trailing-slash copies; the sideloaded origin string is `SIDELOADED_ORIGIN` (no `UNPACKED_EXTENSION_ORIGIN` alias) and the bridge's regex `ANY_EXTENSION_ORIGIN`; `store` → `webStore`, and the tests' `WEB_STORE_ID`/`WEB_STORE_ORIGIN`. It says "Part of #245"; #245 was then closed by hand (item 3 is #253) |
+| 0.3.96 (extension stays 1.1.1) | `4d314d7` | #257 (`0a767c6`) | #210 | Test only: nativeHost's "#123: refuses a caller other than our extension" and "#123: with nativeHost off" start the host with `host(…, false)` and wait for its exit, as #251 did, not for `host()`'s 8 s welcome. With a preload slowing only the hub's start by 9 s, the old form failed at about 8 s and the new one passed 3/3. Both full runs passed with no flakes. Trade-off: a host that hangs instead of exiting now fails at the 30 s test timeout with a generic message |
 
-Docs only (no release): #238, #240, #244, #247 and #254, the earlier resume notes.
+Docs only (no release): #238, #240, #244, #247, #254 and #255, the earlier resume notes, and this one.
 
 **Issues opened** (all `ready-for-agent`, each linked as a sub-issue with `gh api …/sub_issues`):
 - **#239** (sub-issue of #218): option B for `api_traffic`'s hosts. Keep them in the repo manifest, drop them only in the web store zip (`scripts/package-extension.mjs`), and fix the stale `api_traffic` wording at `src/sessionNote.ts:71` and `src/tools.ts:253`. Unblocked now that #223 is merged.
 - **#241** (sub-issue of #179, also `performance`): a search of one named meeting has no request budget, so many transcripts behind 429 waits can pass the tool's 300 s timeout (`src/tools.ts:413`) and lose every match. Brief: stop by the request's `deadline` and return partial matches with a note of how many transcripts weren't searched.
 - **#242** (sub-issue of #230): #232's leftovers. Back off repeated 1012 refusals (first retry stays quick, reuse #175's backoff); `close()` should close connections still at their challenge (`src/bridge.ts:1952` vs `stopServing` at `:1296`); decide on the optional peer-side check (drop a hub that welcomed with `extension: null` and turns out to be a peer), and record why if not.
-- **#245** (sub-issue of #216): #224's leftovers. One trailing-slash helper for the four copies (`src/extension.ts:51`, `src/bridge.ts:784`, `:1113`, `src/hub.ts:66`); separate names for the two `EXTENSION_ORIGIN`s (the string at `src/extension.ts:34`, the regex at `src/bridge.ts:134`); "two copies" grouped by profile, not browser; "store" → "web store" in `browsersWithTwoCopies`' parameter and the tests' `STORE_ID`/`STORE_ORIGIN` (`hubSocket.test.ts:28-29`, `extension.test.ts:147`).
+- **#245** (sub-issue of #216, **closed** 2026-11-23 with a comment: items 1, 2 and 4 landed in #252, item 3 moved to #253): #224's leftovers. One trailing-slash helper for the four copies (`src/extension.ts:51`, `src/bridge.ts:784`, `:1113`, `src/hub.ts:66`); separate names for the two `EXTENSION_ORIGIN`s (the string at `src/extension.ts:34`, the regex at `src/bridge.ts:134`); "two copies" grouped by profile, not browser; "store" → "web store" in `browsersWithTwoCopies`' parameter and the tests' `STORE_ID`/`STORE_ORIGIN` (`hubSocket.test.ts:28-29`, `extension.test.ts:147`).
 - **#246** (sub-issue of #179): a test that a meeting chat cut at 2,000 messages (page 8 of a 20-page read) gets "newest 8 pages" in the cut-short note. `readSessions` (`extension/background.js:1343`) stops at 2,000 messages or the page cap; the existing tests (`meetings.test.ts:362`, `:446`) cover only the cap. Done by #248.
 - **#250** (sub-issue of #210): the nativeHost "#216" refusal load flake. Done by #251.
 - **#253** (sub-issue of #216): #245's item 3. The server can't group "two copies" by profile: each copy's `instance` UUID lives in its own `chrome.storage.local` (`extension/background.js:2347-2355`), so two copies in one profile already differ in it. The brief: find a per-profile value both copies can read (e.g. a hash of the Teams account the worker keys its caches by), send it hashed as an optional hello field (`:2417`, `:2498`), group by it in `browsersWithTwoCopies`, keep per-browser grouping for older extensions; or, if none works, reword the note.
+- **#256** (sub-issue of #239): #249's review nits that could mislead. README's Security notes (`README.md:184`): say "the five hosts' permissions" instead of the ambiguous "those host permissions", and add that the sideloaded copy also keeps `api_traffic` entries for the five hosts while recording. The `Missing from manifest.json host_permissions: …` error (`scripts/package-extension.mjs:125`) should say how to fix it, with a test.
 
 **#223 (#218):** merged as `c1be71c` → 0.3.91 (extension 1.1.0), after `origin/main` was merged into it twice (no rebase; the README conflict kept #223's "Two development aids are off…" paragraph, then #224's trusted-ids paragraph). `feat/218-narrow-host-permissions` is deleted on origin.
 
-**#252 (#245 items 1, 2 and 4):** went **CONFLICTING** when #251 landed (not #249): the only conflict was `test/system/nativeHost.test.ts`, resolved by keeping #251's `it.each` refusal tests with `SIDELOADED_ORIGIN`. A worktree subagent merged `origin/main` in (no rebase) at `6804ec0`; #249's changes merged cleanly, and its `_storeHosts`/`storeRest` in `packageExtension.test.ts` became `_webStoreHosts`/`webStoreRest`. Both full runs passed with no flakes. Merged as `819760f` → 0.3.95. **#245 stays open** for its item 3 (now #253): close it, or let #253's PR close it.
+**#252 (#245 items 1, 2 and 4):** went **CONFLICTING** when #251 landed (not #249): the only conflict was `test/system/nativeHost.test.ts`, resolved by keeping #251's `it.each` refusal tests with `SIDELOADED_ORIGIN`. A worktree subagent merged `origin/main` in (no rebase) at `6804ec0`; #249's changes merged cleanly, and its `_storeHosts`/`storeRest` in `packageExtension.test.ts` became `_webStoreHosts`/`webStoreRest`. Both full runs passed with no flakes. Merged as `819760f` → 0.3.95. #245 was closed by hand afterwards; its item 3 is #253.
 
-**Worktrees removed** (all with their merged branches): the Orca worktree `fix-149-keepalive-drop-logs` (at the user's request, through Orca), `.claude/worktrees/fix-178-cache-bytes`, `pr226-rotating`, `agent-a8002e5d1f0dfcde0`, and #243's subagent worktree. `fix/178-transcript-cache-bytes`, `test/230-late-trusted-hello` `feat/218-narrow-host-permissions`, `test/246-chat-cut-2000`, `test/250-native-refusal-flake`, `fix/239-web-store-traffic-hosts` and `refactor/245-origin-helpers` are deleted on origin, and their subagent worktrees removed.
+**Worktrees removed** (all with their merged branches): the Orca worktree `fix-149-keepalive-drop-logs` (at the user's request, through Orca), `.claude/worktrees/fix-178-cache-bytes`, `pr226-rotating`, `agent-a8002e5d1f0dfcde0`, and #243's subagent worktree. `fix/178-transcript-cache-bytes`, `test/230-late-trusted-hello` `feat/218-narrow-host-permissions`, `test/246-chat-cut-2000`, `test/250-native-refusal-flake`, `fix/239-web-store-traffic-hosts`, `refactor/245-origin-helpers` and `test/210-native-exit-waits` are deleted on origin, and their subagent worktrees removed.
 
 **Flakes seen** (none in the code under change; all passed alone):
 - CI on #238: `diagnose.test.ts` "expected 299 to be ≥ 300". `gh run rerun <id> --failed` passed.
@@ -47,13 +80,13 @@ Docs only (no release): #238, #240, #244, #247 and #254, the earlier resume note
 
 ### Open work, in priority order
 
-1. **#245:** still open after #252 ("Part of #245"); its item 3 is #253. Close #245 by hand, or have #253's PR say "Fixes #245" too.
-2. **Extension 1.1.1 live check (the user's):** reload the sideloaded copy in Chrome and Edge; check sign-in, a read, and that `api_traffic` records. Build the web store zip (`node scripts/package-extension.mjs`) and check its manifest has the five hosts and no `key`.
-3. **#241, #242, #253:** `ready-for-agent`.
+1. **Windows PC catch-up:** done on 2026-11-23 (see "Resume here" at the top).
+2. **Extension 1.1.1 live check (the user's):** reload the sideloaded copy in Chrome and Edge, then check sign-in, a read, and that `api_traffic` records. Build the web store zip (`node scripts/package-extension.mjs`) and check its manifest has the five hosts and no `key`.
+3. **#241, #242, #253, #256:** `ready-for-agent`. #256 is small (docs plus one error message and its test). #253 may end as a reworded note if no per-profile value exists.
 4. **#221** (outside contributor, `fix/epipe-client-gone`, last updated 2026-11-17): still open and unreviewed. #222 already fixed #215's EPIPE loop, so check whether anything in it is still needed before reviewing.
-5. **#249 review nits** (not filed): "those host permissions" in README's Security notes is ambiguous now that two host sets are named; the missing-host error doesn't say how to fix it; README could add that the sideloaded copy also keeps `api_traffic` entries while recording; `SHIPPED_HOSTS`/`trafficHosts` names; `TEAMS_URLS`/`TAB_URLS` in `background.js` are hand-written subsets of `EXTENSION_HOSTS`. #251's: two other nativeHost tests ("#123: refuses a caller…", "nativeHost off") still go through the 8 s welcome wait.
+5. **#249 nits not filed** (judgement calls): the `SHIPPED_HOSTS`/`trafficHosts` names; `TEAMS_URLS`/`TAB_URLS` in `background.js` are hand-written subsets of `EXTENSION_HOSTS`. (The three that could mislead are #256; #251's two welcome-wait tests are done by #257.)
 6. **#237 judgement calls** (none filed): fixture GUIDs not in the `00000000-` form; the Stream fixture duplicated in the unit and integration tests; the "first `spokenLanguageTag`" rule and the kept-field list in two places (`slimTranscript` and `background.js`); `let language = false` would read better as `languageKept`.
-7. **Older work:** the 2026-11-18 and 2026-11-17 sections below (#173 readings, the `ready-for-agent` lanes, items waiting on the user).
+7. **Older work:** the 2026-11-18 and 2026-11-17 sections below (#173 readings, the `ready-for-agent` lanes, items waiting on the user, #25's roadmap, which doesn't record 0.3.81 onwards).
 
 ### Rules learned in this session
 
@@ -90,11 +123,11 @@ The user reported orphaned MCP server processes slowing the Mac when several Cla
 
 ### Suggested skills
 
-- `code-review` for #221 and the PRs from #241, #242 and #253.
-- `tdd` for #241, #242 and #253.
+- `code-review` for #221 and the PRs from #241, #242, #253 and #256.
+- `tdd` for #241, #242, #253 and #256.
 - `diagnosing-bugs` if a flake shows up that isn't in the known list above.
 - `resolving-merge-conflicts` if an open PR goes CONFLICTING after a neighbour merges.
-- `domain-modeling` if #224's "sideloaded copy" needs a glossary term (the review noted none exists).
+- `domain-modeling` if a new term comes up ("Sideloaded copy" is in GLOSSARY.md since #249).
 
 ## Earlier handoff: mcp-teams after 0.3.74–0.3.81 (#182, #170, #180, #149, #193, #172, #219 and #230), updated 2026-11-18 on the Windows PC
 
