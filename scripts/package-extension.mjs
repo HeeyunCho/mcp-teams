@@ -122,7 +122,7 @@ export function webStoreManifest(repoManifest) {
   const { key: _key, ...manifest } = repoManifest;
   const hosts = manifest.host_permissions ?? [];
   const missing = EXTENSION_HOSTS.filter((h) => !hosts.includes(h));
-  if (missing.length) throw new Error(`Missing from manifest.json host_permissions: ${missing.join(", ")}`);
+  if (missing.length) throw new Error(`Missing from manifest.json host_permissions: ${missing.join(", ")}. Add them back to extension/manifest.json's host_permissions (EXTENSION_HOSTS in extension/teams.js lists the five the web store zip keeps).`);
   return { ...manifest, host_permissions: hosts.filter((h) => EXTENSION_HOSTS.includes(h)) };
 }
 
