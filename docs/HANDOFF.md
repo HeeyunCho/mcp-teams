@@ -1,6 +1,23 @@
-# Handoff: mcp-teams after 0.3.85–0.3.96 (#228, #227, #226, #224, #237, #243, #223, #248, #251, #249, #252, #257), updated 2026-11-23 on the Mac for the Windows PC
+# Handoff: mcp-teams after 0.3.85–0.3.96 (#228, #227, #226, #224, #237, #243, #223, #248, #251, #249, #252, #257), updated 2026-11-23 on the Windows PC
 
-## Resume here (session of 2026-11-22/23, Mac; next session on the Windows PC)
+## Resume here (session of 2026-11-23, Windows PC)
+
+Repo: `HeeyunCho/mcp-teams`, checkout `C:\Orca_Project\mcp-teams`. It is the live install: every session's `teams` server runs its `dist/index.js`. That checkout's `main` = `4d314d7` (0.3.96, extension 1.1.1). No code changed in this session. Steps 1–3 of "Starting on the Windows PC" below are done. Step 4, the extension 1.1.1 live check, is done only for Chrome sign-in.
+
+### The 0.3.81 → 0.3.96 update on this PC
+
+- `git pull --ff-only` (92 commits), `npm install` (0 vulnerabilities), `npm run build`: `dist/build.json` 0.3.96 `cbe2a5764d66`.
+- **`reload_extension` alone left the extension at 1.0.0.** Chrome loads the installed copy `~/.mcp-teams/extension`, not the repo's `extension/` (1.1.1 on disk). Only a 0.3.96 server copies the new extension there at start (`syncExtension`, `src/index.ts:83` and `:109`). All servers still ran 0.3.80, so the reload reloaded 1.0.0. Once the first restarted session started a 0.3.96 server, the copy was synced and the extension came up as 1.1.1. So step 2 below only works after one session runs the new build. After an update that changes the extension: restart one session first, then reload the extension (or let the new hub's reconnect do it).
+- **Hand-over to the 0.3.96 hub:** the 0.3.80 hub (pid 100724) logged `handover v=0.3.80 role=hub to=0.3.96` at 06:45:13Z. The 0.3.96 server (pid 272828) got `hub-closed code=1012`, took the port about 0.14 s later and logged `extension-connected ext=1.1.1`. 100724 joined it as a peer. Later, as sessions were restarted, two 0.3.96 hubs ended with their sessions (`stdin-closed`, peers saw `hub-closed code=1005`). Each time a peer took over within about 0.2 s, and every peer reconnected within about 0.5 s. No peer was left on an ex-hub (netstat matched the `role` lines). The hub at the end was pid 119256, with seven 0.3.96 peers. No server older than 0.3.96 was left.
+- `get_version` on this session: server 0.3.96, `restartNeeded: false`, extension 1.1.1, `extensionSupported: true`, no `missingFeatures`, all four services captured.
+- **`npm test` on `main` at 0.3.96 passed:** 86/86 files, 1,076 tests passed, 22 skipped, about 783 s (Node v26.3.0, `--fileParallelism=false`). It ran while the live servers were up, and it didn't disturb them.
+- **#173:** no comment. Since the update, the only unreadable status line was the 0.3.80 hub's `kind=closed` while the extension reloaded at the hand-over, not a timeout. The reads after it took 17–87 ms.
+
+### Next
+
+Item 2 of "Open work" below is left: Edge, a read, `api_traffic` recording, and the web store zip. Then item 3 onwards.
+
+## Session of 2026-11-22/23 (Mac; written for the Windows PC)
 
 Resume notes for the next agent. Repo: `HeeyunCho/mcp-teams`. On the Mac the checkout is `~/orca/mcp-teams` (git; scn is not used here). `origin/main` = `4d314d7` (0.3.96, extension 1.1.1) plus this docs PR. On the Mac only `main` is checked out; no other worktrees, and no open PR from this session.
 
@@ -63,7 +80,7 @@ Docs only (no release): #238, #240, #244, #247, #254 and #255, the earlier resum
 
 ### Open work, in priority order
 
-1. **Windows PC catch-up:** see "Starting on the Windows PC" above.
+1. **Windows PC catch-up:** done on 2026-11-23 (see "Resume here" at the top).
 2. **Extension 1.1.1 live check (the user's):** reload the sideloaded copy in Chrome and Edge, then check sign-in, a read, and that `api_traffic` records. Build the web store zip (`node scripts/package-extension.mjs`) and check its manifest has the five hosts and no `key`.
 3. **#241, #242, #253, #256:** `ready-for-agent`. #256 is small (docs plus one error message and its test). #253 may end as a reworded note if no per-profile value exists.
 4. **#221** (outside contributor, `fix/epipe-client-gone`, last updated 2026-11-17): still open and unreviewed. #222 already fixed #215's EPIPE loop, so check whether anything in it is still needed before reviewing.
