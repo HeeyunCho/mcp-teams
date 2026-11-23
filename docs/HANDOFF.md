@@ -2,7 +2,7 @@
 
 ## Resume here (session of 2026-11-23, Windows PC)
 
-Repo: `HeeyunCho/mcp-teams`, checkout `C:\Orca_Project\mcp-teams`. It is the live install: every session's `teams` server runs its `dist/index.js`. That checkout's `main` = `4d314d7` (0.3.96, extension 1.1.1). No code changed in this session. Steps 1–3 of "Starting on the Windows PC" below are done. Step 4, the extension 1.1.1 live check, is done only for Chrome sign-in.
+Repo: `HeeyunCho/mcp-teams`, checkout `C:\Orca_Project\mcp-teams`. It is the live install: every session's `teams` server runs its `dist/index.js`. `main` = `origin/main` = `0d52bda` (merge of #258; last release 0.3.96 `4d314d7`, extension 1.1.1). The only worktree is the main checkout, and no PR from this session is open. No code changed in this session. Steps 1–3 of "Starting on the Windows PC" below are done. Step 4, the extension 1.1.1 live check, is done for Chrome; Edge is left.
 
 ### The 0.3.81 → 0.3.96 update on this PC
 
@@ -13,9 +13,33 @@ Repo: `HeeyunCho/mcp-teams`, checkout `C:\Orca_Project\mcp-teams`. It is the liv
 - **`npm test` on `main` at 0.3.96 passed:** 86/86 files, 1,076 tests passed, 22 skipped, about 783 s (Node v26.3.0, `--fileParallelism=false`). It ran while the live servers were up, and it didn't disturb them.
 - **#173:** no comment. Since the update, the only unreadable status line was the 0.3.80 hub's `kind=closed` while the extension reloaded at the hand-over, not a timeout. The reads after it took 17–87 ms.
 
+### After #258 was written (07:10–07:25Z)
+
+- **#258 merged** as `0d52bda` (merge commit, `--match-head-commit`, CI green, `closingIssuesReferences` empty). The branch `docs/handoff-2026-11-23` is deleted locally and on origin. Its scratchpad worktree is removed.
+- **Open-work item 2, done for Chrome:**
+  - One read works on extension 1.1.1: `list_chats` returned 79 chats, and `read_messages` on a 1:1 chat returned 2 messages.
+  - `api_traffic` recorded that read's chatsvc request (GET `…/conversations/…/messages`, 200), plus csa and config requests. Recording is off again and cleared.
+  - The web store zip from `node scripts/package-extension.mjs`, built from a `git archive` copy outside the repo: 14 files, manifest 1.1.1, no `key`, `host_permissions` exactly the five `EXTENSION_HOSTS` from `extension/teams.js`.
+- **Live check at 07:22Z:** hub pid 119256, eight servers, all 0.3.96. The hub's status reads took ms=185 and ms=84, with no timeout. Two peer `loop-delay` lines showed stalls of about 1.3 s and 1.5 s on an idle loop, the same pattern #173 has recorded since 2026-11-18. No new #173 comment.
+- **Not explained:** another session's server (pid 48756) logged 5 `read_messages` failures with `ok=no kind=other` at 07:12:16–22Z, just before the services were captured again at 07:12Z. That session then ended. `server.log` doesn't give the cause. Reads from this session worked afterwards. Watch for it again; it isn't #173 material.
+
 ### Next
 
-Item 2 of "Open work" below is left: Edge, a read, `api_traffic` recording, and the web store zip. Then item 3 onwards.
+1. **Edge** (rest of open-work item 2): load the sideloaded copy from `~/.mcp-teams/extension` in Edge, then check sign-in, one read and `api_traffic` there. The web store copy can only be tried after a web store upload.
+2. Then open-work item 3 onwards below: #241, #242, #253, #256 (`ready-for-agent`), and #221 (outside PR, check whether #222 already covers it).
+
+### Rules learned in this session
+
+- After an update that changes the extension, `reload_extension` loads whatever is in `~/.mcp-teams/extension`. Only a new server copies the new extension there when it starts. So restart one session on the new build first, then reload.
+- Before reusing a branch name for a handoff PR, check `gh pr list --head <branch>`. The Mac session had already opened #258 on `docs/handoff-2026-11-23`. Add a commit to that PR, don't force-push it.
+- `npm test` (about 13 min) can run in this checkout while the live servers are up. It didn't disturb them.
+
+### Suggested skills
+
+- `diagnosing-bugs`: if the `read_messages` `kind=other` failures come back.
+- `tdd`: for #241, #242, #253 and #256.
+- `code-review`: for #221 and for the PRs from those issues (a fresh reviewer, not the author).
+- `resolving-merge-conflicts`: if an open PR goes CONFLICTING after a neighbour merges.
 
 ## Session of 2026-11-22/23 (Mac; written for the Windows PC)
 
