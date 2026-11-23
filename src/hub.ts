@@ -84,20 +84,27 @@ const socketPath = hubSocketPath();
 const port = new NativePort(process.stdout, traffic);
 port.on("error", () => {}); // stdout gone: Chrome closed the port, stdin ends too
 
-const isHello = (frame: Buffer) => {
-  if (frame.length > 64 * 1024) return false;
+/** A small frame's message type (hello, profile, …); undefined for a large frame or one that isn't JSON. */
+const typeOf = (frame: Buffer): unknown => {
+  if (frame.length > 64 * 1024) return undefined;
   try {
-    return JSON.parse(frame.toString("utf8"))?.type === "hello";
+    return JSON.parse(frame.toString("utf8"))?.type;
   } catch {
-    return false;
+    return undefined;
   }
 };
+const isHello = (frame: Buffer) => typeOf(frame) === "hello";
 
 /**
  * The extension's last hello, sent again when this native host moves (relaying host → serving host,
  * or relaying to another serving host).
  */
 let hello: Buffer | undefined;
+/**
+ * The extension's last {type:"profile"} since that hello (#253), sent again right behind it: the
+ * hello was sent before the copy saw its Teams account, so it names none or an older one.
+ */
+let profile: Buffer | undefined;
 /** Frames waiting until this native host knows whether it is the serving host or a relaying host. */
 let queue: Buffer[] = [];
 let sink: (frame: Buffer) => void = (f) => queue.push(f);
@@ -108,7 +115,9 @@ const MAX_FROM_EXTENSION_BYTES = 64 * 1024 * 1024;
 
 const decoder = new FrameDecoder(
   (frame) => {
-    if (isHello(frame)) hello = frame;
+    const type = typeOf(frame);
+    if (type === "hello") [hello, profile] = [frame, undefined];
+    else if (type === "profile") profile = frame;
     sink(frame);
   },
   MAX_FROM_EXTENSION_BYTES,
@@ -315,8 +324,9 @@ void (async () => {
       process.exit(1);
     }
     // The serving host went away: take the hub socket over (or relay to the native host that did),
-    // with only the hello sent again; requests that were on their way there fail at their callers.
-    replay = hello ? [hello] : [];
+    // with only the hello (and the profile named since, #253) sent again; requests that were on their
+    // way there fail at their callers.
+    replay = hello ? [hello, ...(profile ? [profile] : [])] : [];
     await new Promise((r) => setTimeout(r, 50 + Math.random() * 250));
   }
 })();

@@ -61,8 +61,13 @@ export interface ExtensionInfo {
   browser?: string;
   /** chrome-extension://<id> it connected from (unset for connections without an Origin). */
   origin?: string;
-  /** Stays the same for one browser profile across reconnects. */
+  /** Stays the same for one copy of the extension across reconnects (each copy keeps its own, #253). */
   instance?: string;
+  /**
+   * The copy's profile value (#253, see docs/extension-ids.md): from hello or a later
+   * {type:"profile"}, kept only in a keyed hash's shape (isProfile). None from extensions before #253.
+   */
+  profile?: string;
   /** What it declared in hello (#115); no features for an extension from before #115. Hubs before #115 send none to peers. */
   capabilities?: Capabilities;
   /**
@@ -95,6 +100,13 @@ export const SERVER_FEATURES: readonly string[] = Object.freeze(["checksSend"]);
 /** The string features of a message's capabilities; none for a side too old to send them. */
 const featuresOf = (msg: any): string[] =>
   Array.isArray(msg?.capabilities?.features) ? msg.capabilities.features.filter((f: unknown): f is string => typeof f === "string") : [];
+
+/**
+ * Whether a hello's or {type:"profile"}'s value has the shape of the extension's keyed hash (#253):
+ * HMAC-SHA-256 in base64url without padding, 43 characters. Anything else (an oid or email in clear,
+ * a longer string) is left out.
+ */
+const isProfile = (v: unknown): v is string => typeof v === "string" && /^[\w-]{43}$/.test(v);
 
 /** What a hello or welcome declares; no features (and no known limit) for a side too old to send any. */
 function capabilitiesOf(msg: any): Capabilities {
@@ -1119,6 +1131,7 @@ export class ExtensionBridge {
       browser: msg.browser,
       ...(origin ? { origin } : {}),
       ...(typeof msg.instance === "string" ? { instance: msg.instance } : {}),
+      ...(isProfile(msg.profile) ? { profile: msg.profile } : {}),
       capabilities: capabilitiesOf(msg),
       transport,
     };
@@ -1307,6 +1320,14 @@ export class ExtensionBridge {
   }
 
   private onExtensionMessage(ws: BridgeSocket, msg: any) {
+    // #253: the copy saw its profile's Teams account (or another one) after its welcome. Servers
+    // before #253 drop it below (no id), as they drop anything without one.
+    if (msg.type === "profile") {
+      const info = this.sockets.get(ws);
+      if (!info || !isProfile(msg.profile) || info.profile === msg.profile) return;
+      info.profile = msg.profile;
+      return this.updateExtensions();
+    }
     if (typeof msg.id !== "string") return;
     if (msg.type === "response") return this.settle(msg);
     // A queued call waiting out a throttle (35): {type:"gate-wait"} gives its turn back to the

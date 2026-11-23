@@ -6,7 +6,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { WebSocketServer, type WebSocket } from "ws";
 import { proof } from "../../src/bridge.js";
 import { toExtensionFrames } from "../../src/native.js";
-import { createFakeChrome, loadWorker, NativeWebSocket, openedSockets, stopWorkers, type FakeChrome, type FakeNativeHost } from "../helpers/fakeChrome.js";
+import { createFakeChrome, loadWorker, ME_OID, NativeWebSocket, openedSockets, stopWorkers, type FakeChrome, type FakeNativeHost } from "../helpers/fakeChrome.js";
+import { keyedProfile } from "../helpers/profile.js";
 import { until } from "../helpers/timing.js";
 
 const TOKEN = "worker-native-token";
@@ -133,6 +134,8 @@ describe("#123: the worker connects to the native host first, and falls back to 
     const host = f.nativePorts[0];
     const hello = host.received.find((m) => m.type === "hello");
     expect(hello).toMatchObject({ nonce: expect.any(String), browser: "Chrome", capabilities: { maxMessageBytes: 256 * 1024 * 1024 } });
+    // #253: its profile too, as over TCP: the Teams account it has seen, keyed with the pairing token.
+    expect(hello.profile).toBe(keyedProfile(TOKEN, ME_OID));
     // Only one hello: the host's challenge needs no answer on the native port.
     expect(host.received.filter((m) => m.type === "hello")).toHaveLength(1);
     host.send({ type: "request", id: "r1", method: "noSuchMethod", params: {}, timeoutMs: 5_000 });

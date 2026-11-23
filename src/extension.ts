@@ -59,18 +59,18 @@ export function isTrustedOrigin(origin: unknown, ids: ExtensionIds = EXTENSION_I
 
 /**
  * The browsers where the sideloaded copy and a web store copy (another trusted id) are both connected
- * (#216). Both are served (they have different instances, so they look like two browsers), but one
- * browser needs only one: get_version and setup suggest removing the sideloaded one. Copies in
- * different browsers, or in two profiles of the same browser with the same id, aren't counted.
- * Two profiles of one browser each with one of the two copies are counted too (#245): nothing on a
- * connection names its profile. `instance` is kept in each copy's own chrome.storage.local, so two
- * copies in one profile already differ in it, as two profiles do.
+ * in one profile (#216): one profile needs only one, so get_version and setup suggest removing the
+ * sideloaded one. Copies in different browsers aren't counted. Grouped by `profile` when both copies
+ * of a pair name one, else by browser (#253; the rule and its limits: docs/extension-ids.md, "Two
+ * copies in one browser").
  */
-export function browsersWithTwoCopies(extensions: readonly { origin?: string; browser?: string }[], ids: ExtensionIds = EXTENSION_IDS): string[] {
-  const has = (browser: string | undefined, webStore: boolean) =>
-    extensions.some((e) => e.browser === browser && isTrustedOrigin(e.origin, ids) && (e.origin !== SIDELOADED_ORIGIN) === webStore);
+export function browsersWithTwoCopies(extensions: readonly { origin?: string; browser?: string; profile?: string }[], ids: ExtensionIds = EXTENSION_IDS): string[] {
+  const ours = extensions.filter((e) => isTrustedOrigin(e.origin, ids));
+  const sideloaded = ours.filter((e) => e.origin === SIDELOADED_ORIGIN);
+  const webStore = ours.filter((e) => e.origin !== SIDELOADED_ORIGIN);
+  const mayShareProfile = (a: { profile?: string }, b: { profile?: string }) => !a.profile || !b.profile || a.profile === b.profile;
   const browsers = new Set(extensions.map((e) => e.browser).filter((b): b is string => !!b));
-  return [...browsers].filter((b) => has(b, false) && has(b, true));
+  return [...browsers].filter((b) => sideloaded.some((s) => s.browser === b && webStore.some((w) => w.browser === b && mayShareProfile(s, w))));
 }
 
 /** What get_version and setup say about browsersWithTwoCopies (#216); null when there are none. */

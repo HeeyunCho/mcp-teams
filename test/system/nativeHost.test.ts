@@ -13,6 +13,7 @@ import { SIDELOADED_ORIGIN, trustedOrigins } from "../../src/extension.js";
 import { registerTools } from "../../src/tools.js";
 import { fakeExtension, TOKEN } from "../helpers/bridgeHarness.js";
 import { nativeHarness, REAL_HEARTBEAT } from "../helpers/nativeHost.js";
+import { keyedProfile } from "../helpers/profile.js";
 import { stall, until } from "../helpers/timing.js";
 
 let h: Awaited<ReturnType<typeof nativeHarness>> | undefined;
@@ -232,6 +233,22 @@ describe("#123: the native host", { timeout: 30_000 }, () => {
     expect(edge.exitCode).toBeUndefined();
     // #149: the relaying host logged its relay closing, with the code, before it took over.
     expect(h.logText()).toMatch(new RegExp(` pid=${edge.child.pid} relay-closed code=\\d+\n(.*\n)*.* pid=${edge.child.pid} host version=`));
+  });
+
+  it("#253: a relaying host passes its extension's profile on, and names it again to the hub it moves to", async () => {
+    h = await nativeHarness();
+    const PROFILE = keyedProfile(TOKEN, "00000000-0000-4000-8000-000000000001");
+    const chrome = await h.host({ browser: "Chrome", instance: "profile-1", env: REAL_HEARTBEAT });
+    const edge = await h.host({ browser: "Edge", instance: "profile-2", env: REAL_HEARTBEAT });
+    const server = await h.server();
+    await until(() => server.extensions.length === 2, 3_000, "both browsers");
+    // Edge's copy saw its Teams account after its welcome.
+    edge.send({ type: "profile", profile: PROFILE });
+    await until(() => server.extensions.find((e) => e.browser === "Edge")?.profile === PROFILE, 3_000, "Edge's profile, relayed");
+    await chrome.kill();
+    await until(() => server.connected && server.extensions.length === 1 && server.extension?.browser === "Edge", 8_000, "the server on the new host");
+    // The new hub got the hello again (sent before the profile was known) and the profile after it.
+    await until(() => server.extension?.profile === PROFILE, 3_000, "Edge's profile on the new hub");
   });
 
   // Another local user can create the Windows pipe while no host runs; the next host then relays to it.

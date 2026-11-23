@@ -43,7 +43,7 @@ describe("extension id", () => {
 function extension(
   origin: string,
   secret: string | null,
-  { instance, browser = "Chrome", onRequest }: { instance?: string; browser?: string; onRequest?: (ws: WebSocket, msg: any) => void } = {},
+  { instance, browser = "Chrome", profile, onRequest }: { instance?: string; browser?: string; profile?: unknown; onRequest?: (ws: WebSocket, msg: any) => void } = {},
 ) {
   const ws = new WebSocket(`ws://127.0.0.1:${PORT}`, { origin });
   const nonce = "n-" + Math.random();
@@ -52,7 +52,7 @@ function extension(
       const msg = JSON.parse(raw.toString());
       if (msg.type === "challenge") {
         const p = secret ? await pairingProof(secret, "client", msg.nonce) : undefined;
-        ws.send(JSON.stringify({ type: "hello", ...(secret ? { proof: p, nonce } : { token: null }), version: "0.15.0", browser, instance }));
+        ws.send(JSON.stringify({ type: "hello", ...(secret ? { proof: p, nonce } : { token: null }), version: "0.15.0", browser, instance, ...(profile === undefined ? {} : { profile }) }));
       } else if (msg.type === "welcome") resolve(msg);
       else if (msg.type === "request") onRequest?.(ws, msg);
     });
@@ -163,6 +163,26 @@ describe("two copies of the extension", () => {
     await until(() => bridge!.extensions.length === 3, 2_000, "all three listed");
     expect(webStore.ws.readyState).toBe(WebSocket.OPEN);
     for (const e of [sideloaded, webStore, again]) e.ws.close();
+  });
+
+  it("#253: records the profile a hello names, so two copies are grouped by it; only a keyed hash's shape is kept", async () => {
+    bridge = new TestBridge("secret", "0.15.0", { trustedExtensionIds });
+    await bridge.start();
+    // pairingProof's shape: HMAC-SHA-256, base64url without padding (43 characters).
+    const hashed = await pairingProof("secret", "profile", "00000000-0000-4000-8000-000000000001");
+    expect(hashed).toMatch(/^[\w-]{43}$/);
+    const sideloaded = extension(SIDELOADED_ORIGIN, "secret", { instance: "profile-a", profile: hashed });
+    await sideloaded.welcome;
+    const webStore = extension(WEB_STORE_ORIGIN, "secret", { instance: "profile-b", profile: "someone@contoso.example" });
+    await webStore.welcome;
+    // An oid in clear (a GUID) is no keyed hash: left out.
+    const clear = extension(WEB_STORE_ORIGIN, "secret", { instance: "profile-d", browser: "Edge", profile: "00000000-0000-4000-8000-000000000001" });
+    await clear.welcome;
+    const old = extension(WEB_STORE_ORIGIN, "secret", { instance: "profile-c", browser: "Edge" });
+    await old.welcome;
+    await until(() => bridge!.extensions.length === 4, 2_000, "all four listed");
+    expect(Object.fromEntries(bridge.extensions.map((e) => [e.instance, e.profile ?? null]))).toEqual({ "profile-a": hashed, "profile-b": null, "profile-c": null, "profile-d": null });
+    for (const e of [sideloaded, webStore, clear, old]) e.ws.close();
   });
 
   it("#216: still turns away an id that isn't trusted while a trusted copy is connected (4409)", async () => {
