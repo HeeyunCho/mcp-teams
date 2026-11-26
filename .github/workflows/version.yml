@@ -11,6 +11,7 @@ on:
     branches: [main]
     paths-ignore:
       - "**.md"
+      - "docs/images/**"
   # Run by hand to publish the version on main when its publish failed.
   workflow_dispatch:
 
