@@ -2,7 +2,7 @@
 
 ## Resume here (session of 2026-11-23, Windows PC)
 
-Repo: `HeeyunCho/mcp-teams`, checkout `C:\Orca_Project\mcp-teams`. It is the live install: every session's `teams` server runs its `dist/index.js`. `main` = `origin/main` = `8bb0638` (merge of #263; last release **0.3.98, extension 1.2.0**, `9c7f1e2`). The only worktree is the main checkout, and the only local branch is `main`. **There are no open PRs** in the repo.
+Repo: `HeeyunCho/mcp-teams`, checkout `C:\Orca_Project\mcp-teams`. It is the live install: every session's `teams` server runs its `dist/index.js`. `main` = `origin/main` = `c94edb6` (merge of #265 on 2026-11-26; last release still **0.3.98, extension 1.2.0**, `9c7f1e2`). See "2026-11-26" below for #264 and #265, and for the PRs that were still open.
 
 **The live install is built at 0.3.97, not 0.3.98.** It was built at `d80cb19`, and `npm run build` wasn't run after #262. All running servers were still 0.3.96 at the last check (12:02Z). See "Next" for the steps.
 
@@ -85,6 +85,18 @@ Steps 1–3 of "Starting on the Windows PC" below are done. Step 4, the extensio
   - #173's unticked checklist items all point at closed issues. Ticking them is the user's call; not done.
   - #142's latest automated report describes 0.3.80 running against 0.3.96 on disk, so it is stale.
 
+### 2026-11-26 (#264, #265)
+
+- **#264 merged** as `bc6e853`: the "End of the session" notes above.
+- **#265 merged** as `c94edb6`: the README now has pictures, in `docs/images/`:
+  - `send-flow.gif` (656 KB, 12.5 s) under the intro: ask → confirmation window → Send. It was made with HyperFrames around the real confirmation window; the chat panel and data are made up, and a caption says so.
+  - In Setup: `setup-terminal.png`, a first run of setup laid out from `src/setup.ts`'s own messages, not a capture of a real run, with a generic `C:\Users\you` path. Also `popup-connected.png` and `popup-waiting.png`.
+  - In "Sending always needs your click": `confirm-send.png`.
+  - The popup and confirmation PNGs are screenshots of the unchanged `extension/popup.html` and `confirm.html`, with `chrome.*` stubbed to return made-up data.
+- **`version.yml`** now ignores `docs/images/**` as well as `**.md`, so image-only README changes don't start a release.
+- **#265's merge commit carries `[skip ci]`**, because it changed `version.yml` itself and would otherwise have bumped and published 0.3.99 for a docs change. So there is **no 0.3.99**. The push-time secret scan was skipped for that one commit; it had passed on the PR.
+- **The image tooling was scratchpad-only in #265:** the Playwright capture script, the setup terminal page and the HyperFrames project were not committed. A follow-up PR on `chore/readme-images-script` adds them under `scripts/readme-images/` with `npm run readme-images`. Check whether it is still open.
+
 ### Next
 
 1. **Put 0.3.98 into use:**
@@ -112,6 +124,7 @@ Steps 1–3 of "Starting on the Windows PC" below are done. Step 4, the extensio
 - **Closing keywords:** check PR bodies, comments, issue edits and handoff diffs with ``grep -inE '\b(close[sd]?|fix(e[sd])?|resolve[sd]?)\b[*_`: ]*#[0-9]'``. Allowing `*`, `_` and backticks between the keyword and the issue number catches a bold label followed by an issue number. Only a PR meant to close its issue names it after "Fixes".
 - **Editing #25:** fetch the body from the checkout, edit it with a script, and run `gh issue edit` only behind `test $(wc -l < f) -gt 150 && test $(wc -c < f) -gt 38000`. The body is about 197 lines and 43 KB now.
 - **Subagent reports can be stale:** a read-only subagent read #25 before this session's edit landed. Recheck anything it says about a thing you changed meanwhile.
+- **Releases from docs:** every `docs:` commit bumps the patch version unless the push changes only `**.md` or `docs/images/**`. To keep a docs-only merge that touches anything else from releasing, put `[skip ci]` in the merge commit's subject (`gh pr merge --merge --subject "… [skip ci]"`). Merge only after the PR's own checks pass.
 
 ### Suggested skills
 
