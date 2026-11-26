@@ -215,6 +215,7 @@ node dist/index.js setup   # registers this copy (node dist/index.js) instead of
 npm test                   # builds, then runs unit, integration and system tests (see docs/testing.md)
 npm run probe -- status    # calls one extension method through the bridge (see scripts/probe.mjs)
 npm run package-extension  # the zip for the Chrome Web Store and Edge Add-ons (see docs/extension-ids.md)
+npm run readme-images      # rebuilds the screenshots and GIF in docs/images (see scripts/readme-images)
 ```
 
 Two development aids:

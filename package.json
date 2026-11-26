@@ -31,6 +31,7 @@
     "measure-memory": "npm run build && node scripts/measure-memory.mjs",
     "update": "node scripts/update.mjs",
     "package-extension": "node scripts/package-extension.mjs",
+    "readme-images": "node scripts/readme-images/build.mjs",
     "prepublishOnly": "npm test"
   },
   "engines": {
@@ -45,6 +46,7 @@
   "devDependencies": {
     "@types/node": "^26.6.4",
     "@types/ws": "^8.18.2",
+    "playwright": "1.57.0",
     "typescript": "^7.0.2",
     "vitest": "^5.0.3"
   }
