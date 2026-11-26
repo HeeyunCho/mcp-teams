@@ -4,6 +4,10 @@ An MCP server that lets AI assistants (Claude Code, Claude Desktop, Cursor and o
 
 It supports work and school (Microsoft 365) accounts. Personal Teams (teams.live.com) isn't supported.
 
+![You ask your AI app to reply in a Teams channel; mcp-teams reads the thread, then the extension's confirmation window shows the message, and it is posted only after you click Send](docs/images/send-flow.gif)
+
+*An illustration of the flow with made-up data; the confirmation window is the extension's real one.* To get started, see [Setup](#setup).
+
 ```
 AI app ────stdio(MCP)──► mcp-teams server ──ws://127.0.0.1:47393──► browser extension ──► Teams tab
                                               (loopback only; our      (runs Teams' own
@@ -56,6 +60,8 @@ Teams reports the call's length, not each person's time in it, so attendance lis
 ### Sending always needs your click
 
 The AI can only **request** a send. The extension then opens its own window showing where the message goes (for a new chat: who will be in it, and its title), the post it replies to and the message itself. The message is posted, and a new chat created, only if you click **Send** there. Closing the window, clicking *Don't send*, or waiting 5 minutes all mean nothing is posted.
+
+<img src="docs/images/confirm-send.png" width="480" alt="The confirmation window: the channel, the post it replies to, the message, and the Don't send and Send buttons">
 
 If the AI stops waiting (it cancels, times out or loses its connection) while the window is open, the window closes and nothing is posted. If you had already clicked *Send* but no answer came back, the AI is told the message may have been posted and to check the chat before sending again, so it doesn't post twice. If Teams accepted the message but its answer, or the time in it, can't be read, the send is still reported as sent, with `time: null` and a `timeNote` saying the time isn't confirmed.
 
@@ -145,7 +151,15 @@ npx mcp-teams setup
 - It opens the Extensions page of Chrome and/or Edge, and that folder. The one manual step is in the browser you use Teams in: turn on *Developer mode* and click *Load unpacked* on the folder.
 - It waits until the extension connects and Teams answers, then says *Ready*.
 
-Restart the AI apps it registered (in Claude Code: `/mcp`).
+A first run looks like this (which apps it lists depends on what you have installed):
+
+<img src="docs/images/setup-terminal.png" width="760" alt="npx mcp-teams setup: it lists the AI apps found, asks before registering, installs the extension, asks you to load it unpacked, then reports the extension connected, Teams reachable and Ready">
+
+Restart the AI apps it registered (in Claude Code: `/mcp`). Then ask one about your Teams chats, for example *"What did I miss in my chats today?"* or *"Summarize the last meeting's transcript"*.
+
+To check the connection at any time, click the mcp-teams icon in the browser's toolbar (pin it from the Extensions menu first). It says *Connected to MCP server* while an AI app runs mcp-teams, and *Waiting for mcp-teams* when none does:
+
+<img src="docs/images/popup-connected.png" width="300" alt="Extension popup: Connected to MCP server"> <img src="docs/images/popup-waiting.png" width="300" alt="Extension popup: Waiting for mcp-teams (start your AI client)">
 
 You don't need to keep Teams open for most tools. When no Teams tab is open, the extension opens one itself (pinned, in the background) and waits up to a minute for it to sign in. The exceptions are `list_teams` and `list_chats`, which fail at once with an error saying there is no Teams tab open. With several browsers connected, these two go to a browser that has a Teams tab open, if one has.
 
@@ -210,6 +224,6 @@ Two development aids:
 
 The server, the native host and setup trust a fixed list of extension ids: the sideloaded copy's (from the manifest's `key`) and, once the web stores have assigned them, the Chrome Web Store's and Edge Add-ons'. Adding a web store id is one line in `src/extension.ts`, then run setup again; see [docs/extension-ids.md](docs/extension-ids.md).
 
-Versions are bumped automatically. On every push to `main` (except Markdown-only changes), the **Version bump** GitHub Action runs the tests, then bumps `package.json` and `package-lock.json`, commits `chore(release): vX.Y.Z` and tags it. It bumps the extension (`extension/manifest.json`) on its own line only when files under `extension/` changed since its last `ext-vX.Y.Z` tag, by the same rules applied to the commits that changed it; the commit then says `chore(release): vX.Y.Z (extension A.B.C)` and both tags are pushed with it. While a version is below 1.0.0, a breaking change (`type!:` or a `BREAKING CHANGE:` footer) bumps the minor version and anything else, `feat:` included, the patch. From 1.0.0 on it's standard semver: breaking → major, `feat:` → minor, anything else → patch.
+Versions are bumped automatically. On every push to `main` (except ones that change only Markdown files and the README's images in `docs/images/`), the **Version bump** GitHub Action runs the tests, then bumps `package.json` and `package-lock.json`, commits `chore(release): vX.Y.Z` and tags it. It bumps the extension (`extension/manifest.json`) on its own line only when files under `extension/` changed since its last `ext-vX.Y.Z` tag, by the same rules applied to the commits that changed it; the commit then says `chore(release): vX.Y.Z (extension A.B.C)` and both tags are pushed with it. While a version is below 1.0.0, a breaking change (`type!:` or a `BREAKING CHANGE:` footer) bumps the minor version and anything else, `feat:` included, the patch. From 1.0.0 on it's standard semver: breaking → major, `feat:` → minor, anything else → patch.
 
 Every pull request and every push to `main` is also scanned for committed secrets by the **Secret scan** GitHub Action (gitleaks). Known false positives go in `.gitleaksignore`.
