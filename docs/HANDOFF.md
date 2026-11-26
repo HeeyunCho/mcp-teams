@@ -2,7 +2,7 @@
 
 ## Resume here (session of 2026-11-23, Windows PC)
 
-Repo: `HeeyunCho/mcp-teams`, checkout `C:\Orca_Project\mcp-teams`. It is the live install: every session's `teams` server runs its `dist/index.js`. `main` = `origin/main` = `9c7f1e2` (**0.3.98, extension 1.2.0**). The only worktree is the main checkout, and the only local branch is `main`. No PR from this session is open apart from this handoff's.
+Repo: `HeeyunCho/mcp-teams`, checkout `C:\Orca_Project\mcp-teams`. It is the live install: every session's `teams` server runs its `dist/index.js`. `main` = `origin/main` = `8bb0638` (merge of #263; last release **0.3.98, extension 1.2.0**, `9c7f1e2`). The only worktree is the main checkout, and the only local branch is `main`. **There are no open PRs** in the repo.
 
 **The live install is built at 0.3.97, not 0.3.98.** It was built at `d80cb19`, and `npm run build` wasn't run after #262. All running servers were still 0.3.96 at the last check (12:02Z). See "Next" for the steps.
 
@@ -69,6 +69,22 @@ Steps 1–3 of "Starting on the Windows PC" below are done. Step 4, the extensio
 
 **Edge (open-work item 2): still left.** Edge's Default profile has the sideloaded copy installed (id `iolllncadcdlmihknnomfhcadbnnignl`, path `~/.mcp-teams/extension`), but it is **disabled** in `edge://extensions` (`disable_reasons: [1]` in `Secure Preferences`). Only Chrome's copy connects. The browser tools here drive Chrome only, so the user has to switch it on and sign in to Teams in Edge.
 
+### End of the session (after #263, about 15:00–15:45Z)
+
+- **#263 merged** as `8bb0638` (this file's "Later on 2026-11-23" section). Its branch and scratchpad worktree are removed.
+- **#221 closed** as superseded by #222 and #235, with a [thank-you comment](https://github.com/HeeyunCho/mcp-teams/pull/221#issuecomment-7105684779). The contributor's branch is on their fork and was left alone.
+- **Roadmap #25 updated** for 0.3.81–0.3.98:
+  - 14 Done-table rows;
+  - a new "0.3.81 to 0.3.98" section, with each closed issue ticked next to its PR and release;
+  - still-open items: #241, #242, #173 and the Edge check;
+  - #177–#179 and #230 ticked in their older lines.
+  - Every unticked item left in #25 is an issue that is still open.
+- **Triage (read-only):** 28 open issues, all with a triage label (12 `ready-for-agent`, 15 `ready-for-human`, 1 `needs-info`), and none covered by 0.3.97 or 0.3.98. Notes:
+  - #217 (pair web store installs over native messaging) is still blocked on #123's step that turns `nativeHost` on.
+  - #195's "parse the hello's JSON once" item is still open; `src/hub.ts` moved in #262, so its line numbers are stale.
+  - #173's unticked checklist items all point at closed issues. Ticking them is the user's call; not done.
+  - #142's latest automated report describes 0.3.80 running against 0.3.96 on disk, so it is stale.
+
 ### Next
 
 1. **Put 0.3.98 into use:**
@@ -81,7 +97,8 @@ Steps 1–3 of "Starting on the Windows PC" below are done. Step 4, the extensio
    - back off repeated 1012 refusals;
    - `close()` should close connections still at their challenge;
    - decide on the optional peer-side check, or record why not.
-5. **#173:** after the rebuild and once Teams is signed in, check whether the hub's status reads still time out.
+5. **#173:** after the rebuild and once Teams is signed in, check whether the hub's status reads still time out. Ask the user whether to tick its checklist items that point at closed issues.
+6. **Optional, from the triage:** refresh #195's line references against 0.3.98 before an agent picks it up.
 
 ### Rules learned in this session
 
@@ -92,13 +109,17 @@ Steps 1–3 of "Starting on the Windows PC" below are done. Step 4, the extensio
 - **Memory:** one full `npm test` was stopped by Claude Code for low memory while a reviewer's suite also ran. Run one full suite at a time across the session and its subagents, and check free memory first (about 3.6 GB free was enough).
 - **A review round that only fixes what the reviewer listed** can go to the PR without a third review, after reading the diff yourself and rerunning both suites.
 - **A harness-locked subagent worktree:** check the lock's pid is this session's `claude.exe` (walk the parent chain), then `git worktree unlock` and `remove`. The harness branch `worktree-agent-<id>` is local only; delete it too.
+- **Closing keywords:** check PR bodies, comments, issue edits and handoff diffs with ``grep -inE '\b(close[sd]?|fix(e[sd])?|resolve[sd]?)\b[*_`: ]*#[0-9]'``. Allowing `*`, `_` and backticks between the keyword and the issue number catches a bold label followed by an issue number. Only a PR meant to close its issue names it after "Fixes".
+- **Editing #25:** fetch the body from the checkout, edit it with a script, and run `gh issue edit` only behind `test $(wc -l < f) -gt 150 && test $(wc -c < f) -gt 38000`. The body is about 197 lines and 43 KB now.
+- **Subagent reports can be stale:** a read-only subagent read #25 before this session's edit landed. Recheck anything it says about a thing you changed meanwhile.
 
 ### Suggested skills
 
-- `diagnosing-bugs`: if the `read_messages` `kind=other` failures come back, or for #173 after the rebuild.
-- `tdd`: for #241 and #242.
-- `code-review`: for the PRs from those issues (a fresh reviewer, not the author).
+- `tdd`: for #241 and #242. Run it in a subagent with `isolation: "worktree"`, and have it run `npm ci` and `npm run build` in its worktree first.
+- `code-review`: for the PRs from those issues, as a fresh subagent and never the author. For a second round, use another fresh one.
+- `diagnosing-bugs`: for #173 after the rebuild, or if the `read_messages` `kind=other` failures come back.
 - `resolving-merge-conflicts`: if an open PR goes CONFLICTING after a neighbour merges.
+- `claude-in-chrome`: only for checking Teams in Chrome. Edge can't be driven from here.
 
 ## Session of 2026-11-22/23 (Mac; written for the Windows PC)
 
