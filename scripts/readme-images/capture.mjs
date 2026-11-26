@@ -9,17 +9,25 @@
 // Writes popup-connected.png, popup-waiting.png, confirm-send.png and setup-terminal.png at device
 // scale factor 2. It drives the installed Google Chrome through Playwright (channel "chrome"), so no
 // Playwright browser download is needed. `npm run readme-images` runs this and also builds the GIF.
-import { join, dirname, resolve } from "node:path";
+import { basename, join, dirname, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repo = resolve(here, "..", "..");
 export const PNGS = ["popup-connected.png", "popup-waiting.png", "confirm-send.png", "setup-terminal.png"];
 
-// Runs in the page before its own scripts: answers each message type from `responses`.
+// Runs in the page before its own scripts: answers each message type from `responses`. A type with
+// no answer here fails (an unhandled rejection in the page, which shot() turns into a failed build),
+// as does a chrome.* call the stub doesn't have, so a change to popup.js or confirm.js can't quietly
+// give a half-rendered picture.
 function stubChrome(responses) {
   window.chrome = {
-    runtime: { sendMessage: async (m) => responses[m.type] ?? null },
+    runtime: {
+      sendMessage: async (m) => {
+        if (!(m.type in responses)) throw new Error(`readme-images stub has no answer for message type "${m.type}"`);
+        return responses[m.type];
+      },
+    },
     storage: { local: { get: async () => ({}), set: async () => {} } },
   };
 }
@@ -31,7 +39,13 @@ const confirmRequest = {
 };
 
 export async function launchChrome() {
-  const { chromium } = await import("playwright");
+  let chromium;
+  try {
+    ({ chromium } = await import("playwright"));
+  } catch (err) {
+    if (err?.code === "ERR_MODULE_NOT_FOUND") throw new Error("Playwright isn't installed: run npm install (it's a devDependency).");
+    throw err;
+  }
   try {
     return await chromium.launch({ channel: "chrome" });
   } catch (err) {
@@ -46,11 +60,23 @@ export async function launchChrome() {
 export async function capture(outDir, { extensionDir = join(repo, "extension") } = {}) {
   const browser = await launchChrome();
   try {
-    const shot = async (file, query, responses, viewport, out, selector) => {
+    // `ready`: a selector that matches only once the page has rendered its data.
+    const shot = async (file, query, responses, viewport, out, ready, selector) => {
       const page = await browser.newPage({ viewport, deviceScaleFactor: 2 });
+      const errors = [];
+      page.on("pageerror", (err) => errors.push(err.message));
+      page.on("console", (msg) => msg.type() === "error" && errors.push(msg.text()));
+      const failed = (what) => new Error(`${out} (${basename(file)}): ${what}`);
       await page.addInitScript(stubChrome, responses);
       await page.goto(pathToFileURL(file).href + query);
-      await page.waitForTimeout(400);
+      try {
+        await page.waitForSelector(ready, { timeout: 5000 });
+      } catch {
+        throw failed(errors[0] ?? `the page didn't render (no ${ready} after 5 s)`);
+      }
+      await page.evaluate(() => document.fonts.ready);
+      await page.waitForTimeout(200);
+      if (errors.length) throw failed(errors[0]);
       const path = join(outDir, out);
       // omitBackground: the page's transparent body stays transparent, so the corners outside the
       // terminal's rounded edge don't show as light wedges in GitHub's dark mode.
@@ -61,11 +87,13 @@ export async function capture(outDir, { extensionDir = join(repo, "extension") }
     };
     const popup = join(extensionDir, "popup.html");
     const popupView = { width: 344, height: 160 };
-    await shot(popup, "", { "popup:status": { state: "connected", version: "1.2.0" } }, popupView, "popup-connected.png");
-    await shot(popup, "", { "popup:status": { state: "disconnected", version: "1.2.0" } }, popupView, "popup-waiting.png");
+    await shot(popup, "", { "popup:status": { state: "connected", version: "1.2.0" } }, popupView,
+      "popup-connected.png", "#state.connected");
+    await shot(popup, "", { "popup:status": { state: "disconnected", version: "1.2.0" } }, popupView,
+      "popup-waiting.png", "#state.disconnected");
     await shot(join(extensionDir, "confirm.html"), "?id=demo", { "confirm:get": { request: confirmRequest } },
-      { width: 600, height: 470 }, "confirm-send.png");
-    await shot(join(here, "terminal.html"), "", {}, { width: 1060, height: 760 }, "setup-terminal.png", ".win");
+      { width: 600, height: 470 }, "confirm-send.png", "#main pre");
+    await shot(join(here, "terminal.html"), "", {}, { width: 1060, height: 760 }, "setup-terminal.png", ".win", ".win");
   } finally {
     await browser.close();
   }
