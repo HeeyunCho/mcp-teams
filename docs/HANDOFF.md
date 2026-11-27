@@ -1,6 +1,84 @@
-# Handoff: mcp-teams after 0.3.85–0.3.98 (#228, #227, #226, #224, #237, #243, #223, #248, #251, #249, #252, #257, #260, #262), updated 2026-11-23 on the Windows PC
+# Handoff: mcp-teams after 0.3.85–0.3.99 (#228, #227, #226, #224, #237, #243, #223, #248, #251, #249, #252, #257, #260, #262, #267), updated 2026-11-27 on the Mac
 
-## Resume here (session of 2026-11-23, Windows PC)
+## Resume here (session of 2026-11-27, Mac)
+
+Repo: `HeeyunCho/mcp-teams`, checkout `~/orca/mcp-teams` (git; scn is not used here), which has `feat/skills-over-mcp` checked out. `origin/main` = `4e91f53` (**0.3.99**, extension 1.2.0). 0.3.99 was cut by #267 (`b31583e`, `npm run readme-images` under `scripts/readme-images/`), so the "no 0.3.99" in the 2026-11-26 notes below only holds for #265.
+
+**Open PRs:**
+- **#270** (`feat/skills-over-mcp`, this session's): Skills over MCP on MCP SDK v2. Its `closingIssuesReferences` is [269]. Head `9f31cb0` when this was written, with the review fixes still to come (see below).
+- **#268** (`docs/readme-images-rebuild`, from 2026-11-26): `docs/images/setup-terminal.png` with transparent corners. CI green, `MERGEABLE`. It changes only `docs/images/**`, so it cuts no release.
+- This handoff's PR.
+
+**Worktrees:** the review fixes are being made in `.claude/worktrees/agent-a4cb4913f96d4b2cc` on `fix/skills-review-findings` (harness-locked; at `9f31cb0`, no commit yet, when this was written). Their commit goes onto #270.
+
+The Windows PC is unchanged since 2026-11-23: its live install is built at 0.3.97. Its steps are in "Next" of the 2026-11-23 section below; on the PC, pull to whatever `main` is then (0.3.99, or later with #270).
+
+### Why: Skills over MCP
+
+- Anthropic's article of 2026-11-24, ["Skills over MCP, tasks and more"](https://claude.com/resources/articles/skills-over-mcp-tasks-and-more), announced Skills over MCP (beta), Tasks (GA), Elicitation (GA) and File Uploads (soon).
+- The user chose Skills. Tasks and Elicitation are later candidates (see "Next").
+
+### #269 and #270
+
+- **#269** (`enhancement`, open): Skills over MCP: move to MCP SDK v2 and ship catch-up, meeting-recap and troubleshoot.
+- **`c67395a`** `feat(skills): Skills over MCP on MCP SDK v2 (#269)`:
+  - `@modelcontextprotocol/sdk` 1.32 → `@modelcontextprotocol/server` and `@modelcontextprotocol/client` 2.4.0, with the official `v1-to-v2` codemod. The Skills extension needs protocol 2026-07-28, which only v2 has. The codemod's `.tool()` flags in `listCache.test.ts` were false positives on the test helper `s.tool`.
+  - `serveStdio` replaces `server.connect(new StdioServerTransport())` in `src/index.ts`. The drain calls `stdio.close()`; the lifecycle wiring (signals, stdin `close`, `watchParent`, `watchStdout`) is unchanged.
+  - `safeWith` (`src/tools.ts`) maps `ctx.mcpReq.signal` onto the handlers' `{ signal }`, so cancelling still withdraws the extension call.
+  - The skills are in `skills/` (`catch-up`, `meeting-recap`, `troubleshoot`), loaded by `src/skills.ts` (`loadSkills`; a broken folder only warns). `package.json` `files` now has `skills`.
+  - Tests: `test/unit/skills.test.ts` and `test/system/skills.test.ts`. Docs: ADR 0004 (`docs/adr/0004-mcp-sdk-v2-and-skills.md`) and a README "Skills" section.
+  - The tool contract snapshot (`test/system/__snapshots__/tools.json`) changed only in `$schema` (draft-07 → 2020-12).
+  - `npm test` (Node 24) 1109 passed, and the Node 20 run (v20.20.2) 1109 passed, 89 files each.
+- **`9f31cb0`** `refactor(tools): give every tool's inputSchema as z.object(...)`, written test-first by a worktree subagent:
+  - Every `inputSchema` is `z.object(...)`, so `src/tools.ts` uses none of v2's deprecated raw-shape overloads. `loggedRegister` returns a new `RegisterTool` type; `test/unit/toolSchemas.test.ts` fails on any raw shape. The snapshot is unchanged.
+  - Node 24 and Node 20.20.2: 1111 passed each, 90 files.
+- **CI:** on `c67395a`, gitleaks, test and test-windows passed. On `9f31cb0`, gitleaks passed and test and test-windows were still running when this was written. CI on the final head (after the review fixes) is still to come.
+- No file under `extension/` changed, so the extension stays 1.2.0.
+
+### Review findings on #270
+
+A separate subagent ran a code review: no blockers in the migration, cancellation or lifecycle. These six are being fixed test-first in a follow-up commit on #270 as this is written (sha not known yet):
+
+1. 2025 clients also get the skills as `skill://` resources (`attach` runs on the legacy server too), against the README's "without the skills".
+2. `catch-up` says `olderCursor` where the argument is `cursor`.
+3. The skills-name check only matched snake_case words.
+4. `troubleshoot` puts `note` under `teams` (it is top level) and has no `teams.error` row.
+5. `^2.4.0` is not a pin, though the ADR warns `attach` is experimental. The fix is `~2.4.0` (and the ADR's "Pin … with `^2.4.0`" line with it).
+6. `@modelcontextprotocol/client` should be a devDependency (only tests and `scripts/measure-memory.mjs` use it).
+
+Noted, not being fixed:
+- No GLOSSARY "Skill" entry, and `docs/testing.md` doesn't list the skills tests.
+- No system test starts the server without `skills/`.
+- The reviewer's style smells: `attachSkills` as a middle man, and `Extra`'s name.
+
+### Next
+
+1. **#270:**
+   - Finish the review fixes, read the diff, and run `npm test` and the Node 20 run one at a time under the lock.
+   - Push to `feat/skills-over-mcp`, wait for CI (gitleaks, test, test-windows) on the final head, and check `closingIssuesReferences` is only [269].
+   - Merge with a merge commit and `--match-head-commit <full sha>`, then report the version `version.yml` cuts. Per `scripts/bump-version.mjs`, `feat:` before 1.0.0 is a **patch** bump, so expect **0.3.100** (extension stays 1.2.0), unless another release lands first.
+   - Then delete the branch, remove the subagent worktree (`git worktree unlock` first), and put `main` back in `~/orca/mcp-teams`.
+2. **Check in a real Claude Code** (v2.1.331 or later; `/mcp` should show Protocol 2026-07-28) that `/teams:catch-up` and the other two skills appear.
+3. **Startup time:** Claude Code's docs say a stdio server that takes more than 3 s to start may need an installed binary instead of `npx`. Measure the startup.
+4. **Optional, from the review:** a GLOSSARY "Skill" entry, the skills tests in `docs/testing.md`, a system test without `skills/`.
+5. **Later candidates from the same article:** Tasks for `search_transcripts`/`read_transcript`, and Elicitation as a companion to the send confirmation.
+6. **#268:** merge it (docs/images only, no release) or leave it to the user.
+7. The Windows PC's steps, #241, #242 and #173 are unchanged: see "Next" in the 2026-11-23 section below.
+
+### Rules learned in this session
+
+- **The Trail hook:** the Trail (graft) PreToolUse hook blocked a `gh issue create` whose body had "skills" next to words like "update", replying "`trail skills update` takes only the skill's name and --offer <id>". Put such text in a scratchpad file and pass it with `--body-file` (or `git commit -F`). The same goes for any Bash command carrying that text, including a heredoc that writes a file.
+- **Test lock:** parallel full suites on the Mac still run under `lockf -t 7200 <scratchpad>/npm-test.lock npm test`. The Node 20 run (`npx -y -p node@20 -c 'node --version && npm test'`) printed v20.20.2 on the Mac, unlike the Windows PC.
+- **The v1-to-v2 codemod** flags `.tool()` calls by name; check each flag against the code before changing it.
+
+### Suggested skills
+
+- `tdd`: for the review fixes, in a subagent with `isolation: "worktree"`.
+- `code-review`: a fresh subagent if the fixes go beyond the reviewer's list. A round that only fixes the listed items can go to the PR after reading the diff yourself and rerunning both suites.
+- `domain-modeling`: for the GLOSSARY "Skill" entry.
+
+## Session of 2026-11-23 (Windows PC), with notes from 2026-11-26
+
 
 Repo: `HeeyunCho/mcp-teams`, checkout `C:\Orca_Project\mcp-teams`. It is the live install: every session's `teams` server runs its `dist/index.js`. `main` = `origin/main` = `c94edb6` (merge of #265 on 2026-11-26; last release still **0.3.98, extension 1.2.0**, `9c7f1e2`). See "2026-11-26" below for #264 and #265, and for the PRs that were still open.
 
@@ -94,8 +172,8 @@ Steps 1–3 of "Starting on the Windows PC" below are done. Step 4, the extensio
   - In "Sending always needs your click": `confirm-send.png`.
   - The popup and confirmation PNGs are screenshots of the unchanged `extension/popup.html` and `confirm.html`, with `chrome.*` stubbed to return made-up data.
 - **`version.yml`** now ignores `docs/images/**` as well as `**.md`, so image-only README changes don't start a release.
-- **#265's merge commit carries `[skip ci]`**, because it changed `version.yml` itself and would otherwise have bumped and published 0.3.99 for a docs change. So there is **no 0.3.99**. The push-time secret scan was skipped for that one commit; it had passed on the PR.
-- **The image tooling was scratchpad-only in #265:** the Playwright capture script, the setup terminal page and the HyperFrames project were not committed. A follow-up PR on `chore/readme-images-script` adds them under `scripts/readme-images/` with `npm run readme-images`. Check whether it is still open.
+- **#265's merge commit carries `[skip ci]`**, because it changed `version.yml` itself and would otherwise have bumped and published 0.3.99 for a docs change. So #265 cut **no 0.3.99**; #267 did later (see the top). The push-time secret scan was skipped for that one commit; it had passed on the PR.
+- **The image tooling was scratchpad-only in #265:** the Playwright capture script, the setup terminal page and the HyperFrames project were not committed. #267 (`chore/readme-images-script`) added them under `scripts/readme-images/` with `npm run readme-images`; it merged as `b31583e` and released 0.3.99.
 
 ### Next
 
