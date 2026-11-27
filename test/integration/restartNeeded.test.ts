@@ -1,9 +1,8 @@
 // #96: a running server reports the build it runs (dist/build.json at its start), and tells when the
 // build on disk has changed under it: get_version says restartNeeded, and every tool error says to
 // reconnect. The tools against a scripted bridge, the builds in a temporary folder.
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { InMemoryTransport, McpServer } from "@modelcontextprotocol/server";
+import { Client } from "@modelcontextprotocol/client";
 import { execFileSync } from "node:child_process";
 import { copyFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";

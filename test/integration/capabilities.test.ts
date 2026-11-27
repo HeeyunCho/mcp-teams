@@ -4,9 +4,8 @@
 // for it. Real sockets: hubs and peers (ExtensionBridge), fake extensions, and old-format peers
 // and hubs scripted by hand.
 import { randomUUID } from "node:crypto";
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { InMemoryTransport, McpServer } from "@modelcontextprotocol/server";
+import { Client } from "@modelcontextprotocol/client";
 import { afterEach, describe, expect, it } from "vitest";
 import WebSocket, { WebSocketServer } from "ws";
 import { MAX_MESSAGE_BYTES, proof, type ExtensionBridge } from "../../src/bridge.js";

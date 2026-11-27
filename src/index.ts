@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 import { readFileSync } from "node:fs";
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { serveStdio } from "@modelcontextprotocol/server/stdio";
+import { McpServer } from "@modelcontextprotocol/server";
+import { attachSkills, loadTeamsSkills } from "./skills.js";
 import { DRAIN_MAX_WAIT_MS, ExtensionBridge } from "./bridge.js";
 import { BUILD_DIR, CONFIG_PATH, RUNNING_BUILD, SERVER_VERSION, loadConfig } from "./config.js";
 import { registerTools } from "./tools.js";
@@ -138,13 +139,20 @@ const icon = (file: string, mimeType: string, sizes: string[]) => ({
   mimeType,
   sizes,
 });
-const server = new McpServer({
-  name: "mcp-teams",
-  version: SERVER_VERSION,
-  icons: [icon("icon.svg", "image/svg+xml", ["any"]), icon("icon-128.png", "image/png", ["128x128"]), icon("icon-48.png", "image/png", ["48x48"])],
-});
-registerTools(server, bridge, config, { diagnostics });
-await server.connect(new StdioServerTransport());
+const icons = [icon("icon.svg", "image/svg+xml", ["any"]), icon("icon-128.png", "image/png", ["128x128"]), icon("icon-48.png", "image/png", ["48x48"])];
+// The skills in skills/ (Skills over MCP); null when they can't be loaded, and the tools serve anyway.
+const skills = await loadTeamsSkills();
+// serveStdio builds the server for the protocol era the AI app opens with: a 2026-07-28 client also
+// gets the skills extension, a 2025 one the same tools as before.
+const stdio = serveStdio(
+  () => {
+    const server = new McpServer({ name: "mcp-teams", version: SERVER_VERSION, icons });
+    registerTools(server, bridge, config, { diagnostics });
+    attachSkills(server, skills);
+    return server;
+  },
+  { onerror: (err) => toStderr("[mcp-teams] stdio:", err) },
+);
 
 // server.log stays current without tool calls (#143): every minute the hub reads the Teams state,
 // and any server checks the build on disk and logs a stalled event loop (#182; each tick starts the
@@ -164,7 +172,7 @@ const drainMs = Number.isFinite(drainMsFromEnv) && drainMsFromEnv >= 0 ? drainMs
 const ending = serverEnding({
   close: () => bridge.close(),
   drain: async () => {
-    await server.close().catch(() => {});
+    await stdio.close().catch(() => {});
     await bridge.drainAndClose(drainMs);
   },
   drainMs,

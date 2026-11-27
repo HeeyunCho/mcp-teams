@@ -173,9 +173,9 @@ if (args.includes("--hub")) {
 } else if (args.includes("--peer")) {
   const { ExtensionBridge } = await import("../dist/bridge.js");
   const { registerTools } = await import("../dist/tools.js");
-  const { McpServer } = await import("@modelcontextprotocol/sdk/server/mcp.js");
-  const { Client } = await import("@modelcontextprotocol/sdk/client/index.js");
-  const { InMemoryTransport } = await import("@modelcontextprotocol/sdk/inMemory.js");
+  const { McpServer } = await import("@modelcontextprotocol/server");
+  const { Client } = await import("@modelcontextprotocol/client");
+  const { InMemoryTransport } = await import("@modelcontextprotocol/server");
   const peer = new ExtensionBridge(PORT, TOKEN, "1.0.0");
   await peer.start();
   if (peer.role !== "peer") throw new Error(`expected to be a peer, got ${peer.role}`);

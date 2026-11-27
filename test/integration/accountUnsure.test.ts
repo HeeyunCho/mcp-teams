@@ -3,9 +3,8 @@
 // Teams shows; while that can't be known, it doesn't go out: it is refused at once, with a time to
 // retry. Reads keep working, with a note. The real worker (extension/background.js) under a fake
 // chrome, the account showing through Teams' own requests; get_version through the real tools.
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { InMemoryTransport, McpServer } from "@modelcontextprotocol/server";
+import { Client } from "@modelcontextprotocol/client";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { registerTools } from "../../src/tools.js";
 import { TOKEN } from "../helpers/bridgeHarness.js";

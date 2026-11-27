@@ -1,9 +1,8 @@
 // read_messages end to end inside one process: the real tool (src/tools.ts) over the real
 // bridge to the real service worker (extension/background.js) against a fake chatsvc.
 // Long texts are cut to max_length; the cut should happen before the bridge, not after it.
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { InMemoryTransport, McpServer } from "@modelcontextprotocol/server";
+import { Client } from "@modelcontextprotocol/client";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { registerTools } from "../../src/tools.js";
 import { bridgeHarness, TOKEN, type BridgeHarness } from "../helpers/bridgeHarness.js";

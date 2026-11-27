@@ -1,9 +1,8 @@
 // An extension older than 0.2.13 ignores {type:"cancel"}: its confirmation window stays open
 // after the AI stops waiting, so a late click would still post. send_message refuses to open
 // a window on such an extension (#22, gap 1), before anything reaches it.
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { InMemoryTransport, McpServer } from "@modelcontextprotocol/server";
+import { Client } from "@modelcontextprotocol/client";
 import { afterEach, describe, expect, it } from "vitest";
 import { WebSocketServer, type WebSocket } from "ws";
 import { proof, type ExtensionBridge } from "../../src/bridge.js";

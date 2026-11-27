@@ -1,4 +1,4 @@
-import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import type { McpServer } from "@modelcontextprotocol/server";
 import { z } from "zod";
 import { extensionSupported, isLostCall, missingFeatures, unsupportedExtension, type Capabilities, type ExtensionBridge, type ExtensionInfo } from "./bridge.js";
 import type { Config } from "./config.js";
@@ -26,8 +26,11 @@ const fail = (err: unknown, hint: string | null) => {
   return { isError: true, content: [{ type: "text" as const, text: hint ? `${message}\n${hint}` : message }] };
 };
 
-/** What the MCP SDK passes a tool besides its arguments: `signal` aborts when the AI app cancels the call. */
+/** What a handler gets besides its arguments: `signal` aborts when the AI app cancels the call. */
 type Extra = { signal?: AbortSignal };
+
+/** What the MCP SDK (v2) passes a tool besides its arguments; `mcpReq.signal` is the call's abort signal. */
+type ToolContext = { mcpReq?: { signal?: AbortSignal } };
 
 /**
  * Makes `safe`, which wraps a handler so thrown errors become MCP tool errors instead of protocol errors,
@@ -36,8 +39,9 @@ type Extra = { signal?: AbortSignal };
  * extension call.
  */
 function safeWith(hint: () => string | null, explain: (err: unknown, extra: Extra) => Promise<string | null>, failed?: (result: object, err: unknown) => void) {
-  return <A, E extends Extra = Extra>(fn: (args: A, extra: E) => Promise<ReturnType<typeof text>>) =>
-    async (args: A, extra: E) => {
+  return <A>(fn: (args: A, extra: Extra) => Promise<ReturnType<typeof text>>) =>
+    async (args: A, ctx: ToolContext) => {
+      const extra: Extra = { signal: ctx?.mcpReq?.signal };
       try {
         return await fn(args, extra);
       } catch (err) {

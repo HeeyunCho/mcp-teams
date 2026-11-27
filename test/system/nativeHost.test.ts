@@ -3,9 +3,8 @@
 // built file, so it lives with the system tests (`npm run build` first).
 // Ported from mcp-newoutlook test/system/nativehost.test.ts (commit c18139c).
 import { statSync } from "node:fs";
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { InMemoryTransport, McpServer } from "@modelcontextprotocol/server";
+import { Client } from "@modelcontextprotocol/client";
 import { afterEach, describe, expect, it } from "vitest";
 import { proof, socketTransport, type BridgeSocket, type ExtensionBridge } from "../../src/bridge.js";
 import { SERVER_VERSION } from "../../src/config.js";

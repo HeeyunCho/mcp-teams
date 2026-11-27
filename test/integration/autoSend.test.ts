@@ -2,9 +2,8 @@
 // extension itself resolved the target to the signed-in user alone and one of their own
 // addresses is allowed. The real worker (extension/background.js) under a fake chrome; the
 // tool against a scripted bridge.
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { InMemoryTransport, McpServer } from "@modelcontextprotocol/server";
+import { Client } from "@modelcontextprotocol/client";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { registerTools } from "../../src/tools.js";
 import { TOKEN } from "../helpers/bridgeHarness.js";

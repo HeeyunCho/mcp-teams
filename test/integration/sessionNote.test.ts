@@ -1,9 +1,8 @@
 // #103: with a Teams tab open but no chat session captured, get_version says which case it looks like
 // (stuck at sign-in, asleep, or a call the capture missed), from the extension's last calls. The tools
 // against a scripted bridge whose extension answers status with the given object.
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { InMemoryTransport, McpServer } from "@modelcontextprotocol/server";
+import { Client } from "@modelcontextprotocol/client";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { registerTools } from "../../src/tools.js";
 import { TOKEN } from "../helpers/bridgeHarness.js";

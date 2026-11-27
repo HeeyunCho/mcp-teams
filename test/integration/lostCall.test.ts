@@ -2,9 +2,8 @@
 // already sent. The bridge owns those messages (LOST_CALL in src/bridge.ts) and the tools ask it
 // (isLostCall), so rewording one in the bridge can't silently drop the warning.
 import { readFileSync } from "node:fs";
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { InMemoryTransport, McpServer } from "@modelcontextprotocol/server";
+import { Client } from "@modelcontextprotocol/client";
 import { describe, expect, it } from "vitest";
 import { registerTools } from "../../src/tools.js";
 import { TOKEN } from "../helpers/bridgeHarness.js";
