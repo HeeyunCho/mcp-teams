@@ -22,5 +22,5 @@ mcp-teams ships **skills**: playbooks for its tools (`skills/<name>/SKILL.md`), 
 
 ## Consequences
 
-- The skills extension's `attach` API is marked experimental in the SDK and may change in a minor release. Pin the v2 packages with `^2.4.0` and check the skills tests when updating.
+- The skills extension's `attach` API is marked experimental in the SDK and may change in a minor release. Pin the v2 packages with `~2.4.0` (patch updates only) and check the skills tests when moving to a new minor. `@modelcontextprotocol/client` is a dev dependency: only the tests and `scripts/measure-memory.mjs` use it.
 - A new skill is a folder under `skills/`. The folder name must equal the skill's `name` in its frontmatter. Add it to the lists in `test/unit/skills.test.ts` and `test/system/skills.test.ts`.

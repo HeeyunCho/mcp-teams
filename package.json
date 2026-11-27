@@ -49,12 +49,12 @@
   },
   "license": "MIT",
   "dependencies": {
+    "@modelcontextprotocol/server": "~2.4.0",
     "ws": "^8.22.0",
-    "zod": "^4.6.5",
-    "@modelcontextprotocol/server": "^2.4.0",
-    "@modelcontextprotocol/client": "^2.4.0"
+    "zod": "^4.6.5"
   },
   "devDependencies": {
+    "@modelcontextprotocol/client": "~2.4.0",
     "@types/node": "^26.6.4",
     "@types/ws": "^8.18.2",
     "playwright": "1.57.0",
