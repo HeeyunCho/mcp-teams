@@ -2,15 +2,23 @@
 
 ## Resume here (session of 2026-11-27, Mac)
 
-Repo: `HeeyunCho/mcp-teams`, checkout `~/orca/mcp-teams` (git; scn is not used here). `origin/main` = `dedb050`, release **0.3.100** (extension 1.2.0), cut by #270's merge. The release before it was **0.3.99** (`4e91f53`). 0.3.99 was cut by #267 (`b31583e`, `npm run readme-images` under `scripts/readme-images/`), so the "no 0.3.99" in the 2026-11-26 notes below only holds for #265.
+Repo: `HeeyunCho/mcp-teams`, checkout `~/orca/mcp-teams` (git; scn is not used here). `origin/main` = `38b110d` (merge of #272); the last release is **0.3.100** (`dedb050`, extension 1.2.0), cut by #270's merge. The release before it was **0.3.99** (`4e91f53`). 0.3.99 was cut by #267 (`b31583e`, `npm run readme-images` under `scripts/readme-images/`), so the "no 0.3.99" in the 2026-11-26 notes below only holds for #265.
 
 **State at the end of the session:** #270 is merged and released. Everything about it is in its PR description (https://github.com/HeeyunCho/mcp-teams/pull/270); this section doesn't repeat it.
 - **#270** (`feat/skills-over-mcp`) merged on the user's OK as `7999533` (merge commit, `--match-head-commit e6e7bd3…`; CI green, `MERGEABLE`, `closingIssuesReferences` [269]). `version.yml` run 46048316719: 1113 tests passed, `chore(release): v0.3.100` (`dedb050`), `+ mcp-teams@0.3.100` with `skills/*/SKILL.md` in the package. `npm view mcp-teams dist-tags.latest` = 0.3.100. The branch is deleted, local and remote.
-- **#268** (`docs/readme-images-rebuild`, from 2026-11-26): `docs/images/setup-terminal.png` with transparent corners. CI green, `MERGEABLE`. It changes only `docs/images/**`, so it cuts no release.
+- **#268** (`docs/readme-images-rebuild`, `setup-terminal.png` with transparent corners) merged as `bb0191a` (`--match-head-commit 694e38b…`). No release: `version.yml` ignores `docs/images/**`, only Secret scan ran. The branch is deleted on origin.
 - **#271** merged as `0b0b297` (the first version of this section, written while the review fixes were in progress). No release: `version.yml` ignores `**.md`.
-- This update's PR, if opened (branch `docs/handoff-2026-11-27b`).
+- **#272** (`docs/handoff-2026-11-27b`, the merge, release and startup notes) merged as `38b110d` (`--match-head-commit 53c021c…`). No release (`**.md`). The branch is deleted, local and remote.
+- This update's PR (branch `docs/handoff-2026-11-27c`).
 
-**Worktrees:** none (the startup-measurement worktree in the scratchpad is removed). The checkout is on `docs/handoff-2026-11-27b`, rebased on `dedb050`; local `main` = `dedb050`.
+**Worktrees:** none. The checkout is on `main` = `38b110d` once this update's PR is merged.
+
+### Skills and Claude Code on the Mac
+
+- **Through mcp-local-manager the skills don't reach Claude Code.** `teams` was registered in `~/.claude.json` as `http://127.0.0.1:47313/mcp/teams`, which is mcp-local-manager (source: `~/orca/mcp-servers`, `HeeyunCho/mcp-local-manager`). The manager runs `npx -y mcp-teams@latest` as one stdio child and opens it with its own 2025 `initialize` (`src/router.ts` ~553–596, `protocolVersion` defaults to `2025-06-18`). That pins the child's stdio connection to the 2025 era (SDK v2 `serveStdio`). The manager forwards `server/discover`, but the pinned child answers it with -32601, which is the `error=-32601` in `manager.log`. The manager also caches the child's `initialize` result and replays it to every client (`cached=1`). Over HTTP, Claude Code's first request without a session is rejected with 400 "no session" (`src/http.ts:243`), and Claude Code falls back to `initialize`. No setting in `servers.json` or `config.json` changes this. It would need a manager change: a modern child per server opened by a client's enveloped `server/discover`, stateless forwarding of 2026-07-28 requests, list caches per era, `subscriptions/listen` routing, and session-less enveloped POSTs on HTTP.
+- **Now registered direct.** `claude mcp remove teams -s user` + `claude mcp add teams -s user -- npx -y mcp-teams@latest` (stdio). The old entry is backed up in `~/.claude/backups/mcp-teams-entry-2026-11-27.json`, with the whole file in `claude.json-2026-11-27.bak` next to it. The manager lists `~/.claude.json` in its `install-http.json`, so check that it doesn't write its entry back.
+- **Checked in headless Claude Code 2.1.332** (`claude -p --mcp-config <teams only> --strict-mcp-config --debug-file …`, no Teams calls): `ListMcpResourcesTool` lists `skill://catch-up/SKILL.md`, `skill://meeting-recap/SKILL.md` and `skill://troubleshoot/SKILL.md`, with `hasResources: true`, connected in 1.8–2.1 s.
+- **Startup race:** on the first try the server took 4355 ms to start (`npx` checks the registry for `@latest`), so its `server/discover` answer came after Claude Code's probe bound. Claude Code then connected on 2025 with `hasResources: false`, logging "answered the server/discover probe after its bound … not remembering it as a legacy peer". The next starts, with a warm npm cache, made it. A slow start (cold cache, slow network, right after a release) can still land a session on 2025 without skills. An installed binary (`npm i -g mcp-teams`) or a pinned version would avoid the registry check.
 
 The Windows PC is unchanged since 2026-11-23: its live install is built at 0.3.97. Its steps are in "Next" of the 2026-11-23 section below; on the PC, pull to whatever `main` is then (0.3.100 or later).
 
@@ -49,7 +57,7 @@ Noted, not fixed:
 ### Next
 
 1. **#270:** done (see above).
-2. **Check in a real Claude Code** (v2.1.331 or later; `/mcp` should show Protocol 2026-07-28) that `/teams:catch-up` and the other two skills appear. Now possible with the published 0.3.100 (`npx -y mcp-teams@latest`). Restart the session's `teams` server first. Ask the user before any call that reads Teams data.
+2. **Check in a real Claude Code** (v2.1.331 or later; `/mcp` should show Protocol 2026-07-28) that `/teams:catch-up` and the other two skills appear. Now possible with the published 0.3.100 (`npx -y mcp-teams@latest`). Restart the session's `teams` server first. Ask the user before any call that reads Teams data. Resources: done in headless Claude Code (see "Skills and Claude Code on the Mac"). Left: `/mcp` and the `/teams:*` slash commands in an interactive session, which only the user can open.
 3. **Startup time (measured 2026-11-27 on the Mac, Node 24.22.3, warm npx cache, isolated `TEAMS_MCP_HOME`):** Claude Code's docs say a stdio server that takes more than 3 s to start may need an installed binary instead of `npx`. Medians from spawn, with the worst run in brackets:
    - #270 built, `node dist/index.js`, pinned to 2026-07-28: connected in 348 ms (398), tools listed at 686 ms (762).
    - #270 packed (`npm pack`), `npx -y --package=<tgz> mcp-teams`, pinned: connected 1219 ms (1791), tools listed 2364 ms (2992). On a 2025 connection: 1256 / 1267 ms.
@@ -58,7 +66,7 @@ Noted, not fixed:
    - To call a local tarball, use `npx -y --package=<abs path>.tgz mcp-teams`: `npx -y <abs path>.tgz` tries to run the file and fails with "Permission denied", which a client sees as the connection closing during the `server/discover` probe.
 4. **Optional, from the review:** a GLOSSARY "Skill" entry, the skills tests in `docs/testing.md`, a system test without `skills/`.
 5. **Later candidates from the same article:** Tasks for `search_transcripts`/`read_transcript`, and Elicitation as a companion to the send confirmation.
-6. **#268:** merge it (docs/images only, no release) or leave it to the user.
+6. **#268:** done (merged, no release).
 7. The Windows PC's steps, #241, #242 and #173 are unchanged: see "Next" in the 2026-11-23 section below.
 
 ### Rules learned in this session
