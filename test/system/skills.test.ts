@@ -7,7 +7,8 @@ import { StdioClientTransport } from "@modelcontextprotocol/client/stdio";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 // Skills over MCP: the built server (dist/) over stdio serves the playbooks in skills/ to a
-// 2026-07-28 client, and the same tools as before to a 2025 one.
+// 2026-07-28 client, and the same tools as before to a 2025 one, with no skills and no resources
+// (src/index.ts attaches the skills only to the instance serveStdio builds for the modern era).
 const SKILLS = ["catch-up", "meeting-recap", "troubleshoot"];
 const home = mkdtempSync(join(tmpdir(), "mcp-teams-skills-"));
 writeFileSync(join(home, "config.json"), JSON.stringify({ token: "tok", port: 0 }));
@@ -77,13 +78,37 @@ describe("skills over MCP, on a 2026-07-28 connection", () => {
 });
 
 describe("a 2025 connection", () => {
-  it("gets the tools as before", async () => {
-    const client = await connect();
-    try {
-      expect(client.getProtocolEra()).toBe("legacy");
-      expect((await client.listTools()).tools.map((t) => t.name)).toContain("send_message");
-    } finally {
-      await client.close();
-    }
+  let client: Client;
+  beforeAll(async () => {
+    client = await connect();
   }, 20_000);
+  afterAll(async () => {
+    await client?.close();
+  });
+
+  it("gets the tools as before", async () => {
+    expect(client.getProtocolEra()).toBe("legacy");
+    expect((await client.listTools()).tools.map((t) => t.name)).toContain("send_message");
+  });
+
+  it("is not offered the skills: no skills extension, no resources", () => {
+    const caps = client.getServerCapabilities() as any;
+    expect(caps?.extensions?.[SKILLS_EXTENSION_ID]).toBeUndefined();
+    expect(caps?.resources).toBeUndefined();
+  });
+
+  it("finds no SKILL.md and no skill:// template among resources", async () => {
+    // With no resources capability the request may be refused (counted as an empty list); if it is
+    // answered, it must list nothing.
+    const listed = await client.listResources().then(
+      (r) => r.resources.map((x) => x.uri),
+      () => [],
+    );
+    expect(listed).toEqual([]);
+    const templates = await client.listResourceTemplates().then(
+      (r) => r.resourceTemplates.map((x) => x.uriTemplate),
+      () => [],
+    );
+    expect(templates.filter((t) => t.startsWith("skill://"))).toEqual([]);
+  });
 });

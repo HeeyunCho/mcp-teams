@@ -142,13 +142,13 @@ const icon = (file: string, mimeType: string, sizes: string[]) => ({
 const icons = [icon("icon.svg", "image/svg+xml", ["any"]), icon("icon-128.png", "image/png", ["128x128"]), icon("icon-48.png", "image/png", ["48x48"])];
 // The skills in skills/ (Skills over MCP); null when they can't be loaded, and the tools serve anyway.
 const skills = await loadTeamsSkills();
-// serveStdio builds the server for the protocol era the AI app opens with: a 2026-07-28 client also
-// gets the skills extension, a 2025 one the same tools as before.
+// serveStdio builds the server for the protocol era the AI app opens with and passes it as `era`: a
+// 2026-07-28 client also gets the skills extension, a 2025 one the same tools as before and no skills.
 const stdio = serveStdio(
-  () => {
+  ({ era }) => {
     const server = new McpServer({ name: "mcp-teams", version: SERVER_VERSION, icons });
     registerTools(server, bridge, config, { diagnostics });
-    attachSkills(server, skills);
+    attachSkills(server, skills, era);
     return server;
   },
   { onerror: (err) => toStderr("[mcp-teams] stdio:", err) },
