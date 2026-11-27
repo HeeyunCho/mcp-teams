@@ -16,9 +16,10 @@ mcp-teams reaches Teams through a browser extension that works in the user's sig
 | `extensionSupported: false` | The extension is too old for this server | Follow the `hint`; reloading the extension usually updates it (`reload_extension`). |
 | `missingFeatures` not empty | The extension lacks features this server uses | Same: reload or update the extension. |
 | `restartNeeded: true` | mcp-teams was updated on disk, this server still runs the old code | Reconnect the server (Claude Code: `/mcp`), then reload the extension if it changed too. |
-| `teams` with a `note` | The Teams tab has no session | Follow the note: usually open or reload `teams.microsoft.com` and sign in. |
+| `teams: { error }` | The extension is connected, but reading the Teams state failed (for example it timed out) | Quote the error, check that a Teams tab is open and responding, then call `get_version` again. |
+| `note` | A Teams tab is open but has no session, or looks asleep | Follow the note: usually click into the Teams tab, or reload `teams.microsoft.com` and sign in. |
 | `teams.accountUnsure: true` | The account in the tab changed recently | Reload the Teams tab and check the signed-in account. |
-| `twoCopies` | Two copies of the extension in one browser | Remove the copy the note names. |
+| `twoCopies` | Two copies of the extension in one browser | Remove the sideloaded copy, as the `twoCopies` text says. |
 
 ## Common tool errors
 

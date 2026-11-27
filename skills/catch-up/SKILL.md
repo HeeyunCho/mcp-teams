@@ -11,7 +11,7 @@ Goal: a short, prioritized picture of what needs the user in Teams, then replies
 
 1. `list_chats` with `unread_only: true` and `refresh: true` (the list is otherwise up to a minute old, and the unread state lags). Raise `limit` if the user has been away for long.
 2. If the user named people, topics or a time window, narrow with `list_chats` `query`, or use `search_messages` (Teams search syntax works: `from:alice`, `"exact phrase"`).
-3. For each unread chat, `read_messages` with the chat id from the list and a small `limit` (10-20). Read further back with `olderCursor` only when the thread does not make sense without it.
+3. For each unread chat, `read_messages` with the chat id from the list and a small `limit` (10-20). Read further back only when the thread does not make sense without it: call `read_messages` again on the same conversation with the returned `olderCursor` as `cursor`.
 4. Channels: `list_teams` lists teams and channels but not their unread state. Read a channel only when the user asks for it or a chat points to it (`'Team/Channel'` works as `conversation`).
 
 Do not read every chat in full: a long backlog costs many Teams requests. Prefer breadth first, depth only where needed.

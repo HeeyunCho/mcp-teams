@@ -9,7 +9,7 @@ description: Recap a Microsoft Teams meeting from its transcript - who attended,
 
 - `list_meetings` with `query` (subject or organizer words) and `transcript_only: true`. If several match, ask the user which one, showing subject, time and organizer.
 - A meeting with `external: true` was hosted by another organization: its transcript is usually not readable afterwards. Say so instead of retrying.
-- `get_meeting` lists the calls held in it, newest first (a recurring meeting has one per occurrence), with who joined and whether each has a transcript. Pick the occurrence the user means (by date) and keep its `callId`.
+- `get_meeting` lists the calls held in it, newest first (a recurring meeting has one per occurrence), with who joined and whether each has a transcript. Pick the occurrence the user means (by date) and keep its `callId` to pass as `session` below.
 
 ## 2. Read the whole transcript
 
