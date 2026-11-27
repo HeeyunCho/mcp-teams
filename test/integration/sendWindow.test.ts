@@ -1,9 +1,8 @@
 // A confirmation window whose send can no longer be reported to the caller is closed, and the
 // send ends as "nothing was sent", so a late click never posts. The real worker
 // (extension/background.js, under a fake chrome) is connected to a real hub over a socket.
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { InMemoryTransport, McpServer } from "@modelcontextprotocol/server";
+import { Client } from "@modelcontextprotocol/client";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { registerTools } from "../../src/tools.js";
 import { bridgeHarness, TOKEN, type BridgeHarness } from "../helpers/bridgeHarness.js";
@@ -117,7 +116,7 @@ describe("send confirmation window", () => {
     const [a, b] = InMemoryTransport.createLinkedPair();
     await Promise.all([server.connect(a), client.connect(b)]);
     const abort = new AbortController();
-    const call = client.callTool({ name: "send_message", arguments: SEND }, undefined, { signal: abort.signal });
+    const call = client.callTool({ name: "send_message", arguments: SEND }, { signal: abort.signal });
     call.catch(() => {});
     const w = await windowOpened(fake);
     abort.abort();

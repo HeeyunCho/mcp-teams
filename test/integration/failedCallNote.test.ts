@@ -2,9 +2,8 @@
 // (stuck at sign-in, asleep, or a call the capture missed), instead of only "Reload the Teams tab". The
 // tools against a scripted bridge: its extension fails the call with the worker's own error for that
 // service, and answers status as the test says.
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { InMemoryTransport, McpServer } from "@modelcontextprotocol/server";
+import { Client } from "@modelcontextprotocol/client";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { registerTools } from "../../src/tools.js";
 import { TOKEN } from "../helpers/bridgeHarness.js";
@@ -71,7 +70,7 @@ function start(tool: string, error: string, status: Status, now: string, opts: O
   const [a, b] = InMemoryTransport.createLinkedPair();
   const args = tool === "search_messages" || tool === "find_people" ? { query: "contoso" } : {};
   const result = Promise.all([server.connect(a), c.connect(b)])
-    .then(() => c.callTool({ name: tool, arguments: args }, undefined, { signal: opts.signal }))
+    .then(() => c.callTool({ name: tool, arguments: args }, { signal: opts.signal }))
     .then((r) => {
       const { isError, content } = r as { isError?: boolean; content: { text: string }[] };
       return { isError, text: content[0].text, calls };

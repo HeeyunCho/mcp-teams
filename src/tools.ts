@@ -1,4 +1,4 @@
-import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import type { McpServer, RegisteredTool, StandardSchemaWithJSON, ToolAnnotations, ToolCallback } from "@modelcontextprotocol/server";
 import { z } from "zod";
 import { extensionSupported, isLostCall, missingFeatures, unsupportedExtension, type Capabilities, type ExtensionBridge, type ExtensionInfo } from "./bridge.js";
 import type { Config } from "./config.js";
@@ -26,8 +26,11 @@ const fail = (err: unknown, hint: string | null) => {
   return { isError: true, content: [{ type: "text" as const, text: hint ? `${message}\n${hint}` : message }] };
 };
 
-/** What the MCP SDK passes a tool besides its arguments: `signal` aborts when the AI app cancels the call. */
+/** What a handler gets besides its arguments: `signal` aborts when the AI app cancels the call. */
 type Extra = { signal?: AbortSignal };
+
+/** What the MCP SDK (v2) passes a tool besides its arguments; `mcpReq.signal` is the call's abort signal. */
+type ToolContext = { mcpReq?: { signal?: AbortSignal } };
 
 /**
  * Makes `safe`, which wraps a handler so thrown errors become MCP tool errors instead of protocol errors,
@@ -36,8 +39,9 @@ type Extra = { signal?: AbortSignal };
  * extension call.
  */
 function safeWith(hint: () => string | null, explain: (err: unknown, extra: Extra) => Promise<string | null>, failed?: (result: object, err: unknown) => void) {
-  return <A, E extends Extra = Extra>(fn: (args: A, extra: E) => Promise<ReturnType<typeof text>>) =>
-    async (args: A, extra: E) => {
+  return <A>(fn: (args: A, extra: Extra) => Promise<ReturnType<typeof text>>) =>
+    async (args: A, ctx: ToolContext) => {
+      const extra: Extra = { signal: ctx?.mcpReq?.signal };
       try {
         return await fn(args, extra);
       } catch (err) {
@@ -49,13 +53,24 @@ function safeWith(hint: () => string | null, explain: (err: unknown, extra: Extr
 }
 
 /**
+ * `server.registerTool` as v2 has it without its @deprecated raw-shape overload: `inputSchema` is a
+ * schema such as `z.object({...})`, never a plain `{ field: z.string() }` record, and the handler
+ * gets the schema's parsed arguments.
+ */
+type RegisterTool = <InputArgs extends StandardSchemaWithJSON | undefined = undefined>(
+  name: string,
+  config: { title?: string; description?: string; inputSchema?: InputArgs; annotations?: ToolAnnotations },
+  cb: ToolCallback<InputArgs>,
+) => RegisteredTool;
+
+/**
  * `server.registerTool`, with each call's end told to `diagnostics` (server.log, #143): its tool,
  * how long it took, and for a failed one the error `errorOf` has for its result. Logging never
  * delays or changes the call's answer.
  */
-function loggedRegister(server: McpServer, diagnostics: DiagnosticLog | undefined, errorOf: (result: object) => unknown): McpServer["registerTool"] {
+function loggedRegister(server: McpServer, diagnostics: DiagnosticLog | undefined, errorOf: (result: object) => unknown): RegisterTool {
   const register = server.registerTool.bind(server) as (name: string, config: unknown, cb: (...a: any[]) => Promise<any>) => any;
-  if (!diagnostics) return register as McpServer["registerTool"];
+  if (!diagnostics) return register as RegisterTool;
   const note = (name: string, started: number, err: unknown) => {
     try {
       diagnostics.toolCall(name, performance.now() - started, err);
@@ -74,7 +89,7 @@ function loggedRegister(server: McpServer, diagnostics: DiagnosticLog | undefine
         note(name, started, err);
         throw err;
       }
-    })) as McpServer["registerTool"];
+    })) as RegisterTool;
 }
 
 const conversation = z
@@ -183,7 +198,7 @@ export function registerTools(server: McpServer, bridge: ExtensionBridge, config
       title: "Version and connection status",
       description:
         "Shows the mcp-teams server version and build, the browser extension version (it has its own version line) and whether this server works with it (extensionSupported, and the missingFeatures it lacks), and whether Teams is reachable (which of its services have a session). restartNeeded: true means mcp-teams was updated on disk while this server still runs the old code: the user should reconnect it (in Claude Code: /mcp), and reload the extension if it changed too.",
-      inputSchema: {},
+      inputSchema: z.object({}),
     },
     safe(async (_, extra) => {
       let teams: unknown = null;
@@ -247,7 +262,7 @@ export function registerTools(server: McpServer, bridge: ExtensionBridge, config
       title: "Reload the browser extension",
       description:
         "Reloads the mcp-teams browser extension from disk, e.g. after an update changed it, and waits until it is connected again. Returns the extension version before and after. Refused while a send confirmation window is open.",
-      inputSchema: {},
+      inputSchema: z.object({}),
     },
     safe(async () => {
       const r = await bridge.reloadExtension();
@@ -261,12 +276,12 @@ export function registerTools(server: McpServer, bridge: ExtensionBridge, config
       title: "Show the Teams web app's API calls (diagnostic)",
       description:
         "Lists the API endpoints the open Teams tab called while recording was on: method, host, path, status, which headers were sent (names only, never values) and the auth scheme. Used to find out which API Teams uses for a feature. Recording is off until you turn it on: first call with record: true, then click through the feature in Teams, then call again to list what it called. Recording stops after 30 minutes or with record: false; what was recorded stays until clear. Records only in the sideloaded copy of the extension, whose manifest holds the Microsoft hosts the Teams tab calls; the web store copy (Chrome Web Store, Edge Add-ons) answers that it isn't available in this build.",
-      inputSchema: {
+      inputSchema: z.object({
         record: z.boolean().optional().describe("true: start recording the Teams tab's API calls (for 30 minutes); false: stop recording. Leave out to only list"),
         filter: z.string().optional().describe("Only requests whose host or path contains this text"),
         limit: z.number().int().min(1).max(400).default(100),
         clear: z.boolean().default(false).describe("Clear the recorded traffic after returning it"),
-      },
+      }),
     },
     safe(async (args, extra) => text(await bridge.call("apiTraffic", args, undefined, extra.signal))),
   );
@@ -285,10 +300,10 @@ export function registerTools(server: McpServer, bridge: ExtensionBridge, config
       title: "List teams and channels",
       description:
         "Lists the teams you are a member of, each with its channels. Group chats and meeting chats are not teams, even when they are named like one: list_chats lists those. Use 'Team/Channel' or a channel id as the conversation for read_messages and send_message. The list may be up to a minute old (see refresh). Needs a Teams tab open in the browser: without one it fails at once.",
-      inputSchema: {
+      inputSchema: z.object({
         include_ids: z.boolean().default(false).describe("Also return team and channel ids (long; 'Team/Channel' names are enough to address channels)"),
         refresh,
-      },
+      }),
     },
     safe(async ({ include_ids, refresh }, extra) => {
       type Team = { id: string; name: string; channels: { id: string; name: string }[] };
@@ -308,12 +323,12 @@ export function registerTools(server: McpServer, bridge: ExtensionBridge, config
       title: "List chats",
       description:
         "Lists your chats (1:1, group and meeting chats), most recent first, with their title (or the other members' names), the last message and whether it is unread. Returns ids for read_messages and send_message. The list may be up to a minute old, so the last message and unread state can lag; pass refresh: true for the current ones. Needs a Teams tab open in the browser: without one it fails at once.",
-      inputSchema: {
+      inputSchema: z.object({
         query: z.string().optional().describe("Only chats whose title or a member's name contains these words"),
         unread_only: z.boolean().default(false),
         limit: z.number().int().min(1).max(200).default(30),
         refresh,
-      },
+      }),
     },
     safe(async ({ query, unread_only, limit, refresh }, extra) =>
       text(await bridge.call("listChats", { query, unreadOnly: unread_only, limit, ...refreshParam(refresh) }, READ_TIMEOUT_MS, extra.signal)),
@@ -326,7 +341,7 @@ export function registerTools(server: McpServer, bridge: ExtensionBridge, config
       title: "Read a chat or channel",
       description:
         "Reads the latest messages of a chat or channel, oldest first: sender, time, text (formatting removed), files shared and reactions. In channels, replies are nested under their post (a reply whose post is on an older page comes on its own, with replyTo). To read further back, pass the returned olderCursor as `cursor` (with the same conversation and reply_to); it is there whenever older history exists, so keep paging while it is returned. A page usually costs one or two Teams requests, but one call reads at most 20 pages of Teams history: it may then return fewer messages than asked, even none, with `truncated: true`, a note and an olderCursor to go on. `before` (a time) also works but re-reads from the newest message each call, so it hits that limit sooner. Give cursor or before, not both. With reply_to, reads one channel post's whole thread.",
-      inputSchema: {
+      inputSchema: z.object({
         conversation,
         limit: z.number().int().min(1).max(200).default(30).describe("How many messages (channel: posts, each with its replies)"),
         cursor: z.string().max(4096).optional().describe("Continue from olderCursor of a previous call on the same conversation (opaque; pass it exactly as returned)"),
@@ -334,7 +349,7 @@ export function registerTools(server: McpServer, bridge: ExtensionBridge, config
         reply_to: z.string().optional().describe("Channel only: the id of a post, to read its thread"),
         include_system: z.boolean().default(false).describe("Also return events such as members added or calls started"),
         max_length: z.number().int().min(100).max(100_000).default(4_000).describe("Maximum length of each message's text"),
-      },
+      }),
     },
     safe(async ({ conversation, limit, cursor, before, reply_to, include_system, max_length }, extra) => {
       const r = await bridge.call<{ messages: Message[] }>(
@@ -359,12 +374,12 @@ export function registerTools(server: McpServer, bridge: ExtensionBridge, config
       title: "List Teams meetings",
       description:
         "Lists your Teams meetings (each scheduled meeting or recurring series has a meeting chat), most recent activity first: subject, scheduled time (for a series, its first occurrence), organizer, whether a transcript exists, and whether another organization hosted it (`external`: its chat and recordings are usually no longer readable afterwards). The list may be up to a minute old (see refresh). Use get_meeting for the calls held and who attended, read_transcript for what was said, read_messages for the meeting chat.",
-      inputSchema: {
+      inputSchema: z.object({
         query: z.string().optional().describe("Only meetings whose subject or organizer contains these words"),
         transcript_only: z.boolean().default(false).describe("Only meetings with a transcript"),
         limit: z.number().int().min(1).max(200).default(20),
         refresh,
-      },
+      }),
     },
     safe(async ({ query, transcript_only, limit, refresh }, extra) =>
       text(await bridge.call("listMeetings", { query, transcriptOnly: transcript_only, limit, ...refreshParam(refresh) }, READ_TIMEOUT_MS, extra.signal)),
@@ -377,10 +392,10 @@ export function registerTools(server: McpServer, bridge: ExtensionBridge, config
       title: "Get a meeting's calls and attendance",
       description:
         "One meeting with the calls held in it, newest first (a recurring meeting has one per occurrence): when it started and ended, who joined, the recording's link, and whether there is a transcript.",
-      inputSchema: {
+      inputSchema: z.object({
         meeting,
         limit: z.number().int().min(1).max(100).default(10).describe("Most recent calls to return"),
-      },
+      }),
     },
     safe(async (args, extra) => text(await bridge.call("getMeeting", args, READ_TIMEOUT_MS, extra.signal))),
   );
@@ -391,12 +406,12 @@ export function registerTools(server: McpServer, bridge: ExtensionBridge, config
       title: "Read a meeting transcript",
       description:
         "What was said in a meeting, from its Teams transcript: lines '[hh:mm:ss] Speaker: text', plus how long each speaker talked. Reads the latest call with a transcript unless `session` names another. Long transcripts are cut at max_length; pass the returned continueFrom as `from` to read on. Transcripts are stored in the organizer's OneDrive, so this may open OneDrive in a background tab.",
-      inputSchema: {
+      inputSchema: z.object({
         meeting,
         session: z.string().optional().describe("Which call: its callId from get_meeting, or its start date/time prefix (e.g. '2026-10-06')"),
         from: z.string().regex(/^\d{1,2}(:\d{1,2}){0,2}$/).optional().describe("Start at this point of the meeting, 'hh:mm:ss' or 'mm:ss'"),
         max_length: z.number().int().min(1000).max(200_000).default(40_000).describe("Most characters of transcript to return"),
-      },
+      }),
     },
     safe(async ({ meeting, session, from, max_length }, extra) =>
       text(await bridge.call("readTranscript", { meeting, session, from, maxLength: max_length }, READ_TIMEOUT_MS, extra.signal)),
@@ -409,12 +424,12 @@ export function registerTools(server: McpServer, bridge: ExtensionBridge, config
       title: "Search meeting transcripts",
       description:
         "Finds what was said in meetings: the transcript lines containing all words of the query, each with the line before it, from the most recent meetings with a transcript (or one meeting). Then read_transcript with `from` reads around a match.",
-      inputSchema: {
+      inputSchema: z.object({
         query: z.string().trim().min(1).describe("Words that must all appear in a line (case-insensitive)"),
         meeting: meeting.optional(),
         meetings: z.number().int().min(1).max(20).default(10).describe("How many of the most recent meetings with a transcript to search"),
         limit: z.number().int().min(1).max(200).default(30).describe("Most matching lines to return"),
-      },
+      }),
     },
     safe(async (args, extra) => text(await bridge.call("searchTranscripts", args, 300_000, extra.signal))),
   );
@@ -425,11 +440,11 @@ export function registerTools(server: McpServer, bridge: ExtensionBridge, config
       title: "Search messages",
       description:
         "Searches all your Teams chats and channels with Microsoft Search, like the search box in Teams. Returns matching messages with their conversation id (for read_messages), sender, time and a highlighted excerpt.",
-      inputSchema: {
+      inputSchema: z.object({
         query: z.string().trim().min(1).describe("Words to search for; Teams search syntax such as from:alice or \"exact phrase\" works too"),
         limit: z.number().int().min(1).max(50).default(25),
         offset: z.number().int().min(0).default(0),
-      },
+      }),
     },
     safe(async (args, extra) => text(await bridge.call("searchMessages", args, READ_TIMEOUT_MS, extra.signal))),
   );
@@ -440,10 +455,10 @@ export function registerTools(server: McpServer, bridge: ExtensionBridge, config
       title: "Find people",
       description:
         "Looks people up by name or email in your organization (and people you work with), as in Teams' people picker: name, email, job title, department, office.",
-      inputSchema: {
+      inputSchema: z.object({
         query: z.string().trim().min(1),
         limit: z.number().int().min(1).max(50).default(10),
-      },
+      }),
     },
     safe(async (args, extra) => text(await bridge.call("findPeople", args, READ_TIMEOUT_MS, extra.signal))),
   );
@@ -458,7 +473,7 @@ export function registerTools(server: McpServer, bridge: ExtensionBridge, config
         (autoSendTo.length
           ? " Exception set in the user's config (autoSendTo): a message to the user alone (their notes-to-self chat, or to: their own address) is posted without the window; the result then says autoSent."
           : ""),
-      inputSchema: {
+      inputSchema: z.object({
         conversation: conversation.optional(),
         to: z
           .array(z.string().trim().min(1))
@@ -472,7 +487,7 @@ export function registerTools(server: McpServer, bridge: ExtensionBridge, config
         text: z.string().min(1).max(28_000).describe("The message"),
         reply_to: z.string().optional().describe("Channel only: the id of the post to reply to (from read_messages). Without it, a new post is started."),
         subject: z.string().optional().describe("Channel only: a subject for a new post"),
-      },
+      }),
     },
     // A cancelled call withdraws the send: the confirmation window closes and nothing is sent.
     safe(async ({ conversation, to, title, text: message, reply_to, subject }, extra) => {

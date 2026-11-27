@@ -2,9 +2,8 @@
 // answers holds a call no longer than its timeout, and a withdrawn call stops sending
 // requests. The real worker (extension/background.js) runs under a fake chrome; the MCP
 // tools (src/tools.ts) run against a real hub.
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { InMemoryTransport, McpServer } from "@modelcontextprotocol/server";
+import { Client } from "@modelcontextprotocol/client";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { registerTools } from "../../src/tools.js";
 import { bridgeHarness, TOKEN, type BridgeHarness } from "../helpers/bridgeHarness.js";
@@ -135,7 +134,7 @@ describe("cancellation from the AI app", () => {
     const [a, b] = InMemoryTransport.createLinkedPair();
     await Promise.all([server.connect(a), client.connect(b)]);
     const abort = new AbortController();
-    const call = client.callTool({ name: tool, arguments: args }, undefined, { signal: abort.signal });
+    const call = client.callTool({ name: tool, arguments: args }, { signal: abort.signal });
     call.catch(() => {});
     await until(() => ext.requests().some((r) => r.method === method), 3_000, `${method} reaches the extension`);
     const id = ext.requests().find((r) => r.method === method)!.id;

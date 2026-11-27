@@ -44,6 +44,18 @@ Meeting data comes from the meeting chat. Teams posts an event there for each ca
 
 Teams reports the call's length, not each person's time in it, so attendance lists who joined. Meeting chats of another organization's meetings (`external: true`) usually can't be read once you've left, which is how Teams works too.
 
+### Skills
+
+mcp-teams also ships skills, which are playbooks for using the tools, through MCP's Skills extension ([Skills over MCP](https://modelcontextprotocol.io/extensions/skills/overview)). An AI app that supports skills lists them with the server. It loads a skill only when the skill is used, so skills cost no context until then. Skills update with the server, so there is nothing separate to install.
+
+| Skill | What it does |
+|---|---|
+| `catch-up` | Finds unread chats, sorts them into "needs a reply", FYI and noise, and drafts replies. Each reply is sent only after you approve it and click Send in the confirmation window. |
+| `meeting-recap` | Finds a meeting and reads its whole transcript. Writes a recap: attendees, decisions, action items with owners and open questions, each with timestamps. |
+| `troubleshoot` | Reads `get_version` and the tool errors, and says what to fix: no extension connected, no Teams session, a restart needed after an update, and other common problems. |
+
+In Claude Code, a skill's name is the server's name followed by the skill's: with the server registered as `teams`, run `/teams:meeting-recap`, or let Claude pick one when it fits. Skills need an AI app on MCP revision 2026-07-28 or later. Claude Code needs v2.1.331 or later (`/mcp` shows the protocol revision). Older AI apps get the same tools as before, without the skills. The skills live in `skills/`, one folder per skill with its `SKILL.md`.
+
 ### Compared with Microsoft's Microsoft 365 connector for Claude
 
 | | mcp-teams | Microsoft 365 connector |

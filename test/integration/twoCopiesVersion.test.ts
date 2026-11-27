@@ -1,9 +1,8 @@
 // #216: get_version says when one browser has both the sideloaded copy of the extension and a
 // web store copy (another trusted id) connected: both are served, but one is enough. The tools against
 // a scripted bridge.
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { InMemoryTransport, McpServer } from "@modelcontextprotocol/server";
+import { Client } from "@modelcontextprotocol/client";
 import { afterEach, describe, expect, it } from "vitest";
 import type { ExtensionInfo } from "../../src/bridge.js";
 import { EXTENSION_ID, SIDELOADED_ORIGIN } from "../../src/extension.js";

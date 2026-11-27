@@ -24,7 +24,7 @@
           "type": "boolean"
         }
       },
-      "$schema": "http://json-schema.org/draft-07/schema#"
+      "$schema": "https://json-schema.org/draft/2020-12/schema"
     }
   },
   "find_people": {
@@ -46,7 +46,7 @@
       "required": [
         "query"
       ],
-      "$schema": "http://json-schema.org/draft-07/schema#"
+      "$schema": "https://json-schema.org/draft/2020-12/schema"
     }
   },
   "get_meeting": {
@@ -70,7 +70,7 @@
       "required": [
         "meeting"
       ],
-      "$schema": "http://json-schema.org/draft-07/schema#"
+      "$schema": "https://json-schema.org/draft/2020-12/schema"
     }
   },
   "get_version": {
@@ -78,7 +78,7 @@
     "inputSchema": {
       "type": "object",
       "properties": {},
-      "$schema": "http://json-schema.org/draft-07/schema#"
+      "$schema": "https://json-schema.org/draft/2020-12/schema"
     }
   },
   "list_chats": {
@@ -106,7 +106,7 @@
           "type": "boolean"
         }
       },
-      "$schema": "http://json-schema.org/draft-07/schema#"
+      "$schema": "https://json-schema.org/draft/2020-12/schema"
     }
   },
   "list_meetings": {
@@ -135,7 +135,7 @@
           "type": "boolean"
         }
       },
-      "$schema": "http://json-schema.org/draft-07/schema#"
+      "$schema": "https://json-schema.org/draft/2020-12/schema"
     }
   },
   "list_teams": {
@@ -154,7 +154,7 @@
           "type": "boolean"
         }
       },
-      "$schema": "http://json-schema.org/draft-07/schema#"
+      "$schema": "https://json-schema.org/draft/2020-12/schema"
     }
   },
   "read_messages": {
@@ -203,7 +203,7 @@
       "required": [
         "conversation"
       ],
-      "$schema": "http://json-schema.org/draft-07/schema#"
+      "$schema": "https://json-schema.org/draft/2020-12/schema"
     }
   },
   "read_transcript": {
@@ -236,7 +236,7 @@
       "required": [
         "meeting"
       ],
-      "$schema": "http://json-schema.org/draft-07/schema#"
+      "$schema": "https://json-schema.org/draft/2020-12/schema"
     }
   },
   "reload_extension": {
@@ -244,7 +244,7 @@
     "inputSchema": {
       "type": "object",
       "properties": {},
-      "$schema": "http://json-schema.org/draft-07/schema#"
+      "$schema": "https://json-schema.org/draft/2020-12/schema"
     }
   },
   "search_messages": {
@@ -273,7 +273,7 @@
       "required": [
         "query"
       ],
-      "$schema": "http://json-schema.org/draft-07/schema#"
+      "$schema": "https://json-schema.org/draft/2020-12/schema"
     }
   },
   "search_transcripts": {
@@ -309,7 +309,7 @@
       "required": [
         "query"
       ],
-      "$schema": "http://json-schema.org/draft-07/schema#"
+      "$schema": "https://json-schema.org/draft/2020-12/schema"
     }
   },
   "send_message": {
@@ -356,7 +356,7 @@
       "required": [
         "text"
       ],
-      "$schema": "http://json-schema.org/draft-07/schema#"
+      "$schema": "https://json-schema.org/draft/2020-12/schema"
     }
   }
 }

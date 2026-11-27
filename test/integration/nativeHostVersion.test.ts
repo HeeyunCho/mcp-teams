@@ -2,9 +2,8 @@
 // exists (nvm, fnm moved it), so the browser can't start the host: run setup again. Only with
 // "nativeHost": true; off, get_version is as before. The tools against a scripted bridge, the
 // registrations in a temporary home.
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { InMemoryTransport, McpServer } from "@modelcontextprotocol/server";
+import { Client } from "@modelcontextprotocol/client";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
