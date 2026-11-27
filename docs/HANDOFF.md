@@ -1,17 +1,18 @@
-# Handoff: mcp-teams after 0.3.85–0.3.99 (#228, #227, #226, #224, #237, #243, #223, #248, #251, #249, #252, #257, #260, #262, #267), updated 2026-11-27 on the Mac
+# Handoff: mcp-teams after 0.3.85–0.3.100 (#228, #227, #226, #224, #237, #243, #223, #248, #251, #249, #252, #257, #260, #262, #267, #270), updated 2026-11-27 on the Mac
 
 ## Resume here (session of 2026-11-27, Mac)
 
-Repo: `HeeyunCho/mcp-teams`, checkout `~/orca/mcp-teams` (git; scn is not used here), which has `feat/skills-over-mcp` checked out. `origin/main` = `4e91f53` (**0.3.99**, extension 1.2.0). 0.3.99 was cut by #267 (`b31583e`, `npm run readme-images` under `scripts/readme-images/`), so the "no 0.3.99" in the 2026-11-26 notes below only holds for #265.
+Repo: `HeeyunCho/mcp-teams`, checkout `~/orca/mcp-teams` (git; scn is not used here). `origin/main` = `dedb050`, release **0.3.100** (extension 1.2.0), cut by #270's merge. The release before it was **0.3.99** (`4e91f53`). 0.3.99 was cut by #267 (`b31583e`, `npm run readme-images` under `scripts/readme-images/`), so the "no 0.3.99" in the 2026-11-26 notes below only holds for #265.
 
-**Open PRs:**
-- **#270** (`feat/skills-over-mcp`, this session's): Skills over MCP on MCP SDK v2. Its `closingIssuesReferences` is [269]. Head `9f31cb0` when this was written, with the review fixes still to come (see below).
+**State at the end of the session:** #270 is merged and released. Everything about it is in its PR description (https://github.com/HeeyunCho/mcp-teams/pull/270); this section doesn't repeat it.
+- **#270** (`feat/skills-over-mcp`) merged on the user's OK as `7999533` (merge commit, `--match-head-commit e6e7bd3…`; CI green, `MERGEABLE`, `closingIssuesReferences` [269]). `version.yml` run 46048316719: 1113 tests passed, `chore(release): v0.3.100` (`dedb050`), `+ mcp-teams@0.3.100` with `skills/*/SKILL.md` in the package. `npm view mcp-teams dist-tags.latest` = 0.3.100. The branch is deleted, local and remote.
 - **#268** (`docs/readme-images-rebuild`, from 2026-11-26): `docs/images/setup-terminal.png` with transparent corners. CI green, `MERGEABLE`. It changes only `docs/images/**`, so it cuts no release.
-- This handoff's PR.
+- **#271** merged as `0b0b297` (the first version of this section, written while the review fixes were in progress). No release: `version.yml` ignores `**.md`.
+- This update's PR, if opened (branch `docs/handoff-2026-11-27b`).
 
-**Worktrees:** the review fixes are being made in `.claude/worktrees/agent-a4cb4913f96d4b2cc` on `fix/skills-review-findings` (harness-locked; at `9f31cb0`, no commit yet, when this was written). Their commit goes onto #270.
+**Worktrees:** none (the startup-measurement worktree in the scratchpad is removed). The checkout is on `docs/handoff-2026-11-27b`, rebased on `dedb050`; local `main` = `dedb050`.
 
-The Windows PC is unchanged since 2026-11-23: its live install is built at 0.3.97. Its steps are in "Next" of the 2026-11-23 section below; on the PC, pull to whatever `main` is then (0.3.99, or later with #270).
+The Windows PC is unchanged since 2026-11-23: its live install is built at 0.3.97. Its steps are in "Next" of the 2026-11-23 section below; on the PC, pull to whatever `main` is then (0.3.100 or later).
 
 ### Why: Skills over MCP
 
@@ -32,34 +33,29 @@ The Windows PC is unchanged since 2026-11-23: its live install is built at 0.3.9
 - **`9f31cb0`** `refactor(tools): give every tool's inputSchema as z.object(...)`, written test-first by a worktree subagent:
   - Every `inputSchema` is `z.object(...)`, so `src/tools.ts` uses none of v2's deprecated raw-shape overloads. `loggedRegister` returns a new `RegisterTool` type; `test/unit/toolSchemas.test.ts` fails on any raw shape. The snapshot is unchanged.
   - Node 24 and Node 20.20.2: 1111 passed each, 90 files.
-- **CI:** on `c67395a`, gitleaks, test and test-windows passed. On `9f31cb0`, gitleaks passed and test and test-windows were still running when this was written. CI on the final head (after the review fixes) is still to come.
+- **Review fixes** `1944973`, `a469744`, `9f41aa8`, `e6e7bd3` (below).
+- **CI** passed on `c67395a`, `9f31cb0` and `e6e7bd3`.
 - No file under `extension/` changed, so the extension stays 1.2.0.
 
 ### Review findings on #270
 
-A separate subagent ran a code review: no blockers in the migration, cancellation or lifecycle. These six are being fixed test-first in a follow-up commit on #270 as this is written (sha not known yet):
+A separate subagent ran a code review: no blockers in the migration, cancellation or lifecycle. A worktree subagent fixed all six findings test-first (each check failed first); #270's description lists them under "Review". The one design choice: skills attach only when `serveStdio` hands the factory `era: "modern"` (`attachSkills` in `src/skills.ts`), so a 2025 client gets no resources capability and no `skill://` resources. A `server/discover` probe instance is always built as modern and discarded on a 2025 fallback. ADR 0004 decision 2 records it.
 
-1. 2025 clients also get the skills as `skill://` resources (`attach` runs on the legacy server too), against the README's "without the skills".
-2. `catch-up` says `olderCursor` where the argument is `cursor`.
-3. The skills-name check only matched snake_case words.
-4. `troubleshoot` puts `note` under `teams` (it is top level) and has no `teams.error` row.
-5. `^2.4.0` is not a pin, though the ADR warns `attach` is experimental. The fix is `~2.4.0` (and the ADR's "Pin … with `^2.4.0`" line with it).
-6. `@modelcontextprotocol/client` should be a devDependency (only tests and `scripts/measure-memory.mjs` use it).
-
-Noted, not being fixed:
+Noted, not fixed:
 - No GLOSSARY "Skill" entry, and `docs/testing.md` doesn't list the skills tests.
 - No system test starts the server without `skills/`.
 - The reviewer's style smells: `attachSkills` as a middle man, and `Extra`'s name.
 
 ### Next
 
-1. **#270:**
-   - Finish the review fixes, read the diff, and run `npm test` and the Node 20 run one at a time under the lock.
-   - Push to `feat/skills-over-mcp`, wait for CI (gitleaks, test, test-windows) on the final head, and check `closingIssuesReferences` is only [269].
-   - Merge with a merge commit and `--match-head-commit <full sha>`, then report the version `version.yml` cuts. Per `scripts/bump-version.mjs`, `feat:` before 1.0.0 is a **patch** bump, so expect **0.3.100** (extension stays 1.2.0), unless another release lands first.
-   - Then delete the branch, remove the subagent worktree (`git worktree unlock` first), and put `main` back in `~/orca/mcp-teams`.
-2. **Check in a real Claude Code** (v2.1.331 or later; `/mcp` should show Protocol 2026-07-28) that `/teams:catch-up` and the other two skills appear.
-3. **Startup time:** Claude Code's docs say a stdio server that takes more than 3 s to start may need an installed binary instead of `npx`. Measure the startup.
+1. **#270:** done (see above).
+2. **Check in a real Claude Code** (v2.1.331 or later; `/mcp` should show Protocol 2026-07-28) that `/teams:catch-up` and the other two skills appear. Now possible with the published 0.3.100 (`npx -y mcp-teams@latest`). Restart the session's `teams` server first. Ask the user before any call that reads Teams data.
+3. **Startup time (measured 2026-11-27 on the Mac, Node 24.22.3, warm npx cache, isolated `TEAMS_MCP_HOME`):** Claude Code's docs say a stdio server that takes more than 3 s to start may need an installed binary instead of `npx`. Medians from spawn, with the worst run in brackets:
+   - #270 built, `node dist/index.js`, pinned to 2026-07-28: connected in 348 ms (398), tools listed at 686 ms (762).
+   - #270 packed (`npm pack`), `npx -y --package=<tgz> mcp-teams`, pinned: connected 1219 ms (1791), tools listed 2364 ms (2992). On a 2025 connection: 1256 / 1267 ms.
+   - Published 0.3.99 over `npx -y mcp-teams@0.3.99` (2025 connection only, as it's SDK v1): 1493 / 1503 ms.
+   - The first `tools/list` on a 2026-07-28 connection costs ~320 ms on the server side (a raw `tools/list` request shows it too, so the client's validators aren't the cause); later ones take ~5 ms, and on a 2025 connection it's ~10 ms. Likely the lazy zod → JSON Schema 2020-12 conversion. Not fixed: it's paid once and the total stays under 3 s with a warm cache. A cold cache (the first start after a release) adds the download.
+   - To call a local tarball, use `npx -y --package=<abs path>.tgz mcp-teams`: `npx -y <abs path>.tgz` tries to run the file and fails with "Permission denied", which a client sees as the connection closing during the `server/discover` probe.
 4. **Optional, from the review:** a GLOSSARY "Skill" entry, the skills tests in `docs/testing.md`, a system test without `skills/`.
 5. **Later candidates from the same article:** Tasks for `search_transcripts`/`read_transcript`, and Elicitation as a companion to the send confirmation.
 6. **#268:** merge it (docs/images only, no release) or leave it to the user.
@@ -73,9 +69,11 @@ Noted, not being fixed:
 
 ### Suggested skills
 
-- `tdd`: for the review fixes, in a subagent with `isolation: "worktree"`.
-- `code-review`: a fresh subagent if the fixes go beyond the reviewer's list. A round that only fixes the listed items can go to the PR after reading the diff yourself and rerunning both suites.
+- `superpowers:verification-before-completion`: before reporting #270's merge and release, check the merge commit, the `version.yml` run and the npm version yourself.
+- `tdd`: for the optional review items (the system test without `skills/`) and for Tasks or Elicitation, in a subagent with `isolation: "worktree"`.
 - `domain-modeling`: for the GLOSSARY "Skill" entry.
+- `code-review`: in a fresh subagent, on any follow-up PR before it is merged.
+- `superpowers:brainstorming`: before starting Tasks or Elicitation, which change how calls behave for the user.
 
 ## Session of 2026-11-23 (Windows PC), with notes from 2026-11-26
 
